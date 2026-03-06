@@ -112,6 +112,11 @@ jobs:
           ls -la StrikeHub-*.dmg
           hdiutil verify StrikeHub-*.dmg
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strikehub-dmg-${{ matrix.arch }}
+          path: StrikeHub-*.dmg
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
