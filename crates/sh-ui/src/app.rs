@@ -9,7 +9,7 @@ use sh_core::{
     IpcConnectorRunner, MatrixWsClient, WsRelay, builtin_manifests, fetch_connector_apps,
     fetch_tenant_id, start_oauth_flow_with,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -193,6 +193,10 @@ pub fn App() -> Element {
     // Runners keyed by connector id
     let mut runners: Signal<HashMap<String, IpcConnectorRunner>> = use_signal(HashMap::new);
 
+    // Mutex to prevent race conditions when starting connectors
+    let starting_lock: Signal<Arc<tokio::sync::Mutex<HashSet<String>>>> =
+        use_signal(|| Arc::new(tokio::sync::Mutex::new(HashSet::new())));
+
     // Setup state: builtin connectors with enable toggles
     let setup_connectors: Signal<Vec<SetupConnector>> = use_signal(move || {
         let cfg = hub_config.read();
@@ -307,15 +311,33 @@ pub fn App() -> Element {
                     }
                     continue;
                 }
+
+                // Check if already running
                 if runners.read().contains_key(&conn.id) {
                     continue;
                 }
+
+                // Acquire lock and check if another task is already starting this connector
+                let lock = starting_lock.read().clone();
+                let mut starting = lock.lock().await;
+
+                // Double-check after acquiring lock (another task may have started it)
+                if starting.contains(&conn.id) || runners.read().contains_key(&conn.id) {
+                    continue;
+                }
+
+                // Mark as starting to prevent race condition
+                starting.insert(conn.id.clone());
+                drop(starting); // Release lock early
 
                 let Some(ref binary) = conn.binary else {
                     tracing::warn!(
                         "IPC connector '{}' has no binary configured, skipping",
                         conn.id
                     );
+                    // Remove from starting set
+                    let mut starting = lock.lock().await;
+                    starting.remove(&conn.id);
                     continue;
                 };
                 let binary_path = std::path::PathBuf::from(binary);
@@ -352,10 +374,20 @@ pub fn App() -> Element {
                         // and the runners guard must already have the entry to prevent
                         // double-spawning.
                         runners.write().insert(conn.id.clone(), runner);
+
+                        // Remove from starting set now that it's running
+                        let mut starting = lock.lock().await;
+                        starting.remove(&conn.id);
+                        drop(starting);
+
                         connectors.set(updated);
                     }
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
+
+                        // Remove from starting set on failure
+                        let mut starting = lock.lock().await;
+                        starting.remove(&conn.id);
                     }
                 }
             }
