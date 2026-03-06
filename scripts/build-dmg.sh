@@ -108,6 +108,10 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
+# Ad-hoc sign the bundle so Gatekeeper sees a consistent signature
+# (the linker-applied signature on the binary doesn't cover bundle resources)
+codesign --force --deep --sign - "$APP_DIR"
+
 # Create DMG staging area with app and Applications symlink
 mkdir -p "$STAGING_DIR"
 cp -R "$APP_DIR" "$STAGING_DIR/"
