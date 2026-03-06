@@ -158,9 +158,7 @@ pub fn App() -> Element {
         // The request URI path is e.g. /connector/kubestudio/liveview
         let uri = request.uri().clone();
         let path = uri.path();
-        let stripped = path
-            .strip_prefix("/connector/")
-            .unwrap_or(path);
+        let stripped = path.strip_prefix("/connector/").unwrap_or(path);
         // Preserve query string for the bridge
         let connector_uri = match uri.query() {
             Some(q) => format!("connector://{}?{}", stripped, q),
