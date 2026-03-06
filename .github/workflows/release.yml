@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (build only, no publish)'
+        required: true
+        default: true
+        type: boolean
 
 # Only run in the origin repo, never on forks
 run-name: "Release ${{ github.ref_name }} (org-only)"
@@ -47,7 +54,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -363,6 +370,7 @@ jobs:
           ls -la release/
 
       - name: Create Release
+        if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
         uses: softprops/action-gh-release@v2
         with:
           files: release/*

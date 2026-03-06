@@ -70,6 +70,48 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  build-dmg:
+    name: Build DMG (${{ matrix.arch }})
+    if: github.repository_owner == 'Strike48-public'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - os: macos-14
+            arch: aarch64
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-dmg
+
+      - name: Install rsvg-convert
+        run: brew install librsvg
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
+
+      - name: Build DMG
+        run: |
+          mkdir -p dist
+          chmod +x scripts/build-dmg.sh
+          ./scripts/build-dmg.sh ci-test ${{ matrix.arch }}
+
+      - name: Verify DMG
+        run: |
+          ls -la StrikeHub-*.dmg
+          hdiutil verify StrikeHub-*.dmg
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
