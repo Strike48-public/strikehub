@@ -12,7 +12,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: strike48/strikehub
+  IMAGE_NAME: ${{ github.repository }}
   PICK_VERSION: v0.1.0
   KUBESTUDIO_VERSION: v0.1.0
 
@@ -220,7 +220,7 @@ jobs:
             ### Docker
 
             ```bash
-            docker pull ghcr.io/strike48/strikehub:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.ref_name }}
             ```
 
             ### Helm
