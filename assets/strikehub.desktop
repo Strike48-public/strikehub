@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=StrikeHub
+GenericName=StrikeHub
+Comment=StrikeHub Desktop Application - Unified Strike48 Connector Hub
+Icon=strikehub
+Exec=strikehub
+Terminal=false
+Categories=Development;Utility;Network;
+StartupNotify=true
+Keywords=Strike48;Kubernetes;DevOps;Connectors;

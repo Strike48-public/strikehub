@@ -35,7 +35,7 @@ pub fn ContentArea(
     let url = match active_transport {
         Some(ConnectorTransport::Ipc) => active_id
             .as_ref()
-            .map(|id| format!("connector://{}/liveview", id)),
+            .map(|id| format!("dioxus://index.html/connector/{}/liveview", id)),
         _ => match (proxy_port, active_port) {
             (Some(pp), Some(cp)) => Some(format!("http://127.0.0.1:{}/c/{}/liveview", pp, cp)),
             _ => active_url.clone(),

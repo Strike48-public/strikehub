@@ -9,7 +9,7 @@ use sh_core::{
     IpcConnectorRunner, MatrixWsClient, WsRelay, builtin_manifests, fetch_connector_apps,
     fetch_tenant_id, start_oauth_flow_with,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -150,11 +150,52 @@ pub fn App() -> Element {
     // Dev mode: show the "Add Connector" form in Settings only when STRIKEHUB_DEV is set.
     let dev_mode = use_signal(|| std::env::var("STRIKEHUB_DEV").is_ok());
 
+    // Register a "connector" asset handler so that connector content can be served
+    // through the dioxus:// scheme (which passes the hardcoded navigation handler).
+    // URLs like dioxus://index.html/connector/{id}/liveview are routed here.
+    #[cfg(feature = "desktop")]
+    dioxus::desktop::use_asset_handler("connector", move |request, responder| {
+        // The request URI path is e.g. /connector/kubestudio/liveview
+        let uri = request.uri().clone();
+        let path = uri.path();
+        let stripped = path.strip_prefix("/connector/").unwrap_or(path);
+        // Preserve query string for the bridge
+        let connector_uri = match uri.query() {
+            Some(q) => format!("connector://{}?{}", stripped, q),
+            None => format!("connector://{}", stripped),
+        };
+
+        tokio::spawn(async move {
+            let Some(state) = crate::get_bridge_state() else {
+                let resp = http::Response::builder()
+                    .status(500)
+                    .body(Vec::from("bridge state not initialised"))
+                    .unwrap();
+                responder.respond(resp);
+                return;
+            };
+
+            let (status, headers, body) =
+                sh_core::bridge::handle_bridge_request(state, &connector_uri).await;
+
+            let mut builder = http::Response::builder().status(status);
+            for (k, v) in &headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            let resp = builder.body(body).unwrap();
+            responder.respond(resp);
+        });
+    });
+
     // Shared hover state between sidebar and content tiles
     let mut hovered_id = use_signal(|| None::<String>);
 
     // Runners keyed by connector id
     let mut runners: Signal<HashMap<String, IpcConnectorRunner>> = use_signal(HashMap::new);
+
+    // Mutex to prevent race conditions when starting connectors
+    let starting_lock: Signal<Arc<tokio::sync::Mutex<HashSet<String>>>> =
+        use_signal(|| Arc::new(tokio::sync::Mutex::new(HashSet::new())));
 
     // Setup state: builtin connectors with enable toggles
     let setup_connectors: Signal<Vec<SetupConnector>> = use_signal(move || {
@@ -197,7 +238,7 @@ pub fn App() -> Element {
             };
 
             // Start ConnectorProxy immediately (works with empty token;
-            // token is read dynamically on each request)
+            // token is read dynamically on each request).
             match ConnectorProxy::start(auth.clone()).await {
                 Ok(p) => {
                     proxy_port.set(Some(p.port()));
@@ -240,9 +281,11 @@ pub fn App() -> Element {
 
     // Auto-start builtin connectors that were enabled from a previous session.
     // Register custom IPC connectors in bridge state (they're externally managed).
-    // Use peek() to avoid subscribing — this runs once on mount only.
+    // Uses read() so the effect re-runs when connectors are populated (e.g. after
+    // first-launch setup completes via sync_config). The contains_key guard on
+    // runners prevents double-starting connectors that are already running.
     use_effect(move || {
-        let current = connectors.peek().clone();
+        let current = connectors.read().clone();
         spawn(async move {
             let mut env_vars = matrix_env_vars();
             // Override STRIKE48_API_URL so the connector's chat panel routes
@@ -268,15 +311,33 @@ pub fn App() -> Element {
                     }
                     continue;
                 }
+
+                // Check if already running
                 if runners.read().contains_key(&conn.id) {
                     continue;
                 }
+
+                // Acquire lock and check if another task is already starting this connector
+                let lock = starting_lock.read().clone();
+                let mut starting = lock.lock().await;
+
+                // Double-check after acquiring lock (another task may have started it)
+                if starting.contains(&conn.id) || runners.read().contains_key(&conn.id) {
+                    continue;
+                }
+
+                // Mark as starting to prevent race condition
+                starting.insert(conn.id.clone());
+                drop(starting); // Release lock early
 
                 let Some(ref binary) = conn.binary else {
                     tracing::warn!(
                         "IPC connector '{}' has no binary configured, skipping",
                         conn.id
                     );
+                    // Remove from starting set
+                    let mut starting = lock.lock().await;
+                    starting.remove(&conn.id);
                     continue;
                 };
                 let binary_path = std::path::PathBuf::from(binary);
@@ -308,11 +369,25 @@ pub fn App() -> Element {
                                 }
                             }
                         }
-                        connectors.set(updated);
+                        // Insert into runners BEFORE updating connectors —
+                        // connectors.set() re-triggers this effect (read subscription),
+                        // and the runners guard must already have the entry to prevent
+                        // double-spawning.
                         runners.write().insert(conn.id.clone(), runner);
+
+                        // Remove from starting set now that it's running
+                        let mut starting = lock.lock().await;
+                        starting.remove(&conn.id);
+                        drop(starting);
+
+                        connectors.set(updated);
                     }
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
+
+                        // Remove from starting set on failure
+                        let mut starting = lock.lock().await;
+                        starting.remove(&conn.id);
                     }
                 }
             }
@@ -554,6 +629,13 @@ pub fn App() -> Element {
     };
 
     let on_select = move |id: String| {
+        // If setup hasn't been completed yet, sync config first to populate
+        // the connectors signal from the manifest defaults.
+        if !hub_config.read().setup_complete {
+            let sc = setup_connectors.read().clone();
+            let cc = custom_connectors.read().clone();
+            sync_config(&sc, &cc, &mut hub_config, &mut connectors);
+        }
         active_id.set(Some(id));
         hovered_id.set(None);
         show_setup.set(false);

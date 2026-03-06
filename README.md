@@ -39,6 +39,19 @@ A native desktop shell that unifies Strike48 connector applications into a singl
 - **macOS or Linux**
 - **Matrix server** (optional, for authentication features)
 
+### Quick Start (Linux AppImage)
+
+```bash
+# Build AppImage with all connectors included
+./scripts/build-and-run-appimage.sh
+```
+
+This creates a portable AppImage that includes:
+- StrikeHub desktop application
+- KubeStudio connector (`ks-connector`)
+- Pick connector (`pentest-agent`)
+- Default configuration for Strike48 API
+
 ### Build from Source
 
 ```bash
@@ -53,6 +66,25 @@ cargo run --features desktop
 cargo build --release --features desktop
 ./target/release/strikehub
 ```
+
+Note: When running from source, you'll need to install the connectors separately or build them in sibling directories. See the [Connector Setup](#connector-setup) section.
+
+## Connector Setup
+
+### Automatic (CI/AppImage)
+
+**YES, the CI automatically downloads and bundles the connectors!** When you:
+- Push a tag to trigger a release → CI downloads connectors and includes them
+- Build the AppImage locally with our scripts → It downloads them for you
+
+The `build-appimage-with-connectors.sh` script **automatically downloads** the connectors from GitHub releases.
+
+### Manual Installation (if running from source)
+
+If you're running the raw binary (not AppImage), you need the connectors in one of these locations:
+1. Same directory as `strikehub` binary
+2. In your PATH
+3. Built in sibling workspace directories (for development)
 
 ## Configuration
 
