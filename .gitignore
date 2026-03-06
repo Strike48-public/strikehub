@@ -1,3 +1,22 @@
 /target
 Cargo.lock
 .mise.local.toml
+
+# Environment configuration
+.env
+.env.local
+
+# AppImage build artifacts
+*.AppImage
+*.AppDir/
+squashfs-root/
+linuxdeploy*.AppImage
+linuxdeploy-plugin-*.sh
+appimagetool*.AppImage
+
+# Downloaded connectors
+/dist/
+
+# Build artifacts in root
+strikehub.svg
+strikehub.png

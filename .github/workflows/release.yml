@@ -179,9 +179,87 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/*
 
+  appimage:
+    name: Build AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            file \
+            wget \
+            imagemagick \
+            libfuse2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu-appimage
+
+      - name: Build binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu --no-default-features --features desktop
+
+      - name: Prepare dist directory
+        run: mkdir -p dist
+
+      # Download connectors (best-effort)
+      - name: Download pentest-agent
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ${{ env.PICK_VERSION }} \
+            --repo Strike48-public/pick \
+            --pattern "pentest-agent-linux-x86_64.tar.gz" \
+            --dir dist
+          cd dist && tar -xzf pentest-agent-linux-x86_64.tar.gz \
+            && rm -f pentest-agent-linux-x86_64.tar.gz
+
+      - name: Download ks-connector
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ${{ env.KUBESTUDIO_VERSION }} \
+            --repo Strike48-public/kubestudio \
+            --pattern "ks-connector-linux-x86_64.tar.gz" \
+            --dir dist
+          cd dist && tar -xzf ks-connector-linux-x86_64.tar.gz \
+            && rm -f ks-connector-linux-x86_64.tar.gz
+
+      - name: Make build script executable
+        run: chmod +x scripts/build-appimage.sh
+
+      - name: Build AppImage
+        run: |
+          TAG_VERSION="${{ github.ref_name }}"
+          VERSION="${TAG_VERSION#v}"  # Remove 'v' prefix if present
+          ./scripts/build-appimage.sh "$VERSION" x86_64
+
+      - name: Generate checksum
+        run: |
+          sha256sum StrikeHub-*.AppImage > strikehub-linux-x86_64.AppImage.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strikehub-appimage
+          path: |
+            StrikeHub-*.AppImage
+            *.AppImage.sha256
+
   release:
     name: Release
-    needs: [build, docker]
+    needs: [build, docker, appimage]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -189,7 +267,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: strikehub-*
 
       - name: Prepare assets
         run: |
@@ -212,10 +289,13 @@ jobs:
             | macOS | Apple Silicon | `strikehub-darwin-aarch64.tar.gz` |
             | macOS | Intel | `strikehub-darwin-x86_64.tar.gz` |
             | Linux | x86_64 | `strikehub-linux-x86_64.tar.gz` |
+            | Linux AppImage | x86_64 | `StrikeHub-*.AppImage` |
             | Windows | x86_64 | `strikehub-windows-x86_64.zip` |
 
             Each archive includes bundled connectors (`ks-connector` and `pentest-agent`).
             Windows includes `ks-connector` only — `pentest-agent` is not yet available for Windows.
+
+            The AppImage is a portable, self-contained package that runs on most Linux distributions without installation.
 
             ### Docker
 
