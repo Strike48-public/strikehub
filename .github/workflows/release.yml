@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+# Only run in the origin repo, never on forks
+run-name: "Release ${{ github.ref_name }} (org-only)"
+
 permissions:
   contents: write
   packages: write
@@ -19,6 +22,7 @@ env:
 jobs:
   docker:
     name: Docker Image
+    if: github.repository_owner == 'Strike48-public'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +55,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
+    if: github.repository_owner == 'Strike48-public'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -181,6 +186,7 @@ jobs:
 
   appimage:
     name: Build AppImage
+    if: github.repository_owner == 'Strike48-public'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -257,9 +263,91 @@ jobs:
             StrikeHub-*.AppImage
             *.AppImage.sha256
 
+  dmg:
+    name: Build DMG (${{ matrix.arch }})
+    if: github.repository_owner == 'Strike48-public'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            arch: x86_64
+            target: x86_64-apple-darwin
+            connector_suffix: darwin-x86_64
+          - os: macos-14
+            arch: aarch64
+            target: aarch64-apple-darwin
+            connector_suffix: darwin-aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-dmg
+
+      - name: Install rsvg-convert
+        run: brew install librsvg
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
+
+      - name: Prepare dist directory
+        run: mkdir -p dist
+
+      # Download connectors (best-effort)
+      - name: Download pentest-agent
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ${{ env.PICK_VERSION }} \
+            --repo Strike48-public/pick \
+            --pattern "pentest-agent-${{ matrix.connector_suffix }}.tar.gz" \
+            --dir dist
+          cd dist && tar -xzf pentest-agent-${{ matrix.connector_suffix }}.tar.gz \
+            && rm -f pentest-agent-${{ matrix.connector_suffix }}.tar.gz
+
+      - name: Download ks-connector
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ${{ env.KUBESTUDIO_VERSION }} \
+            --repo Strike48-public/kubestudio \
+            --pattern "ks-connector-${{ matrix.connector_suffix }}.tar.gz" \
+            --dir dist
+          cd dist && tar -xzf ks-connector-${{ matrix.connector_suffix }}.tar.gz \
+            && rm -f ks-connector-${{ matrix.connector_suffix }}.tar.gz
+
+      - name: Make build script executable
+        run: chmod +x scripts/build-dmg.sh
+
+      - name: Build DMG
+        run: |
+          TAG_VERSION="${{ github.ref_name }}"
+          VERSION="${TAG_VERSION#v}"
+          ./scripts/build-dmg.sh "$VERSION" "${{ matrix.arch }}"
+
+      - name: Generate checksum
+        run: |
+          shasum -a 256 StrikeHub-*.dmg > strikehub-darwin-${{ matrix.arch }}.dmg.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strikehub-dmg-${{ matrix.arch }}
+          path: |
+            StrikeHub-*.dmg
+            *.dmg.sha256
+
   release:
     name: Release
-    needs: [build, docker, appimage]
+    if: github.repository_owner == 'Strike48-public'
+    needs: [build, docker, appimage, dmg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -286,6 +374,8 @@ jobs:
 
             | Platform | Architecture | Download |
             |----------|--------------|----------|
+            | macOS DMG | Apple Silicon | `StrikeHub-*-aarch64.dmg` |
+            | macOS DMG | Intel | `StrikeHub-*-x86_64.dmg` |
             | macOS | Apple Silicon | `strikehub-darwin-aarch64.tar.gz` |
             | macOS | Intel | `strikehub-darwin-x86_64.tar.gz` |
             | Linux | x86_64 | `strikehub-linux-x86_64.tar.gz` |
