@@ -1,0 +1,589 @@
+/// StrikeHub uses a single neutral-gray chrome that blends with both
+/// light and dark connector apps rendered inside iframes.
+/// No light/dark toggle — the hub shell is always the same mid-gray.
+pub fn theme_css() -> &'static str {
+    r#"
+        :root {
+            /* Neutral mid-gray palette — works next to light or dark apps */
+            --chrome:            oklch(0.25 0 0);
+            --chrome-foreground: oklch(0.88 0 0);
+            --chrome-muted:      oklch(0.55 0 0);
+            --chrome-border:     oklch(0.32 0 0);
+            --chrome-hover:      oklch(0.30 0 0);
+            --chrome-active:     oklch(0.35 0 0);
+            --chrome-active-fg:  oklch(0.96 0 0);
+            --chrome-input-bg:   oklch(0.20 0 0);
+            --chrome-card:       oklch(0.22 0 0);
+            --chrome-card-border:oklch(0.32 0 0);
+
+            --accent:            oklch(0.62 0.20 250);
+            --accent-foreground:  oklch(0.98 0 0);
+
+            --success:  oklch(0.72 0.18 145);
+            --warning:  oklch(0.80 0.13 85);
+            --destructive: oklch(0.55 0.22 28);
+
+            --radius: 0.5rem;
+            --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+            --font-mono: "Cascadia Code", "Fira Code", monospace;
+            --font-size: 13px;
+
+            --rail-width: 56px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        *::-webkit-scrollbar { display: none; }
+        * { scrollbar-width: none; }
+
+        body {
+            font-family: var(--font-sans);
+            font-size: var(--font-size);
+            background: var(--chrome);
+            color: var(--chrome-foreground);
+            line-height: 1.5;
+        }
+    "#
+}
+
+/// No theme switching needed — hub is always neutral.
+pub fn theme_init_script() -> &'static str {
+    ""
+}
+
+pub fn app_css() -> &'static str {
+    r#"
+        .app-shell {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .app-container {
+            display: flex;
+            flex: 1;
+            min-height: 0;
+            outline: none;
+        }
+
+        /* ── Sidebar Icon Rail ── */
+        .sidebar-rail {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: var(--rail-width);
+            flex-shrink: 0;
+            background: oklch(0.18 0 0);
+            padding: 10px 0;
+            user-select: none;
+            overflow: hidden;
+        }
+
+        .rail-logo {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            background: oklch(0.25 0 0);
+            margin-bottom: 4px;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+
+        .rail-separator {
+            width: 24px;
+            height: 1px;
+            background: var(--chrome-border);
+            margin: 6px 0;
+            flex-shrink: 0;
+        }
+
+        .rail-connectors {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            padding: 4px 0;
+            overflow-y: auto;
+            width: 100%;
+        }
+
+        .rail-item {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.15s, border-radius 0.15s;
+        }
+
+        .rail-item:hover,
+        .rail-item.hovered {
+            background: var(--chrome-hover);
+            border-radius: 10px;
+        }
+
+        .rail-item.active {
+            background: var(--accent);
+            border-radius: 10px;
+        }
+
+        .rail-item.active .rail-icon .connector-icon {
+            color: var(--accent-foreground);
+        }
+
+        .rail-icon-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .rail-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--chrome-muted);
+            transition: color 0.15s;
+        }
+
+        .rail-item:hover .rail-icon,
+        .rail-item.hovered .rail-icon {
+            color: var(--chrome-foreground);
+        }
+
+        .rail-item.active .rail-icon {
+            color: var(--accent-foreground);
+        }
+
+        .rail-status-dot {
+            position: absolute;
+            bottom: -2px;
+            right: -2px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            border: 2px solid oklch(0.18 0 0);
+        }
+
+        .rail-status-dot.online  { background: var(--success); }
+        .rail-status-dot.offline { background: var(--chrome-muted); opacity: 0.3; }
+        .rail-status-dot.checking { background: var(--warning); }
+
+
+        /* ── Rail footer actions ── */
+        .rail-footer {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            padding-top: 6px;
+            border-top: 1px solid var(--chrome-border);
+            margin-top: auto;
+            width: 100%;
+        }
+
+        .rail-action {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            cursor: pointer;
+            color: var(--chrome-muted);
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .rail-action:hover {
+            background: var(--chrome-hover);
+            color: var(--chrome-foreground);
+        }
+
+        .rail-action.signed-in {
+            color: var(--success);
+        }
+
+        .rail-action.signed-in:hover {
+            color: var(--chrome-foreground);
+        }
+
+        .rail-action.signing-in {
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        .rail-settings {
+            color: var(--chrome-muted);
+        }
+
+        .rail-settings.active {
+            background: var(--accent);
+            border-radius: 10px;
+            color: var(--accent-foreground);
+        }
+
+        /* ── Content area ── */
+        .content-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            background: var(--chrome);
+            overflow: hidden;
+        }
+
+        .content-frame-wrapper {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .content-webview {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        .content-empty, .content-offline, .setup-view {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            color: var(--chrome-muted);
+        }
+
+        .content-empty h2, .setup-view h2, .content-offline h3 {
+            font-weight: 600;
+            color: var(--chrome-foreground);
+        }
+
+        .content-empty h2, .setup-view h2 { font-size: 18px; margin-bottom: 8px; }
+        .content-offline h3 { font-size: 15px; }
+
+        .content-offline p {
+            font-size: 13px;
+            max-width: 360px;
+            text-align: center;
+        }
+
+        .connector-cards {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            justify-content: center;
+            max-width: 720px;
+        }
+
+        .connector-card {
+            width: 200px;
+            padding: 24px 16px 20px;
+            border: 1px solid var(--chrome-card-border);
+            border-radius: var(--radius);
+            background: var(--chrome-card);
+            cursor: pointer;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+        }
+
+        .connector-card:hover,
+        .connector-card.hovered {
+            border-color: var(--chrome-hover);
+            background: var(--chrome-hover);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        }
+
+        .connector-card.add-card {
+            cursor: default;
+        }
+
+        .card-icon-wrapper {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: oklch(0.28 0 0);
+            margin-bottom: 12px;
+        }
+
+        .connector-card:hover .card-icon-wrapper,
+        .connector-card.hovered .card-icon-wrapper {
+            background: oklch(0.32 0 0);
+        }
+
+        .card-icon {
+            color: var(--chrome-muted);
+        }
+
+        .connector-card:hover .card-icon,
+        .connector-card.hovered .card-icon {
+            color: var(--chrome-foreground);
+        }
+
+        .card-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+            margin-bottom: 4px;
+        }
+
+        .card-description {
+            font-size: 11px;
+            color: var(--chrome-muted);
+            line-height: 1.4;
+        }
+
+        .card-socket-path {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            word-break: break-all;
+        }
+
+        .custom-socket-input {
+            flex: 1;
+            min-width: 0;
+            padding: 4px 8px;
+            font-size: 12px;
+            font-family: var(--font-mono);
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: var(--chrome-input-bg);
+            color: var(--chrome-foreground);
+            outline: none;
+        }
+
+        .custom-socket-input:focus { border-color: var(--accent); }
+
+        /* ── Custom connector card ── */
+        .custom-card-form {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+        }
+
+        .custom-name-input {
+            flex: 1;
+            min-width: 0;
+            padding: 4px 8px;
+            font-size: 12px;
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: var(--chrome-input-bg);
+            color: var(--chrome-foreground);
+            outline: none;
+        }
+
+        .custom-name-input:focus { border-color: var(--accent); }
+
+        .custom-add-btn {
+            padding: 4px 10px;
+            font-size: 11px;
+            font-weight: 500;
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: var(--chrome-hover);
+            color: var(--chrome-foreground);
+            cursor: pointer;
+        }
+
+        .custom-add-btn:hover {
+            border-color: var(--accent);
+        }
+
+        .card-remove-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            background: none;
+            border: 1px solid transparent;
+            border-radius: var(--radius);
+            color: var(--chrome-muted);
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            padding: 0;
+            transition: all 0.15s;
+        }
+
+        .card-remove-btn:hover {
+            color: var(--destructive);
+            border-color: var(--destructive);
+            background: oklch(0.55 0.22 28 / 0.15);
+        }
+
+        /* ── Auth status (kept for setup view compatibility) ── */
+        .auth-status {
+            color: var(--success);
+            font-weight: 500;
+        }
+
+        /* ── Login overlay ── */
+        .login-overlay {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            background: var(--chrome);
+            min-height: 0;
+        }
+
+        .strike48-logo {
+            height: auto;
+        }
+
+        .login-title {
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+            margin-top: 4px;
+        }
+
+
+        .login-btn {
+            margin-top: 8px;
+            padding: 10px 36px;
+            font-size: 14px;
+            font-weight: 500;
+            border: none;
+            border-radius: var(--radius);
+            background: var(--accent);
+            color: var(--accent-foreground);
+            cursor: pointer;
+            transition: opacity 0.15s;
+        }
+
+        .login-btn:hover { opacity: 0.9; }
+
+        .login-btn.disabled,
+        .login-btn:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        /* ── TOS overlay ── */
+        .tos-overlay {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            background: var(--chrome);
+            min-height: 0;
+        }
+
+        .tos-icon {
+            color: var(--warning);
+        }
+
+        .tos-heading {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+        }
+
+        .tos-body {
+            max-width: 560px;
+            max-height: 300px;
+            overflow-y: auto;
+            padding: 16px 20px;
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: var(--chrome-card);
+        }
+
+        .tos-text {
+            font-size: 12px;
+            color: var(--chrome-muted);
+            line-height: 1.7;
+        }
+
+        .tos-text strong {
+            color: var(--chrome-foreground);
+        }
+
+        .tos-buttons {
+            display: flex;
+            gap: 12px;
+            margin-top: 4px;
+        }
+
+        .tos-btn-accept {
+            padding: 10px 36px;
+            font-size: 14px;
+            font-weight: 500;
+            border: none;
+            border-radius: var(--radius);
+            background: var(--accent);
+            color: var(--accent-foreground);
+            cursor: pointer;
+            transition: opacity 0.15s;
+        }
+
+        .tos-btn-accept:hover { opacity: 0.9; }
+
+        .tos-btn-decline {
+            padding: 10px 36px;
+            font-size: 14px;
+            font-weight: 500;
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: transparent;
+            color: var(--chrome-muted);
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .tos-btn-decline:hover {
+            background: var(--chrome-hover);
+            color: var(--chrome-foreground);
+        }
+
+        .tos-link {
+            color: var(--accent);
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .tos-link:hover {
+            opacity: 0.8;
+        }
+
+        /* ── Locked sidebar items ── */
+        .rail-item.locked,
+        .rail-action.locked {
+            opacity: 0.35;
+            pointer-events: none;
+            cursor: default;
+        }
+
+        .rail-status-dot.locked {
+            background: var(--chrome-muted);
+            opacity: 0.3;
+        }
+
+    "#
+}

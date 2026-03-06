@@ -1,0 +1,21 @@
+target/
+.git/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Helm chart (not needed in image)
+chart/
+
+# Documentation
+*.md
+LICENSE
+.mcp.json

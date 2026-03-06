@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+thiserror = "2.0"
+
+# UI
+dioxus = "0.6"
+dioxus-liveview = { version = "0.6", features = ["axum"] }
+
+# Pin lucide-dioxus to last version compatible with dioxus 0.6
+# (2.41+ requires dioxus 0.7)
+lucide-dioxus = { version = "=2.40.0", features = ["all-icons"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP client (for health checks + OIDC auth flow)
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+
+# Error handling (anyhow for auth/proxy)
+anyhow = "1"
+
+# HTTP server (for auth proxy)
+axum = { version = "0.7", features = ["ws"] }
+
+# Regex (for HTML rewriting)
+regex = "1"
+
+# WebSocket proxy (for GraphQL subscriptions through self-signed certs)
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+native-tls = "0.2"
+
+# URL encoding
+urlencoding = "2"
+
+# HTTP server primitives (for Unix socket IPC)
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http = "1"
+
+# Platform directories
+dirs = "5"
+
+# Open URLs in system browser
+open = "5"
+
+# PKCE / crypto
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"

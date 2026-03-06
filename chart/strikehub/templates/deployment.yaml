@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "strikehub.fullname" . }}
+  labels:
+    {{- include "strikehub.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "strikehub.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "strikehub.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "strikehub.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: HOME
+              value: /data/strikehub
+            - name: PORT
+              value: {{ .Values.strikehub.port | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.strikehub.logLevel | quote }}
+            {{- if .Values.strikehub.callbackUrl }}
+            - name: STRIKEHUB_CALLBACK_URL
+              value: {{ .Values.strikehub.callbackUrl | quote }}
+            {{- end }}
+            {{- if .Values.connector.strikeApiUrl }}
+            - name: STRIKE48_API_URL
+              value: {{ .Values.connector.strikeApiUrl | quote }}
+            {{- end }}
+            {{- if .Values.connector.strikeExternalUrl }}
+            - name: STRIKE48_EXTERNAL_URL
+              value: {{ .Values.connector.strikeExternalUrl | quote }}
+            {{- end }}
+            {{- if .Values.connector.strikeUrl }}
+            - name: STRIKE48_URL
+              value: {{ .Values.connector.strikeUrl | quote }}
+            {{- end }}
+            {{- if .Values.connector.tenantId }}
+            - name: TENANT_ID
+              value: {{ .Values.connector.tenantId | quote }}
+            {{- end }}
+            {{- if .Values.connector.instanceId }}
+            - name: INSTANCE_ID
+              value: {{ .Values.connector.instanceId | quote }}
+            {{- end }}
+            {{- if .Values.connector.tlsInsecure }}
+            - name: MATRIX_TLS_INSECURE
+              value: "true"
+            {{- end }}
+            {{- if .Values.kubestudio.ai }}
+            - name: KUBESTUDIO_AI
+              value: "true"
+            {{- end }}
+            {{- if .Values.kubestudio.mode }}
+            - name: KUBESTUDIO_MODE
+              value: {{ .Values.kubestudio.mode | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.strikehub.port }}
+              protocol: TCP
+            - name: oauth-cb
+              containerPort: 4000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.persistence.enabled }}
+            - name: strikehub-data
+              mountPath: /data/strikehub
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.persistence.enabled }}
+        - name: strikehub-data
+          persistentVolumeClaim:
+            claimName: {{ include "strikehub.fullname" . }}-data
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

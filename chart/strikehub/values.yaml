@@ -1,0 +1,91 @@
+image:
+  repository: strikehub
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+# -- StrikeHub settings
+strikehub:
+  # -- Server listen port inside the container
+  port: 8080
+  # -- Log level (trace, debug, info, warn, error)
+  logLevel: info
+  # -- External base URL for OAuth callback (e.g. http://localhost:4000 when
+  # port-forwarding). Required for sign-in to work in server/container mode.
+  callbackUrl: "http://localhost:4000"
+
+# -- Strike48 platform connectivity
+connector:
+  # -- Strike48 API / Keycloak URL (HTTPS) — used for server-to-server calls inside the cluster
+  strikeApiUrl: ""
+  # -- Browser-reachable Strike48 API URL for OAuth login page.
+  # Required when strikeApiUrl is a cluster-internal address.
+  # e.g. https://studio.strike48.test
+  strikeExternalUrl: ""
+  # -- Strike48 gRPC connector gateway URL (e.g. grpc://connectors-studio.strike48.test:80)
+  strikeUrl: ""
+  # -- Matrix tenant identifier
+  tenantId: ""
+  # -- Stable connector instance name
+  instanceId: "strikehub"
+  # -- Skip TLS certificate verification for Matrix connections
+  tlsInsecure: false
+
+# -- KubeStudio connector settings
+kubestudio:
+  # -- Enable the built-in KubeStudio AI connector
+  ai: true
+  # -- Permission mode: read (view-only) or write (allow edits)
+  mode: write
+
+# -- Persistence for config / connector data
+persistence:
+  enabled: false
+  storageClass: ""
+  size: 64Mi
+  accessModes:
+    - ReadWriteOnce
+
+# -- Service account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# -- RBAC
+rbac:
+  create: false
+  clusterRole: ""
+
+# -- Service
+service:
+  type: ClusterIP
+  port: 80
+
+# -- Ingress
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  #   - host: strikehub.example.com
+  #     paths:
+  #       - path: /
+  #         pathType: Prefix
+  tls: []
+  #   - secretName: strikehub-tls
+  #     hosts:
+  #       - strikehub.example.com
+
+# -- Pod-level overrides
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}

@@ -1,0 +1,45 @@
+[package]
+name = "sh-ui"
+version.workspace = true
+edition.workspace = true
+default-run = "strikehub"
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+server = ["dep:dioxus-liveview", "dep:axum"]
+
+[lib]
+name = "sh_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "strikehub"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "strikehub-server"
+path = "src/bin/strikehub-server.rs"
+required-features = ["server"]
+
+[dependencies]
+sh-core = { path = "../sh-core" }
+anyhow.workspace = true
+dioxus.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+open.workspace = true
+futures-util = "0.3.32"
+
+# Server/liveview dependencies
+dioxus-liveview = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }

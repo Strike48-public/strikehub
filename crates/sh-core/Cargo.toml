@@ -1,0 +1,31 @@
+[package]
+name = "sh-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+regex.workspace = true
+tracing.workspace = true
+tokio-tungstenite.workspace = true
+native-tls.workspace = true
+futures.workspace = true
+urlencoding.workspace = true
+open.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rand.workspace = true
+
+# HTTP primitives for Unix socket IPC
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
