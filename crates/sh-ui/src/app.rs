@@ -150,6 +150,45 @@ pub fn App() -> Element {
     // Dev mode: show the "Add Connector" form in Settings only when STRIKEHUB_DEV is set.
     let dev_mode = use_signal(|| std::env::var("STRIKEHUB_DEV").is_ok());
 
+    // Register a "connector" asset handler so that connector content can be served
+    // through the dioxus:// scheme (which passes the hardcoded navigation handler).
+    // URLs like dioxus://index.html/connector/{id}/liveview are routed here.
+    #[cfg(feature = "desktop")]
+    dioxus::desktop::use_asset_handler("connector", move |request, responder| {
+        // The request URI path is e.g. /connector/kubestudio/liveview
+        let uri = request.uri().clone();
+        let path = uri.path();
+        let stripped = path
+            .strip_prefix("/connector/")
+            .unwrap_or(path);
+        // Preserve query string for the bridge
+        let connector_uri = match uri.query() {
+            Some(q) => format!("connector://{}?{}", stripped, q),
+            None => format!("connector://{}", stripped),
+        };
+
+        tokio::spawn(async move {
+            let Some(state) = crate::get_bridge_state() else {
+                let resp = http::Response::builder()
+                    .status(500)
+                    .body(Vec::from("bridge state not initialised"))
+                    .unwrap();
+                responder.respond(resp);
+                return;
+            };
+
+            let (status, headers, body) =
+                sh_core::bridge::handle_bridge_request(state, &connector_uri).await;
+
+            let mut builder = http::Response::builder().status(status);
+            for (k, v) in &headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            let resp = builder.body(body).unwrap();
+            responder.respond(resp);
+        });
+    });
+
     // Shared hover state between sidebar and content tiles
     let mut hovered_id = use_signal(|| None::<String>);
 
@@ -197,7 +236,7 @@ pub fn App() -> Element {
             };
 
             // Start ConnectorProxy immediately (works with empty token;
-            // token is read dynamically on each request)
+            // token is read dynamically on each request).
             match ConnectorProxy::start(auth.clone()).await {
                 Ok(p) => {
                     proxy_port.set(Some(p.port()));
@@ -240,9 +279,11 @@ pub fn App() -> Element {
 
     // Auto-start builtin connectors that were enabled from a previous session.
     // Register custom IPC connectors in bridge state (they're externally managed).
-    // Use peek() to avoid subscribing — this runs once on mount only.
+    // Uses read() so the effect re-runs when connectors are populated (e.g. after
+    // first-launch setup completes via sync_config). The contains_key guard on
+    // runners prevents double-starting connectors that are already running.
     use_effect(move || {
-        let current = connectors.peek().clone();
+        let current = connectors.read().clone();
         spawn(async move {
             let mut env_vars = matrix_env_vars();
             // Override STRIKE48_API_URL so the connector's chat panel routes
@@ -308,8 +349,12 @@ pub fn App() -> Element {
                                 }
                             }
                         }
-                        connectors.set(updated);
+                        // Insert into runners BEFORE updating connectors —
+                        // connectors.set() re-triggers this effect (read subscription),
+                        // and the runners guard must already have the entry to prevent
+                        // double-spawning.
                         runners.write().insert(conn.id.clone(), runner);
+                        connectors.set(updated);
                     }
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
@@ -554,6 +599,13 @@ pub fn App() -> Element {
     };
 
     let on_select = move |id: String| {
+        // If setup hasn't been completed yet, sync config first to populate
+        // the connectors signal from the manifest defaults.
+        if !hub_config.read().setup_complete {
+            let sc = setup_connectors.read().clone();
+            let cc = custom_connectors.read().clone();
+            sync_config(&sc, &cc, &mut hub_config, &mut connectors);
+        }
         active_id.set(Some(id));
         hovered_id.set(None);
         show_setup.set(false);
