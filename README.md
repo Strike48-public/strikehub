@@ -39,7 +39,9 @@ A native desktop shell that unifies Strike48 connector applications into a singl
 - **macOS or Linux**
 - **Matrix server** (optional, for authentication features)
 
-### Quick Start (Linux AppImage)
+### Quick Start
+
+#### Linux (AppImage)
 
 ```bash
 # Build AppImage with all connectors included
@@ -51,6 +53,10 @@ This creates a portable AppImage that includes:
 - KubeStudio connector (`ks-connector`)
 - Pick connector (`pentest-agent`)
 - Default configuration for Strike48 API
+
+#### Windows
+
+Download the latest `strikehub-windows-x86_64.exe` from releases and double-click to run. Everything is bundled — no installation or configuration required.
 
 ### Build from Source
 

@@ -13,7 +13,7 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  PICK_VERSION: v0.1.0
+  PICK_VERSION: v0.1.1
   KUBESTUDIO_VERSION: v0.1.0
 
 jobs:
@@ -104,7 +104,7 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.binary_name }}
 
       # Connector downloads are best-effort — releases may not exist yet.
-      - name: Download pentest-agent
+      - name: Download pentest-agent (Unix)
         if: runner.os != 'Windows'
         continue-on-error: true
         shell: bash
@@ -117,6 +117,20 @@ jobs:
             --dir dist
           cd dist && tar -xzf pentest-agent-${{ matrix.connector_suffix }}.tar.gz \
             && rm -f pentest-agent-${{ matrix.connector_suffix }}.tar.gz
+
+      - name: Download pentest-agent (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ${{ env.PICK_VERSION }} \
+            --repo Strike48-public/pick \
+            --pattern "pentest-agent-${{ matrix.connector_suffix }}.zip" \
+            --dir dist
+          cd dist && unzip pentest-agent-${{ matrix.connector_suffix }}.zip \
+            && rm -f pentest-agent-${{ matrix.connector_suffix }}.zip
 
       - name: Download ks-connector (Unix)
         if: runner.os != 'Windows'
@@ -155,14 +169,56 @@ jobs:
           # Keep only the archive for upload
           find . -maxdepth 1 ! -name '*.tar.gz' ! -name '*.sha256' -type f -delete
 
-      - name: Package archive (Windows)
+      - name: Build Windows SFX (single-file exe)
         if: runner.os == 'Windows'
         shell: bash
-        working-directory: dist
         run: |
-          7z a ${{ matrix.artifact }}.zip *
-          # Keep only the archive for upload
-          find . -maxdepth 1 ! -name '*.zip' ! -name '*.sha256' -type f -delete
+          # Create VBScript launcher (no console window)
+          cat > dist/StrikeHub-Launch.vbs << 'EOF'
+          Set WshShell = CreateObject("WScript.Shell")
+          Set WshEnv = WshShell.Environment("Process")
+          If WshEnv("STRIKE48_API_URL") = "" Then
+              WshEnv("STRIKE48_API_URL") = "https://studio.strike48.com"
+          End If
+          If WshEnv("STRIKE48_URL") = "" Then
+              WshEnv("STRIKE48_URL") = "wss://studio.strike48.com"
+          End If
+          scriptDir = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\"))
+          WshShell.Run """" & scriptDir & "strikehub.exe""", 0, False
+          EOF
+
+          # Create SFX config
+          cat > sfx-config.txt << 'SFXCFG'
+          ;!@Install@!UTF-8!
+          Title="StrikeHub"
+          RunProgram="wscript.exe StrikeHub-Launch.vbs"
+          InstallPath="%LOCALAPPDATA%\\StrikeHub"
+          GUIMode="2"
+          OverwriteMode="2"
+          ;!@InstallEnd@!
+          SFXCFG
+
+          # Download 7-Zip SFX module
+          curl -sL "https://github.com/nicehash/7zsfxmm/raw/master/files/7zSD.sfx" -o 7zSD.sfx
+
+          # Build archive from dist contents
+          cd dist && 7z a -mx=9 ../sfx-payload.7z * && cd ..
+
+          # Combine: SFX stub + config + archive = single exe
+          cat 7zSD.sfx sfx-config.txt sfx-payload.7z > "dist/${{ matrix.artifact }}.exe"
+
+          # Clean up - keep only the SFX exe
+          cd dist
+          find . -maxdepth 1 ! -name '*.exe' -a -name '${{ matrix.artifact }}*' -type f -delete
+          find . -maxdepth 1 ! -name '${{ matrix.artifact }}*' -type f -delete
+
+      - name: Build Windows MSI installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = "${{ github.ref_name }}".TrimStart("v")
+          .\scripts\build-msi.ps1 -Version $Version
+          Move-Item "StrikeHub-$Version-x86_64.msi" "dist\${{ matrix.artifact }}.msi"
 
       - name: Generate checksums
         shell: bash
@@ -290,10 +346,12 @@ jobs:
             | macOS | Intel | `strikehub-darwin-x86_64.tar.gz` |
             | Linux | x86_64 | `strikehub-linux-x86_64.tar.gz` |
             | Linux AppImage | x86_64 | `StrikeHub-*.AppImage` |
-            | Windows | x86_64 | `strikehub-windows-x86_64.zip` |
+            | Windows | x86_64 | `strikehub-windows-x86_64.exe` |
+            | Windows MSI | x86_64 | `strikehub-windows-x86_64.msi` |
 
-            Each archive includes bundled connectors (`ks-connector` and `pentest-agent`).
-            Windows includes `ks-connector` only — `pentest-agent` is not yet available for Windows.
+            All packages include bundled connectors (`ks-connector` and `pentest-agent`) and pre-configured environment variables.
+            - **`.exe`** — Single file, just download and run (like AppImage)
+            - **`.msi`** — Windows installer with Start Menu, desktop shortcut, and system env vars
 
             The AppImage is a portable, self-contained package that runs on most Linux distributions without installation.
 
