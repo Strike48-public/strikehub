@@ -53,11 +53,13 @@ pub async fn run_preflight(connector_id: &str) -> PreflightResult {
     let (name, checks) = match connector_id {
         "kubestudio" => ("KubeStudio", run_kubestudio_checks().await),
         "pick" => ("Pick", run_pick_checks().await),
-        _ => return PreflightResult {
-            connector_id: connector_id.to_string(),
-            connector_name: connector_id.to_string(),
-            checks: vec![],
-        },
+        _ => {
+            return PreflightResult {
+                connector_id: connector_id.to_string(),
+                connector_name: connector_id.to_string(),
+                checks: vec![],
+            };
+        }
     };
     PreflightResult {
         connector_id: connector_id.to_string(),
@@ -186,9 +188,11 @@ fn is_connector_registered(connector_id: &str, apps: &[ConnectorAppInfo]) -> boo
     let patterns: &[&str] = match connector_id {
         "kubestudio" => &["kubestudio", "kube-studio"],
         "pick" => &["pentest", "pentest-connector"],
-        _ => return apps.iter().any(|app| {
-            app.name.to_lowercase().contains(connector_id)
-        }),
+        _ => {
+            return apps
+                .iter()
+                .any(|app| app.name.to_lowercase().contains(connector_id));
+        }
     };
     apps.iter().any(|app| {
         let name_lower = app.name.to_lowercase();
@@ -197,7 +201,9 @@ fn is_connector_registered(connector_id: &str, apps: &[ConnectorAppInfo]) -> boo
             .as_deref()
             .map(|a| a.to_lowercase())
             .unwrap_or_default();
-        patterns.iter().any(|p| name_lower.contains(p) || addr_lower.contains(p))
+        patterns
+            .iter()
+            .any(|p| name_lower.contains(p) || addr_lower.contains(p))
     })
 }
 
@@ -295,9 +301,7 @@ fn check_docker_cli() -> PreflightCheck {
     let docker_exists = Command::new("docker").arg("--version").output();
     match docker_exists {
         Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
             // Check if daemon is running
             match Command::new("docker").arg("info").output() {
@@ -311,11 +315,10 @@ fn check_docker_cli() -> PreflightCheck {
                     name,
                     description: format!("{} (daemon not running)", version),
                     status: CheckStatus::Failed,
-                    install_hint:
-                        "Docker is installed but the daemon is not running.\n\n\
+                    install_hint: "Docker is installed but the daemon is not running.\n\n\
                         Start Docker Desktop, or run:\n  sudo systemctl start docker\n\n\
                         On macOS you can also run:\n  open -a Docker"
-                            .into(),
+                        .into(),
                 },
             }
         }
@@ -323,13 +326,12 @@ fn check_docker_cli() -> PreflightCheck {
             name,
             description: "Docker CLI not found".into(),
             status: CheckStatus::Failed,
-            install_hint:
-                "Install Docker Desktop:\n\n\
+            install_hint: "Install Docker Desktop:\n\n\
                 macOS:   https://docs.docker.com/desktop/install/mac-install/\n\
                 Linux:   https://docs.docker.com/engine/install/\n\
                 Windows: https://docs.docker.com/desktop/install/windows-install/\n\n\
                 Or install via Homebrew (macOS):\n  brew install --cask docker"
-                    .into(),
+                .into(),
         },
     }
 }

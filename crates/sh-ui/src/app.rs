@@ -874,9 +874,12 @@ pub fn App() -> Element {
     // While checks are still running (preflight_result is None), keep showing
     // the overlay with a "checking" state to avoid flashing the home screen.
     let show_preflight = if *is_signed_in.read() && !*preflight_dismissed.read() {
-        Some(preflight_result.read().clone().unwrap_or(AggregatePreflightResult {
-            results: vec![],
-        }))
+        Some(
+            preflight_result
+                .read()
+                .clone()
+                .unwrap_or(AggregatePreflightResult { results: vec![] }),
+        )
     } else {
         None
     };

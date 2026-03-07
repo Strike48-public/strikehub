@@ -281,11 +281,7 @@ pub fn PreflightOverlay(
 }
 
 #[component]
-fn PreflightGroup(
-    group: PreflightResult,
-    collapsed: bool,
-    on_toggle: EventHandler<()>,
-) -> Element {
+fn PreflightGroup(group: PreflightResult, collapsed: bool, on_toggle: EventHandler<()>) -> Element {
     let check_count = group.checks.len();
     let pass_count = group
         .checks
