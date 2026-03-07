@@ -64,8 +64,8 @@ fi
 # Copy desktop file and icon
 cp "assets/strikehub.desktop" "$APPDIR/usr/share/applications/"
 cp "assets/strikehub.desktop" "$APPDIR/"
-cp "crates/sh-ui/src/assets/icons/strike48-logo.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/strikehub.svg"
-cp "crates/sh-ui/src/assets/icons/strike48-logo.svg" "$APPDIR/strikehub.svg"
+cp "crates/sh-ui/src/assets/icons/strike48-mark.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/strikehub.svg"
+cp "crates/sh-ui/src/assets/icons/strike48-mark.svg" "$APPDIR/strikehub.svg"
 
 # Create a simple AppRun
 cat > "$APPDIR/AppRun" << 'EOF'
