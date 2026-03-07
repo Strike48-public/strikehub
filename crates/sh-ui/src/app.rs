@@ -79,6 +79,7 @@ fn sync_config(
                     enabled: true,
                     transport: c.manifest.default_transport,
                     socket_path: None,
+                    instance_id: Some(sh_core::generate_instance_id(c.manifest.id)),
                 },
             );
         }
@@ -86,6 +87,7 @@ fn sync_config(
 
     for c in custom_connectors {
         let id = format!("ipc-{}", sh_core::slug_from_path(&c.socket_path));
+        let inst_id = sh_core::generate_instance_id(&id);
         cfg.connectors.insert(
             id,
             sh_core::ConnectorEntry {
@@ -97,6 +99,7 @@ fn sync_config(
                 enabled: true,
                 transport: ConnectorTransport::Ipc,
                 socket_path: Some(c.socket_path.clone()),
+                instance_id: Some(inst_id),
             },
         );
     }
@@ -126,10 +129,12 @@ pub fn App() -> Element {
             setup_complete: false,
             pick_tos_accepted: false,
             connectors: Default::default(),
+            instance_id: None,
         });
         // Merge manifest defaults so that saved configs pick up transport
         // and binary changes when the code is upgraded.
         cfg.apply_manifest_defaults(&builtin_manifests());
+        cfg.ensure_instance_ids();
         cfg
     });
     let mut connectors = use_signal(move || hub_config.read().to_connectors());
@@ -350,7 +355,15 @@ pub fn App() -> Element {
                     continue;
                 };
                 let binary_path = std::path::PathBuf::from(binary);
-                match IpcConnectorRunner::start(&conn.id, &binary_path, &env_vars).await {
+                // Per-connector instance ID (persisted in config).
+                let mut conn_env = env_vars.clone();
+                conn_env.push(("INSTANCE_ID".into(), conn.instance_id.clone()));
+                tracing::info!(
+                    "Starting connector '{}' with INSTANCE_ID={}",
+                    conn.id,
+                    conn.instance_id
+                );
+                match IpcConnectorRunner::start(&conn.id, &binary_path, &conn_env).await {
                     Ok(runner) => {
                         tracing::info!(
                             "started IPC connector '{}' → {}",
@@ -573,7 +586,11 @@ pub fn App() -> Element {
                     })
                     .unwrap_or_default();
                 tracing::info!("Resolved tenant_id={:?}", tenant);
-                let instance = std::env::var("INSTANCE_ID").unwrap_or_default();
+                let instance = hub_config
+                    .read()
+                    .instance_id
+                    .clone()
+                    .unwrap_or_default();
                 tracing::info!("INSTANCE_ID={:?}", instance);
 
                 // Propagate tenant to child connectors via process env so
