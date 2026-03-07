@@ -1,13 +1,15 @@
 use crate::components::sidebar::ConnectorItem;
 use crate::components::{
-    ContentArea, CustomConnector, LoginOverlay, PickTosOverlay, SetupConnector, Sidebar,
+    ContentArea, CustomConnector, LoginOverlay, PickTosOverlay, PreflightOverlay, SetupConnector,
+    Sidebar,
 };
 use crate::theme;
 use dioxus::prelude::*;
 use sh_core::{
-    AuthManager, ConnectorConfig, ConnectorProxy, ConnectorStatus, ConnectorTransport, HubConfig,
-    IpcConnectorRunner, MatrixWsClient, WsRelay, builtin_manifests, fetch_connector_apps,
-    fetch_tenant_id, start_oauth_flow_with,
+    AggregatePreflightResult, AuthManager, ConnectorConfig, ConnectorProxy, ConnectorRuntime,
+    ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner, MatrixWsClient, WsRelay,
+    builtin_manifests, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
+    run_preflight_full, start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -38,10 +40,26 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         "KUBESTUDIO_AI",
         "KUBESTUDIO_MODE",
     ];
-    FORWARD_KEYS
+
+    // Defaults for keys that should always be present.
+    const DEFAULTS: &[(&str, &str)] = &[
+        ("STRIKE48_API_URL", "https://studio.strike48.com"),
+        ("STRIKE48_URL", "wss://studio.strike48.com"),
+    ];
+
+    let mut vars: Vec<(String, String)> = FORWARD_KEYS
         .iter()
         .filter_map(|&key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
-        .collect()
+        .collect();
+
+    // Fill in defaults for any keys not already present.
+    for &(key, default) in DEFAULTS {
+        if !vars.iter().any(|(k, _)| k == key) {
+            vars.push((key.to_string(), default.to_string()));
+        }
+    }
+
+    vars
 }
 
 /// Helper: rebuild the connectors list from setup + custom state and persist.
@@ -153,6 +171,15 @@ pub fn App() -> Element {
     // Dev mode: show the "Add Connector" form in Settings only when STRIKEHUB_DEV is set.
     let dev_mode = use_signal(|| std::env::var("STRIKEHUB_DEV").is_ok());
 
+    // Persistent WS client for GraphQL queries (shared with preflight).
+    let mut ws_client_signal: Signal<Option<Arc<MatrixWsClient>>> = use_signal(|| None);
+
+    // Preflight check state: aggregate results for all enabled connectors.
+    // Runs automatically after sign-in; dismissed via Continue/Skip.
+    let mut preflight_result: Signal<Option<AggregatePreflightResult>> = use_signal(|| None);
+    let mut preflight_checking = use_signal(|| false);
+    let mut preflight_dismissed = use_signal(|| false);
+
     // Register a "connector" asset handler so that connector content can be served
     // through the dioxus:// scheme (which passes the hardcoded navigation handler).
     // URLs like dioxus://index.html/connector/{id}/liveview are routed here.
@@ -236,7 +263,7 @@ pub fn App() -> Element {
     use_effect(move || {
         spawn(async move {
             let Some(auth) = AuthManager::from_env() else {
-                tracing::info!("STRIKE48_API_URL not set, auth proxy disabled");
+                tracing::info!("Auth proxy disabled (no API URL configured)");
                 return;
             };
 
@@ -288,12 +315,12 @@ pub fn App() -> Element {
     // first-launch setup completes via sync_config). The contains_key guard on
     // runners prevents double-starting connectors that are already running.
     //
-    // When auth is configured (STRIKE48_API_URL is set), delay connector startup
-    // until sign-in completes so that TENANT_ID / STRIKE48_TENANT are available.
-    let needs_auth = std::env::var("STRIKE48_API_URL").is_ok();
+    // Auth is always configured (default API URL is baked in), so always
+    // delay connector startup until sign-in completes. This ensures
+    // TENANT_ID / STRIKE48_TENANT are available in the environment.
     use_effect(move || {
         let signed_in = *is_signed_in.read();
-        if needs_auth && !signed_in {
+        if !signed_in {
             return;
         }
         let current = connectors.read().clone();
@@ -472,7 +499,9 @@ pub fn App() -> Element {
         });
     });
 
-    let has_matrix_url = auth_manager.read().is_some();
+    // Auth is always configured (default API URL baked in), so this is always true.
+    // We still check auth_manager for the edge case where from_env() somehow fails.
+    let has_matrix_url = sh_core::AuthManager::from_env().is_some();
 
     // Sign-in coroutine: lives on App's scope (never unmounted) so the
     // async work survives LoginOverlay being unmounted during the flow.
@@ -563,6 +592,7 @@ pub fn App() -> Element {
                             proxy.set_matrix_ws(ws.clone()).await;
                         }
                         tracing::info!("MatrixWsClient created and attached to proxy");
+                        ws_client_signal.set(Some(ws.clone()));
                         Some(ws)
                     }
                     Err(e) => {
@@ -644,6 +674,58 @@ pub fn App() -> Element {
         }
     });
 
+    // Run preflight checks for all enabled connectors after sign-in.
+    // Waits a few seconds for connectors to start and register before
+    // checking their Matrix registration status.
+    use_effect(move || {
+        let signed_in = *is_signed_in.read();
+        if signed_in && !*preflight_dismissed.peek() && preflight_result.peek().is_none() {
+            let connector_ids: Vec<String> = {
+                let ids: Vec<String> = connectors
+                    .read()
+                    .iter()
+                    .filter(|c| !c.id.starts_with("ipc-"))
+                    .map(|c| c.id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    builtin_manifests()
+                        .iter()
+                        .map(|m| m.id.to_string())
+                        .collect()
+                } else {
+                    ids
+                }
+            };
+            let auth = auth_manager.read().clone();
+            preflight_checking.set(true);
+            spawn(async move {
+                // Give connectors time to start and register with Matrix.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                // Build runtime info from current connector state.
+                let runtimes: Vec<ConnectorRuntime> = connectors
+                    .read()
+                    .iter()
+                    .filter(|c| !c.id.starts_with("ipc-"))
+                    .map(|c| ConnectorRuntime {
+                        id: c.id.clone(),
+                        name: c.display_name.clone(),
+                        status: c.status.clone(),
+                    })
+                    .collect();
+
+                let ws = ws_client_signal.read().clone();
+                let result = if let Some(ref auth) = auth {
+                    run_preflight_full(&connector_ids, auth, ws.as_deref(), &runtimes).await
+                } else {
+                    run_preflight_all(&connector_ids).await
+                };
+                preflight_result.set(Some(result));
+                preflight_checking.set(false);
+            });
+        }
+    });
+
     let on_sign_in = move |_: ()| {
         sign_in_coro.send(());
     };
@@ -655,6 +737,9 @@ pub fn App() -> Element {
         is_signed_in.set(false);
         signing_in.set(false);
         matrix_app_address.set(None);
+        ws_client_signal.set(None);
+        preflight_result.set(None);
+        preflight_dismissed.set(false);
         // Detach stale WS client from the proxy so the next sign-in starts fresh
         spawn(async move {
             if let Some(proxy) = proxy_handle.peek().as_ref() {
@@ -785,6 +870,18 @@ pub fn App() -> Element {
     let custom_list = custom_connectors.read().clone();
     let is_setup = *show_setup.read();
 
+    // Show aggregate preflight overlay after sign-in until dismissed.
+    // While checks are still running (preflight_result is None), keep showing
+    // the overlay with a "checking" state to avoid flashing the home screen.
+    let show_preflight = if *is_signed_in.read() && !*preflight_dismissed.read() {
+        Some(preflight_result.read().clone().unwrap_or(AggregatePreflightResult {
+            results: vec![],
+        }))
+    } else {
+        None
+    };
+    let is_preflight_checking = *preflight_checking.read();
+
     rsx! {
         style { "{theme::theme_css()}" }
         style { "{theme::app_css()}" }
@@ -821,6 +918,42 @@ pub fn App() -> Element {
                         },
                         on_decline: move |_: ()| {
                             active_id.set(None);
+                        },
+                    }
+                } else if let Some(aggregate_result) = show_preflight {
+                    PreflightOverlay {
+                        result: aggregate_result,
+                        checking: is_preflight_checking,
+                        on_recheck: move |_: ()| {
+                            preflight_checking.set(true);
+                            let auth = auth_manager.read().clone();
+                            let ids: Vec<String> = builtin_manifests()
+                                .iter()
+                                .map(|m| m.id.to_string())
+                                .collect();
+                            spawn(async move {
+                                let runtimes: Vec<ConnectorRuntime> = connectors
+                                    .read()
+                                    .iter()
+                                    .filter(|c| !c.id.starts_with("ipc-"))
+                                    .map(|c| ConnectorRuntime {
+                                        id: c.id.clone(),
+                                        name: c.display_name.clone(),
+                                        status: c.status.clone(),
+                                    })
+                                    .collect();
+                                let ws = ws_client_signal.read().clone();
+                                let result = if let Some(ref auth) = auth {
+                                    run_preflight_full(&ids, auth, ws.as_deref(), &runtimes).await
+                                } else {
+                                    run_preflight_all(&ids).await
+                                };
+                                preflight_result.set(Some(result));
+                                preflight_checking.set(false);
+                            });
+                        },
+                        on_continue: move |_: ()| {
+                            preflight_dismissed.set(true);
                         },
                     }
                 } else {

@@ -35,17 +35,19 @@ pub struct AuthManager {
 }
 
 impl AuthManager {
-    /// Create from env vars. Returns `None` if `STRIKE48_API_URL` is not set.
+    pub const DEFAULT_API_URL: &str = "https://studio.strike48.com";
+
+    /// Create from env vars, falling back to the default Strike48 API URL.
     ///
     /// | Var | Purpose | Default |
     /// |-----|---------|---------|
-    /// | `STRIKE48_API_URL` | Strike48 API server URL | (required) |
+    /// | `STRIKE48_API_URL` | Strike48 API server URL | `wss://studio.strike48.com` |
     /// | `MATRIX_TLS_INSECURE` | Skip TLS verify | `false` |
     pub fn from_env() -> Option<Self> {
-        let matrix_url = std::env::var("STRIKE48_API_URL").unwrap_or_default();
-        if matrix_url.is_empty() {
-            return None;
-        }
+        let matrix_url = std::env::var("STRIKE48_API_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| Self::DEFAULT_API_URL.to_string());
         let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);

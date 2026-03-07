@@ -13,7 +13,9 @@ fn main() {
                 .with_window(
                     dioxus::desktop::WindowBuilder::new()
                         .with_title("StrikeHub")
-                        .with_always_on_top(false),
+                        .with_always_on_top(false)
+                        .with_inner_size(dioxus::desktop::LogicalSize::new(1024.0, 768.0))
+                        .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 600.0)),
                 )
                 .with_asynchronous_custom_protocol("connector", move |request, responder| {
                     // Spawn into the tokio runtime so we can do async I/O
