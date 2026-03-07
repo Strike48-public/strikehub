@@ -18,24 +18,21 @@ use tokio::sync::oneshot;
 /// These are read directly from the StrikeHub process env so they're available
 /// immediately at connector startup (before AuthManager is initialised).
 ///
-/// Note: STRIKE48_URL is intentionally NOT forwarded. Connectors spawned by
-/// StrikeHub communicate over IPC (Unix socket) and don't need to register
-/// independently with the Matrix connector gateway.
-///
 /// Forwarded:
-///   TENANT_ID           — Matrix tenant (e.g. non-prod)
-///   STRIKE48_API_URL    — Strike48 HTTP API (e.g. https://studio.strike48.test)
+///   TENANT_ID           — Matrix tenant
+///   STRIKE48_TENANT     — alias for TENANT_ID
+///   STRIKE48_API_URL    — Strike48 HTTP API
+///   STRIKE48_URL        — Matrix gateway WSS URL (for registration)
 ///   INSTANCE_ID         — stable connector instance name
 ///   MATRIX_TLS_INSECURE — accept self-signed certs
 ///   KUBESTUDIO_AI       — enable AI features in the connector
 ///   KUBESTUDIO_MODE     — permission mode (read/write)
 fn matrix_env_vars() -> Vec<(String, String)> {
-    // Keys to forward from StrikeHub's env to the connector child process.
-    // STRIKE48_URL is excluded: child connectors use IPC, not gateway registration.
     const FORWARD_KEYS: &[&str] = &[
         "TENANT_ID",
         "STRIKE48_TENANT",
         "STRIKE48_API_URL",
+        "STRIKE48_URL",
         "INSTANCE_ID",
         "MATRIX_TLS_INSECURE",
         "KUBESTUDIO_AI",

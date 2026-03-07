@@ -29,10 +29,6 @@ impl IpcConnectorRunner {
 
         let mut cmd = tokio::process::Command::new(&resolved);
         cmd.env("STRIKEHUB_SOCKET", ipc_addr.to_env_string());
-        // Prevent child connectors from independently registering with the
-        // gateway — they communicate with StrikeHub over IPC, not gRPC.
-        cmd.env_remove("STRIKE48_URL");
-        cmd.env_remove("STRIKE48_HOST");
         for (k, v) in env_vars {
             cmd.env(k, v);
         }
