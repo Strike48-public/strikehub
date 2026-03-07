@@ -340,6 +340,18 @@ jobs:
           VERSION="${TAG_VERSION#v}"
           ./scripts/build-dmg.sh "$VERSION" "${{ matrix.arch }}"
 
+      - name: Verify DMG
+        run: |
+          hdiutil verify StrikeHub-*.dmg
+          hdiutil attach StrikeHub-*.dmg -mountpoint /tmp/dmg-verify
+          echo "=== App bundle contents ==="
+          ls -la /tmp/dmg-verify/StrikeHub.app/Contents/MacOS/
+          test -x /tmp/dmg-verify/StrikeHub.app/Contents/MacOS/strikehub-bin
+          test -f /tmp/dmg-verify/StrikeHub.app/Contents/Info.plist
+          codesign --verify /tmp/dmg-verify/StrikeHub.app
+          grep -q "studio.strike48.com" /tmp/dmg-verify/StrikeHub.app/Contents/MacOS/strikehub
+          hdiutil detach /tmp/dmg-verify
+
       - name: Generate checksum
         run: |
           shasum -a 256 StrikeHub-*.dmg > strikehub-darwin-${{ matrix.arch }}.dmg.sha256
