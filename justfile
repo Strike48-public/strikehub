@@ -56,3 +56,50 @@ kill:
 
 # Full fresh start: kill, clean creds, rebuild, run
 fresh: kill clear-creds rebuild-all run
+
+# Show connector versions from connector-versions.env and local repo HEADs
+versions:
+    @echo "=== connector-versions.env (CI/release) ==="
+    @grep -v '^#' connector-versions.env | grep '=' | while IFS='=' read -r key val; do \
+        printf "  %-25s %s\n" "$key" "$val"; \
+    done
+    @echo ""
+    @echo "=== Local repo HEADs ==="
+    @printf "  %-25s %s\n" "pick" "$(git -C {{pick_dir}} describe --tags --always 2>/dev/null || echo 'not found')"
+    @printf "  %-25s %s\n" "kubestudio" "$(git -C {{kube_dir}} describe --tags --always 2>/dev/null || echo 'not found')"
+    @echo ""
+    @echo "=== Installed binaries ==="
+    @if [ -f {{bin_dir}}/pentest-agent ]; then printf "  %-25s %s\n" "pentest-agent" "$(ls -lh {{bin_dir}}/pentest-agent | awk '{print $5, $6, $7, $8}')"; else echo "  pentest-agent             not found"; fi
+    @if [ -f {{bin_dir}}/ks-connector ]; then printf "  %-25s %s\n" "ks-connector" "$(ls -lh {{bin_dir}}/ks-connector | awk '{print $5, $6, $7, $8}')"; else echo "  ks-connector              not found"; fi
+
+# Build Pick at a specific git ref (tag, branch, or commit hash)
+build-pick-at ref:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "→ Checking out {{ref}} in {{pick_dir}}"
+    git -C {{pick_dir}} fetch --all --tags
+    git -C {{pick_dir}} checkout {{ref}}
+    cargo build --manifest-path {{pick_dir}}/Cargo.toml --bin pentest-agent
+    cp {{pick_dir}}/target/debug/pentest-agent {{bin_dir}}/pentest-agent
+    echo "✓ pentest-agent built at $(git -C {{pick_dir}} describe --tags --always)"
+
+# Build KubeStudio at a specific git ref (tag, branch, or commit hash)
+build-kube-at ref:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "→ Checking out {{ref}} in {{kube_dir}}"
+    git -C {{kube_dir}} fetch --all --tags
+    git -C {{kube_dir}} checkout {{ref}}
+    cargo build --manifest-path {{kube_dir}}/Cargo.toml --bin ks-connector --features connector
+    cp {{kube_dir}}/target/debug/ks-connector {{bin_dir}}/ks-connector
+    echo "✓ ks-connector built at $(git -C {{kube_dir}} describe --tags --always)"
+
+# Build both connectors at the versions pinned in connector-versions.env
+build-pinned:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source connector-versions.env
+    echo "Building Pick at $PICK_VERSION, KubeStudio at $KUBESTUDIO_VERSION"
+    just build-pick-at "$PICK_VERSION"
+    just build-kube-at "$KUBESTUDIO_VERSION"
+    echo "✓ All connectors built at pinned versions"
