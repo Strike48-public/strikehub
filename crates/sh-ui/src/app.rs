@@ -286,11 +286,11 @@ pub fn App() -> Element {
     // first-launch setup completes via sync_config). The contains_key guard on
     // runners prevents double-starting connectors that are already running.
     //
-    // When auth is configured (auth_manager is Some), delay connector startup
+    // When auth is configured (STRIKE48_API_URL is set), delay connector startup
     // until sign-in completes so that TENANT_ID / STRIKE48_TENANT are available.
+    let needs_auth = std::env::var("STRIKE48_API_URL").is_ok();
     use_effect(move || {
         let signed_in = *is_signed_in.read();
-        let needs_auth = auth_manager.read().is_some();
         if needs_auth && !signed_in {
             return;
         }
@@ -537,14 +537,13 @@ pub fn App() -> Element {
                     oauth_result.client_id,
                 );
                 auth.spawn_refresh_loop();
-                is_signed_in.set(true);
                 // Bring StrikeHub to the foreground so the user doesn't have to
                 // manually switch back from the browser after OAuth.
                 #[cfg(feature = "desktop")]
                 dioxus::desktop::window().set_focus();
                 let next = *auth_version.peek() + 1;
                 auth_version.set(next);
-                tracing::info!("Sign-in completed successfully");
+                tracing::info!("OAuth tokens acquired, resolving tenant...");
 
                 // Post-sign-in setup (WS client, sandbox token, etc.)
                 let ws_client = match MatrixWsClient::connect(auth.clone()).await {
@@ -588,6 +587,11 @@ pub fn App() -> Element {
                     }
                     tracing::info!("Set TENANT_ID and STRIKE48_TENANT in process env");
                 }
+
+                // Signal sign-in AFTER tenant is in env so the connector
+                // startup effect sees the tenant when it fires.
+                is_signed_in.set(true);
+                tracing::info!("Sign-in completed, connectors may now start");
 
                 if !tenant.is_empty() && !instance.is_empty() {
                     let addr = format!("matrix:{}:app-kube-studio:{}", tenant, instance);
