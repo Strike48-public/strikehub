@@ -29,8 +29,24 @@ rm -rf "$APP_DIR" "$STAGING_DIR" "$DMG_NAME"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
-# Copy the main binary
-cp "target/${RUST_TARGET}/release/strikehub" "$APP_DIR/Contents/MacOS/strikehub"
+# Copy the real binary and create a wrapper that sets default env vars
+cp "target/${RUST_TARGET}/release/strikehub" "$APP_DIR/Contents/MacOS/strikehub-bin"
+chmod +x "$APP_DIR/Contents/MacOS/strikehub-bin"
+
+cat > "$APP_DIR/Contents/MacOS/strikehub" << 'WRAPPER'
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
+
+# Set default Strike48 URLs if not already set
+if [ -z "$STRIKE48_API_URL" ]; then
+    export STRIKE48_API_URL="https://studio.strike48.test"
+fi
+if [ -z "$STRIKE48_URL" ]; then
+    export STRIKE48_URL="grpc://connectors-studio.strike48.test"
+fi
+
+exec "$HERE/strikehub-bin" "$@"
+WRAPPER
 chmod +x "$APP_DIR/Contents/MacOS/strikehub"
 
 # Copy connectors if they exist
