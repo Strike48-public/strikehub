@@ -308,13 +308,6 @@ pub fn App() -> Element {
                     format!("http://127.0.0.1:{}", pp),
                 ));
             }
-            // Pass the auth token so connectors don't need their own OAuth flow.
-            if let Some(auth) = auth_manager.read().as_ref() {
-                let token = auth.token();
-                if !token.is_empty() {
-                    env_vars.push(("STRIKE48_TOKEN".into(), token));
-                }
-            }
 
             for conn in &current {
                 // Custom IPC connectors are externally managed — just register

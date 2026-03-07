@@ -462,8 +462,8 @@ fn success_page() -> String {
   h2 { margin-bottom: 1rem; font-weight: 600; color: #4ade80; }
   .status { color: #888; font-size: 14px; }
 </style></head><body>
-<div class="container"><h2>Signed in!</h2><p class="status">Redirecting to StrikeHub Studio…</p></div>
-<script>setTimeout(function(){window.location.href='https://studio.strike48.com'},1000)</script>
+<div class="container"><h2>Signed in!</h2><p class="status">Redirecting to Studio gateways…</p></div>
+<script>setTimeout(function(){window.location.href='https://studio.strike48.com/studio/#/admin/gateways'},1000)</script>
 </body></html>"#
         .to_string()
 }
