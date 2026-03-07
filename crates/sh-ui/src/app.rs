@@ -34,6 +34,7 @@ fn matrix_env_vars() -> Vec<(String, String)> {
     // STRIKE48_URL is excluded: child connectors use IPC, not gateway registration.
     const FORWARD_KEYS: &[&str] = &[
         "TENANT_ID",
+        "STRIKE48_TENANT",
         "STRIKE48_API_URL",
         "INSTANCE_ID",
         "MATRIX_TLS_INSECURE",
@@ -284,7 +285,15 @@ pub fn App() -> Element {
     // Uses read() so the effect re-runs when connectors are populated (e.g. after
     // first-launch setup completes via sync_config). The contains_key guard on
     // runners prevents double-starting connectors that are already running.
+    //
+    // When auth is configured (auth_manager is Some), delay connector startup
+    // until sign-in completes so that TENANT_ID / STRIKE48_TENANT are available.
     use_effect(move || {
+        let signed_in = *is_signed_in.read();
+        let needs_auth = auth_manager.read().is_some();
+        if needs_auth && !signed_in {
+            return;
+        }
         let current = connectors.read().clone();
         spawn(async move {
             let mut env_vars = matrix_env_vars();
@@ -564,7 +573,22 @@ pub fn App() -> Element {
                         (!v.is_empty()).then_some(v)
                     })
                     .unwrap_or_default();
+                tracing::info!("Resolved tenant_id={:?}", tenant);
                 let instance = std::env::var("INSTANCE_ID").unwrap_or_default();
+                tracing::info!("INSTANCE_ID={:?}", instance);
+
+                // Propagate tenant to child connectors via process env so
+                // restarts and late-spawned connectors pick it up.
+                if !tenant.is_empty() {
+                    // SAFETY: we are single-threaded in the Dioxus runtime at
+                    // this point; no other thread reads these env vars yet.
+                    unsafe {
+                        std::env::set_var("TENANT_ID", &tenant);
+                        std::env::set_var("STRIKE48_TENANT", &tenant);
+                    }
+                    tracing::info!("Set TENANT_ID and STRIKE48_TENANT in process env");
+                }
+
                 if !tenant.is_empty() && !instance.is_empty() {
                     let addr = format!("matrix:{}:app-kube-studio:{}", tenant, instance);
                     tracing::info!("Matrix app address: {}", addr);
