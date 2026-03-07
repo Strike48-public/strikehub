@@ -23,8 +23,6 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  PICK_VERSION: v0.1.1
-  KUBESTUDIO_VERSION: v0.1.0
 
 jobs:
   docker:
@@ -91,6 +89,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Load connector versions
+        run: cat connector-versions.env >> "$GITHUB_ENV"
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -254,6 +255,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load connector versions
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -344,6 +348,9 @@ jobs:
             connector_suffix: darwin-aarch64
     steps:
       - uses: actions/checkout@v4
+
+      - name: Load connector versions
+        run: cat connector-versions.env >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

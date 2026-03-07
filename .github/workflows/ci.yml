@@ -104,6 +104,9 @@ jobs:
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
 
+      - name: Load connector versions
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
       - name: Prepare dist directory
         run: mkdir -p dist
 
@@ -113,7 +116,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download v0.1.0 \
+          gh release download ${{ env.PICK_VERSION }} \
             --repo Strike48-public/pick \
             --pattern "pentest-agent-${{ matrix.target == 'aarch64-apple-darwin' && 'darwin-aarch64' || 'darwin-x86_64' }}.tar.gz" \
             --dir dist
@@ -124,7 +127,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download v0.1.0 \
+          gh release download ${{ env.KUBESTUDIO_VERSION }} \
             --repo Strike48-public/kubestudio \
             --pattern "ks-connector-${{ matrix.target == 'aarch64-apple-darwin' && 'darwin-aarch64' || 'darwin-x86_64' }}.tar.gz" \
             --dir dist
