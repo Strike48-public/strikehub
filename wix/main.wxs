@@ -1,0 +1,170 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='StrikeHub'
+        UpgradeCode='A8E5B4C7-3D92-4E89-B1F3-926789ABCDEF'
+        Manufacturer='Strike48'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='StrikeHub Desktop — Unified Strike48 Connector Hub'
+            Manufacturer='Strike48'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'
+            Platform='x64' />
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of StrikeHub is already installed.' />
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1' />
+        <Property Id='DiskPrompt' Value='StrikeHub Installation' />
+
+        <!-- ── Directory layout ─────────────────────────────── -->
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramFiles64Folder'>
+                <Directory Id='INSTALLDIR' Name='StrikeHub'>
+                    <Directory Id='ConnectorsDir' Name='connectors' />
+                </Directory>
+            </Directory>
+
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='StrikeHubMenuFolder' Name='StrikeHub' />
+            </Directory>
+
+            <Directory Id='DesktopFolder' />
+        </Directory>
+
+        <!-- ── Files ────────────────────────────────────────── -->
+
+        <DirectoryRef Id='INSTALLDIR'>
+            <!-- Main executable -->
+            <Component Id='StrikeHubExe' Guid='B1A34567-89AB-CDEF-0123-456789ABC001' Win64='yes'>
+                <File Id='strikehub.exe'
+                    Name='strikehub.exe'
+                    Source='target\x86_64-pc-windows-msvc\release\strikehub.exe'
+                    KeyPath='yes' />
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id='ConnectorsDir'>
+            <Component Id='KsConnector' Guid='B1A34567-89AB-CDEF-0123-456789ABC002' Win64='yes'>
+                <File Id='ks_connector.exe'
+                    Name='ks-connector.exe'
+                    Source='dist\ks-connector.exe'
+                    KeyPath='yes' />
+            </Component>
+            <Component Id='PentestAgent' Guid='B1A34567-89AB-CDEF-0123-456789ABC003' Win64='yes'>
+                <File Id='pentest_agent.exe'
+                    Name='pentest-agent.exe'
+                    Source='dist\pentest-agent.exe'
+                    KeyPath='yes' />
+            </Component>
+        </DirectoryRef>
+
+        <!-- ── Environment variables ────────────────────────── -->
+        <DirectoryRef Id='INSTALLDIR'>
+            <Component Id='EnvVars' Guid='B1A34567-89AB-CDEF-0123-456789ABC010' Win64='yes'>
+                <Environment Id='STRIKE48_API_URL'
+                    Name='STRIKE48_API_URL'
+                    Value='https://studio.strike48.com'
+                    Permanent='no'
+                    Part='all'
+                    Action='set'
+                    System='yes' />
+                <Environment Id='STRIKE48_URL'
+                    Name='STRIKE48_URL'
+                    Value='wss://studio.strike48.com'
+                    Permanent='no'
+                    Part='all'
+                    Action='set'
+                    System='yes' />
+                <!-- Add connectors dir to system PATH -->
+                <Environment Id='ConnectorsPath'
+                    Name='PATH'
+                    Value='[ConnectorsDir]'
+                    Permanent='no'
+                    Part='last'
+                    Action='set'
+                    System='yes' />
+                <!-- Sentinel key so WiX has something to key on -->
+                <RegistryValue Root='HKLM'
+                    Key='Software\Strike48\StrikeHub'
+                    Name='EnvVarsInstalled'
+                    Type='integer'
+                    Value='1'
+                    KeyPath='yes' />
+            </Component>
+        </DirectoryRef>
+
+        <!-- ── Start Menu shortcut ──────────────────────────── -->
+        <DirectoryRef Id='StrikeHubMenuFolder'>
+            <Component Id='StartMenuShortcut' Guid='B1A34567-89AB-CDEF-0123-456789ABC020' Win64='yes'>
+                <Shortcut Id='StrikeHubStartMenu'
+                    Name='StrikeHub'
+                    Description='StrikeHub Desktop'
+                    Target='[INSTALLDIR]strikehub.exe'
+                    WorkingDirectory='INSTALLDIR' />
+                <RemoveFolder Id='RemoveMenuFolder' On='uninstall' />
+                <RegistryValue Root='HKCU'
+                    Key='Software\Strike48\StrikeHub'
+                    Name='StartMenuShortcut'
+                    Type='integer'
+                    Value='1'
+                    KeyPath='yes' />
+            </Component>
+        </DirectoryRef>
+
+        <!-- ── Desktop shortcut ─────────────────────────────── -->
+        <DirectoryRef Id='DesktopFolder'>
+            <Component Id='DesktopShortcut' Guid='B1A34567-89AB-CDEF-0123-456789ABC030' Win64='yes'>
+                <Shortcut Id='StrikeHubDesktop'
+                    Name='StrikeHub'
+                    Description='StrikeHub Desktop'
+                    Target='[INSTALLDIR]strikehub.exe'
+                    WorkingDirectory='INSTALLDIR' />
+                <RegistryValue Root='HKCU'
+                    Key='Software\Strike48\StrikeHub'
+                    Name='DesktopShortcut'
+                    Type='integer'
+                    Value='1'
+                    KeyPath='yes' />
+            </Component>
+        </DirectoryRef>
+
+        <!-- ── Features ─────────────────────────────────────── -->
+        <Feature Id='MainProgram' Title='StrikeHub' Level='1'
+            ConfigurableDirectory='INSTALLDIR'
+            AllowAdvertise='no' Absent='disallow'>
+            <ComponentRef Id='StrikeHubExe' />
+            <ComponentRef Id='EnvVars' />
+            <ComponentRef Id='StartMenuShortcut' />
+
+            <Feature Id='Connectors' Title='Bundled Connectors' Level='1'>
+                <ComponentRef Id='KsConnector' />
+                <ComponentRef Id='PentestAgent' />
+            </Feature>
+
+            <Feature Id='DesktopShortcutFeature' Title='Desktop Shortcut' Level='1'>
+                <ComponentRef Id='DesktopShortcut' />
+            </Feature>
+        </Feature>
+
+        <!-- ── Add/Remove Programs metadata ─────────────────── -->
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[INSTALLDIR]' After='CostFinalize' />
+        <Property Id='ARPHELPLINK' Value='https://github.com/Strike48-public/strikehub' />
+        <Property Id='ARPURLINFOABOUT' Value='https://www.strike48.com' />
+
+        <!-- WixUI dialog set -->
+        <UIRef Id='WixUI_FeatureTree' />
+
+    </Product>
+</Wix>

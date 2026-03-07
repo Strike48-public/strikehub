@@ -12,7 +12,7 @@ fi
 
 VERSION=${1:-latest}
 ARCH=${2:-x86_64}
-PICK_VERSION=${PICK_VERSION:-v0.1.0}
+PICK_VERSION=${PICK_VERSION:-v0.1.1}
 KUBESTUDIO_VERSION=${KUBESTUDIO_VERSION:-v0.1.0}
 
 echo "Building StrikeHub AppImage with connectors..."

@@ -20,3 +20,8 @@ appimagetool*.AppImage
 # Build artifacts in root
 strikehub.svg
 strikehub.png
+*.msi
+*.wixobj
+*.wixpdb
+sfx-*.7z
+7zSD.sfx
