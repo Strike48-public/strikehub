@@ -39,10 +39,10 @@ HERE="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
 
 # Set default Strike48 URLs if not already set
 if [ -z "$STRIKE48_API_URL" ]; then
-    export STRIKE48_API_URL="https://studio.strike48.test"
+    export STRIKE48_API_URL="https://studio.strike48.com"
 fi
 if [ -z "$STRIKE48_URL" ]; then
-    export STRIKE48_URL="grpc://connectors-studio.strike48.test"
+    export STRIKE48_URL="wss://studio.strike48.com"
 fi
 
 exec "$HERE/strikehub-bin" "$@"
