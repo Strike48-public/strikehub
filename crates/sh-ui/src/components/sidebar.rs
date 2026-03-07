@@ -94,8 +94,8 @@ pub fn Sidebar(
             // Strike48 "48" mark at top — opens website in system browser
             div {
                 class: "rail-logo",
-                title: "strike48.com",
-                onclick: move |_| { let _ = open::that("https://www.strike48.com/"); },
+                title: "labs.strike48.com",
+                onclick: move |_| { let _ = open::that("https://labs.strike48.com/"); },
                 svg {
                     class: "rail-logo-svg",
                     width: "28",

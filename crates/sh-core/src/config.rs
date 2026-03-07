@@ -24,6 +24,9 @@ pub struct HubConfig {
     pub pick_tos_accepted: bool,
     #[serde(default)]
     pub connectors: BTreeMap<String, ConnectorEntry>,
+    /// Stable instance ID for this StrikeHub installation, persisted across sessions.
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +48,10 @@ pub struct ConnectorEntry {
     /// Explicit socket path for custom IPC connectors (externally managed).
     #[serde(default)]
     pub socket_path: Option<String>,
+    /// Stable per-connector instance ID, generated on first use and persisted.
+    /// Format: `strikehub-{connector_id}-{short_hash}`.
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -78,6 +85,8 @@ pub struct ConnectorConfig {
     /// Discovered via the `connectorApps` GraphQL query after the connector
     /// registers with Matrix.
     pub matrix_app_address: Option<String>,
+    /// Stable per-connector instance ID (persisted in config).
+    pub instance_id: String,
 }
 
 impl ConnectorConfig {
@@ -85,6 +94,7 @@ impl ConnectorConfig {
     pub fn from_socket(name: String, socket_path: String) -> Self {
         // Derive a stable id from the socket path.
         let id = format!("ipc-{}", slug_from_path(&socket_path));
+        let instance_id = generate_instance_id(&id);
         Self {
             id,
             display_name: name,
@@ -96,6 +106,7 @@ impl ConnectorConfig {
             transport: ConnectorTransport::Ipc,
             explicit_socket: Some(socket_path),
             matrix_app_address: None,
+            instance_id,
         }
     }
 
@@ -166,6 +177,7 @@ impl HubConfig {
                 setup_complete: false,
                 pick_tos_accepted: false,
                 connectors: BTreeMap::new(),
+                instance_id: None,
             });
         }
         let contents = std::fs::read_to_string(&path)?;
@@ -181,6 +193,17 @@ impl HubConfig {
         let contents = toml::to_string_pretty(self).map_err(|e| HubError::Config(e.to_string()))?;
         std::fs::write(&path, contents)?;
         Ok(())
+    }
+
+    /// Get or generate the stable instance ID for this StrikeHub installation.
+    pub fn get_or_create_instance_id(&mut self) -> String {
+        if let Some(ref id) = self.instance_id {
+            return id.clone();
+        }
+        let id = generate_instance_id("hub");
+        self.instance_id = Some(id.clone());
+        let _ = self.save();
+        id
     }
 
     /// Apply manifest defaults to saved connector entries.
@@ -199,12 +222,36 @@ impl HubConfig {
         }
     }
 
+    /// Ensure every enabled connector and the hub itself have a persisted instance ID.
+    /// Call once after loading (or before first use). Returns true if config was modified.
+    pub fn ensure_instance_ids(&mut self) -> bool {
+        let mut dirty = false;
+        if self.instance_id.is_none() {
+            self.instance_id = Some(generate_instance_id("hub"));
+            dirty = true;
+        }
+        for (id, entry) in self.connectors.iter_mut() {
+            if entry.instance_id.is_none() {
+                entry.instance_id = Some(generate_instance_id(id));
+                dirty = true;
+            }
+        }
+        if dirty {
+            let _ = self.save();
+        }
+        dirty
+    }
+
     pub fn to_connectors(&self) -> Vec<ConnectorConfig> {
         self.connectors
             .iter()
             .filter(|(_, entry)| entry.enabled)
             .map(|(id, entry)| {
                 let display_name = entry.display_name.clone().unwrap_or_else(|| id.clone());
+                let instance_id = entry
+                    .instance_id
+                    .clone()
+                    .unwrap_or_else(|| generate_instance_id(id));
                 ConnectorConfig {
                     id: id.clone(),
                     display_name,
@@ -216,6 +263,7 @@ impl HubConfig {
                     transport: entry.transport,
                     explicit_socket: entry.socket_path.clone(),
                     matrix_app_address: None,
+                    instance_id,
                 }
             })
             .collect()
@@ -234,6 +282,7 @@ impl HubConfig {
                 enabled: true,
                 transport: manifest.default_transport,
                 socket_path: None,
+                instance_id: Some(generate_instance_id(manifest.id)),
             },
         );
     }
@@ -241,6 +290,7 @@ impl HubConfig {
     /// Add a custom IPC connector by socket path.
     pub fn add_socket(&mut self, name: String, socket_path: String) {
         let id = format!("ipc-{}", slug_from_path(&socket_path));
+        let instance_id = generate_instance_id(&id);
         self.connectors.insert(
             id,
             ConnectorEntry {
@@ -252,6 +302,7 @@ impl HubConfig {
                 enabled: true,
                 transport: ConnectorTransport::Ipc,
                 socket_path: Some(socket_path),
+                instance_id: Some(instance_id),
             },
         );
     }
@@ -259,6 +310,15 @@ impl HubConfig {
     pub fn remove(&mut self, id: &str) {
         self.connectors.remove(id);
     }
+}
+
+/// Generate a stable instance ID for a connector: `strikehub-{id}-{hex}`.
+pub fn generate_instance_id(connector_id: &str) -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut buf);
+    let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("strikehub-{}-{}", connector_id, hex)
 }
 
 /// Derive a filesystem-safe slug from a socket path for use as a connector id.

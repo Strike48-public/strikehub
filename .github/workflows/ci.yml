@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -69,6 +72,90 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  build-dmg:
+    name: Build DMG (${{ matrix.arch }})
+    if: github.repository_owner == 'Strike48-public'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - os: macos-14
+            arch: aarch64
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-dmg
+
+      - name: Install rsvg-convert
+        run: brew install librsvg
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
+
+      - name: Prepare dist directory
+        run: mkdir -p dist
+
+      # Download connectors (best-effort) so the CI DMG is fully testable
+      - name: Download pentest-agent
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.1.0 \
+            --repo Strike48-public/pick \
+            --pattern "pentest-agent-${{ matrix.target == 'aarch64-apple-darwin' && 'darwin-aarch64' || 'darwin-x86_64' }}.tar.gz" \
+            --dir dist
+          cd dist && tar -xzf pentest-agent-*.tar.gz && rm -f pentest-agent-*.tar.gz
+
+      - name: Download ks-connector
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.1.0 \
+            --repo Strike48-public/kubestudio \
+            --pattern "ks-connector-${{ matrix.target == 'aarch64-apple-darwin' && 'darwin-aarch64' || 'darwin-x86_64' }}.tar.gz" \
+            --dir dist
+          cd dist && tar -xzf ks-connector-*.tar.gz && rm -f ks-connector-*.tar.gz
+
+      - name: Build DMG
+        run: |
+          chmod +x scripts/build-dmg.sh
+          ./scripts/build-dmg.sh ci-test ${{ matrix.arch }}
+
+      - name: Verify DMG
+        run: |
+          ls -la StrikeHub-*.dmg
+          hdiutil verify StrikeHub-*.dmg
+          # Mount and verify app bundle contents
+          hdiutil attach StrikeHub-*.dmg -mountpoint /tmp/dmg-verify
+          echo "=== App bundle contents ==="
+          ls -la /tmp/dmg-verify/StrikeHub.app/Contents/MacOS/
+          test -x /tmp/dmg-verify/StrikeHub.app/Contents/MacOS/strikehub || (echo "FAIL: wrapper missing" && exit 1)
+          test -x /tmp/dmg-verify/StrikeHub.app/Contents/MacOS/strikehub-bin || (echo "FAIL: binary missing" && exit 1)
+          test -f /tmp/dmg-verify/StrikeHub.app/Contents/Info.plist || (echo "FAIL: Info.plist missing" && exit 1)
+          codesign --verify /tmp/dmg-verify/StrikeHub.app && echo "Codesign OK"
+          # Check wrapper sets correct URLs
+          grep -q "studio.strike48.com" /tmp/dmg-verify/StrikeHub.app/Contents/MacOS/strikehub || (echo "FAIL: production URL missing from wrapper" && exit 1)
+          echo "=== All checks passed ==="
+          hdiutil detach /tmp/dmg-verify
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strikehub-dmg-${{ matrix.arch }}
+          path: StrikeHub-*.dmg
 
   helm-lint:
     name: Helm Lint

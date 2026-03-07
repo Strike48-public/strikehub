@@ -18,23 +18,21 @@ use tokio::sync::oneshot;
 /// These are read directly from the StrikeHub process env so they're available
 /// immediately at connector startup (before AuthManager is initialised).
 ///
-/// Note: STRIKE48_URL is intentionally NOT forwarded. Connectors spawned by
-/// StrikeHub communicate over IPC (Unix socket) and don't need to register
-/// independently with the Matrix connector gateway.
-///
 /// Forwarded:
-///   TENANT_ID           — Matrix tenant (e.g. non-prod)
-///   STRIKE48_API_URL    — Strike48 HTTP API (e.g. https://studio.strike48.test)
+///   TENANT_ID           — Matrix tenant
+///   STRIKE48_TENANT     — alias for TENANT_ID
+///   STRIKE48_API_URL    — Strike48 HTTP API
+///   STRIKE48_URL        — Matrix gateway WSS URL (for registration)
 ///   INSTANCE_ID         — stable connector instance name
 ///   MATRIX_TLS_INSECURE — accept self-signed certs
 ///   KUBESTUDIO_AI       — enable AI features in the connector
 ///   KUBESTUDIO_MODE     — permission mode (read/write)
 fn matrix_env_vars() -> Vec<(String, String)> {
-    // Keys to forward from StrikeHub's env to the connector child process.
-    // STRIKE48_URL is excluded: child connectors use IPC, not gateway registration.
     const FORWARD_KEYS: &[&str] = &[
         "TENANT_ID",
+        "STRIKE48_TENANT",
         "STRIKE48_API_URL",
+        "STRIKE48_URL",
         "INSTANCE_ID",
         "MATRIX_TLS_INSECURE",
         "KUBESTUDIO_AI",
@@ -78,6 +76,7 @@ fn sync_config(
                     enabled: true,
                     transport: c.manifest.default_transport,
                     socket_path: None,
+                    instance_id: Some(sh_core::generate_instance_id(c.manifest.id)),
                 },
             );
         }
@@ -85,6 +84,7 @@ fn sync_config(
 
     for c in custom_connectors {
         let id = format!("ipc-{}", sh_core::slug_from_path(&c.socket_path));
+        let inst_id = sh_core::generate_instance_id(&id);
         cfg.connectors.insert(
             id,
             sh_core::ConnectorEntry {
@@ -96,6 +96,7 @@ fn sync_config(
                 enabled: true,
                 transport: ConnectorTransport::Ipc,
                 socket_path: Some(c.socket_path.clone()),
+                instance_id: Some(inst_id),
             },
         );
     }
@@ -125,10 +126,12 @@ pub fn App() -> Element {
             setup_complete: false,
             pick_tos_accepted: false,
             connectors: Default::default(),
+            instance_id: None,
         });
         // Merge manifest defaults so that saved configs pick up transport
         // and binary changes when the code is upgraded.
         cfg.apply_manifest_defaults(&builtin_manifests());
+        cfg.ensure_instance_ids();
         cfg
     });
     let mut connectors = use_signal(move || hub_config.read().to_connectors());
@@ -284,7 +287,15 @@ pub fn App() -> Element {
     // Uses read() so the effect re-runs when connectors are populated (e.g. after
     // first-launch setup completes via sync_config). The contains_key guard on
     // runners prevents double-starting connectors that are already running.
+    //
+    // When auth is configured (STRIKE48_API_URL is set), delay connector startup
+    // until sign-in completes so that TENANT_ID / STRIKE48_TENANT are available.
+    let needs_auth = std::env::var("STRIKE48_API_URL").is_ok();
     use_effect(move || {
+        let signed_in = *is_signed_in.read();
+        if needs_auth && !signed_in {
+            return;
+        }
         let current = connectors.read().clone();
         spawn(async move {
             let mut env_vars = matrix_env_vars();
@@ -341,7 +352,15 @@ pub fn App() -> Element {
                     continue;
                 };
                 let binary_path = std::path::PathBuf::from(binary);
-                match IpcConnectorRunner::start(&conn.id, &binary_path, &env_vars).await {
+                // Per-connector instance ID (persisted in config).
+                let mut conn_env = env_vars.clone();
+                conn_env.push(("INSTANCE_ID".into(), conn.instance_id.clone()));
+                tracing::info!(
+                    "Starting connector '{}' with INSTANCE_ID={}",
+                    conn.id,
+                    conn.instance_id
+                );
+                match IpcConnectorRunner::start(&conn.id, &binary_path, &conn_env).await {
                     Ok(runner) => {
                         tracing::info!(
                             "started IPC connector '{}' → {}",
@@ -528,14 +547,13 @@ pub fn App() -> Element {
                     oauth_result.client_id,
                 );
                 auth.spawn_refresh_loop();
-                is_signed_in.set(true);
                 // Bring StrikeHub to the foreground so the user doesn't have to
                 // manually switch back from the browser after OAuth.
                 #[cfg(feature = "desktop")]
                 dioxus::desktop::window().set_focus();
                 let next = *auth_version.peek() + 1;
                 auth_version.set(next);
-                tracing::info!("Sign-in completed successfully");
+                tracing::info!("OAuth tokens acquired, resolving tenant...");
 
                 // Post-sign-in setup (WS client, sandbox token, etc.)
                 let ws_client = match MatrixWsClient::connect(auth.clone()).await {
@@ -564,7 +582,27 @@ pub fn App() -> Element {
                         (!v.is_empty()).then_some(v)
                     })
                     .unwrap_or_default();
-                let instance = std::env::var("INSTANCE_ID").unwrap_or_default();
+                tracing::info!("Resolved tenant_id={:?}", tenant);
+                let instance = hub_config.read().instance_id.clone().unwrap_or_default();
+                tracing::info!("INSTANCE_ID={:?}", instance);
+
+                // Propagate tenant to child connectors via process env so
+                // restarts and late-spawned connectors pick it up.
+                if !tenant.is_empty() {
+                    // SAFETY: we are single-threaded in the Dioxus runtime at
+                    // this point; no other thread reads these env vars yet.
+                    unsafe {
+                        std::env::set_var("TENANT_ID", &tenant);
+                        std::env::set_var("STRIKE48_TENANT", &tenant);
+                    }
+                    tracing::info!("Set TENANT_ID and STRIKE48_TENANT in process env");
+                }
+
+                // Signal sign-in AFTER tenant is in env so the connector
+                // startup effect sees the tenant when it fires.
+                is_signed_in.set(true);
+                tracing::info!("Sign-in completed, connectors may now start");
+
                 if !tenant.is_empty() && !instance.is_empty() {
                     let addr = format!("matrix:{}:app-kube-studio:{}", tenant, instance);
                     tracing::info!("Matrix app address: {}", addr);
