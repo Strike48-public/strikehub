@@ -33,16 +33,19 @@ impl IpcConnectorRunner {
             cmd.env(k, v);
         }
 
-        // Inherit stdout/stderr so connector logs appear in StrikeHub's console
-        cmd.stdout(std::process::Stdio::inherit());
-        cmd.stderr(std::process::Stdio::inherit());
-
-        // Prevent a visible console window from appearing for each connector
+        // On Windows the desktop app has no console, so inheriting stdio would
+        // cause Windows to allocate a visible console window for each connector.
+        // Suppress that by sending output to null and setting CREATE_NO_WINDOW.
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        #[cfg(not(windows))]
+        {
+            cmd.stdout(std::process::Stdio::inherit());
+            cmd.stderr(std::process::Stdio::inherit());
         }
 
         let child = cmd.spawn().map_err(|e| {
