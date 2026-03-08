@@ -128,7 +128,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
-          cd /tmp/pick && git checkout ${{ env.PICK_REF }}
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
           cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target ${{ matrix.target }}
           cp /tmp/pick/target/${{ matrix.target }}/release/pentest-agent${{ runner.os == 'Windows' && '.exe' || '' }} dist/
 
@@ -138,7 +138,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
-          cd /tmp/kubestudio && git checkout ${{ env.KUBESTUDIO_REF }}
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
           cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
           cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector${{ runner.os == 'Windows' && '.exe' || '' }} dist/
 
@@ -265,7 +265,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
-          cd /tmp/pick && git checkout ${{ env.PICK_REF }}
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
           cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target x86_64-unknown-linux-gnu
           cp /tmp/pick/target/x86_64-unknown-linux-gnu/release/pentest-agent dist/
 
@@ -274,7 +274,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
-          cd /tmp/kubestudio && git checkout ${{ env.KUBESTUDIO_REF }}
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
           cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target x86_64-unknown-linux-gnu
           cp /tmp/kubestudio/target/x86_64-unknown-linux-gnu/release/ks-connector dist/
 
@@ -348,7 +348,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
-          cd /tmp/pick && git checkout ${{ env.PICK_REF }}
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
           cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target ${{ matrix.target }}
           cp /tmp/pick/target/${{ matrix.target }}/release/pentest-agent dist/
 
@@ -357,7 +357,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
-          cd /tmp/kubestudio && git checkout ${{ env.KUBESTUDIO_REF }}
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
           cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
           cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector dist/
 
