@@ -37,6 +37,14 @@ impl IpcConnectorRunner {
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());
 
+        // Prevent a visible console window from appearing for each connector
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
         let child = cmd.spawn().map_err(|e| {
             HubError::Runner(format!("failed to spawn {}: {}", binary.display(), e))
         })?;
