@@ -237,6 +237,70 @@ jobs:
           name: strikehub-appimage
           path: StrikeHub-*.AppImage
 
+  build-msi:
+    name: Build MSI
+    if: github.repository_owner == 'Strike48-public'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc-msi
+
+      - name: Build binary
+        run: cargo build --release --target x86_64-pc-windows-msvc --no-default-features --features desktop
+
+      - name: Load connector refs
+        shell: bash
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Prepare dist directory
+        shell: bash
+        run: mkdir -p dist
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Checkout and build pentest-agent
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target x86_64-pc-windows-msvc
+          cp /tmp/pick/target/x86_64-pc-windows-msvc/release/pentest-agent.exe dist/
+
+      - name: Checkout and build ks-connector
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target x86_64-pc-windows-msvc
+          cp /tmp/kubestudio/target/x86_64-pc-windows-msvc/release/ks-connector.exe dist/
+
+      - name: Install WiX Toolset
+        run: choco install wixtoolset -y
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          .\scripts\build-msi.ps1 -Version ci-test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strikehub-msi
+          path: StrikeHub-*.msi
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
