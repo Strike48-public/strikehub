@@ -94,15 +94,25 @@ build-kube-at ref:
     cp {{kube_dir}}/target/debug/ks-connector {{bin_dir}}/ks-connector
     echo "✓ ks-connector built at $(git -C {{kube_dir}} describe --tags --always)"
 
-# Build both connectors at the versions pinned in connector-versions.env
+# Build both connectors at the git refs pinned in connector-versions.env
 build-pinned:
     #!/usr/bin/env bash
     set -euo pipefail
     source connector-versions.env
-    echo "Building Pick at $PICK_VERSION, KubeStudio at $KUBESTUDIO_VERSION"
-    just build-pick-at "$PICK_VERSION"
-    just build-kube-at "$KUBESTUDIO_VERSION"
-    echo "✓ All connectors built at pinned versions"
+    echo "Building Pick at $PICK_REF, KubeStudio at $KUBESTUDIO_REF"
+    just build-pick-at "$PICK_REF"
+    just build-kube-at "$KUBESTUDIO_REF"
+    echo "✓ All connectors built at pinned refs"
+
+# Update connector-versions.env to the latest main HEAD of each connector repo
+pin:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pick_sha=$(git -C {{pick_dir}} ls-remote origin main | awk '{print $1}')
+    kube_sha=$(git -C {{kube_dir}} ls-remote origin main | awk '{print $1}')
+    printf "PICK_REF=%s\nKUBESTUDIO_REF=%s\n" "$pick_sha" "$kube_sha" > connector-versions.env
+    echo "✓ Pinned connector refs:"
+    cat connector-versions.env
 
 # Package StrikeHub with connector binaries into a dist directory.
 # Copies strikehub + ks-connector + pentest-agent next to each other
