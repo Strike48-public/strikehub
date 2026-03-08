@@ -269,9 +269,9 @@ pub fn PreflightOverlay(
                             "Re-check"
                         }
                         button {
-                            class: if all_passed { "preflight-btn-continue" } else { "preflight-btn-skip" },
+                            class: "preflight-btn-continue",
                             onclick: move |_| on_continue.call(()),
-                            if all_passed { "Continue" } else { "Skip" }
+                            if all_passed { "Continue" } else { "Next" }
                         }
                     }
                 }
