@@ -294,7 +294,7 @@ jobs:
       - name: Build MSI
         shell: pwsh
         run: |
-          .\scripts\build-msi.ps1 -Version ci-test
+          .\scripts\build-msi.ps1 -Version 0.0.0
 
       - uses: actions/upload-artifact@v4
         with:
