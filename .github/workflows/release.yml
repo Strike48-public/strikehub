@@ -117,6 +117,9 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.binary_name }}
 
       # Build connectors from source at pinned git refs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Checkout and build pentest-agent
         shell: bash
         env:
@@ -250,6 +253,9 @@ jobs:
         run: mkdir -p dist
 
       # Build connectors from source at pinned git refs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Checkout and build pentest-agent
         env:
           GH_TOKEN: ${{ github.token }}
@@ -328,6 +334,9 @@ jobs:
         run: mkdir -p dist
 
       # Build connectors from source at pinned git refs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Checkout and build pentest-agent
         env:
           GH_TOKEN: ${{ github.token }}
