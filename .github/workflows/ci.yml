@@ -161,6 +161,82 @@ jobs:
           name: strikehub-dmg-${{ matrix.arch }}
           path: StrikeHub-*.dmg
 
+  build-appimage:
+    name: Build AppImage
+    if: github.repository_owner == 'Strike48-public'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libpcap-dev \
+            file \
+            wget \
+            imagemagick \
+            libfuse2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu-appimage
+
+      - name: Build binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu --no-default-features --features desktop
+
+      - name: Load connector refs
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Prepare dist directory
+        run: mkdir -p dist
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Checkout and build pentest-agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target x86_64-unknown-linux-gnu
+          cp /tmp/pick/target/x86_64-unknown-linux-gnu/release/pentest-agent dist/
+
+      - name: Checkout and build ks-connector
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target x86_64-unknown-linux-gnu
+          cp /tmp/kubestudio/target/x86_64-unknown-linux-gnu/release/ks-connector dist/
+
+      - name: Build AppImage
+        run: |
+          chmod +x scripts/build-appimage.sh
+          ./scripts/build-appimage.sh ci-test x86_64
+
+      - name: Verify AppImage
+        run: |
+          ls -la StrikeHub-*.AppImage
+          chmod +x StrikeHub-*.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strikehub-appimage
+          path: StrikeHub-*.AppImage
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
