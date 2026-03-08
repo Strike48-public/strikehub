@@ -4,6 +4,118 @@ use crate::auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps};
 use crate::config::ConnectorStatus;
 use crate::matrix_ws::MatrixWsClient;
 
+/// Create a `Command` that won't open a visible console window on Windows.
+fn hidden_command(program: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Refresh the process PATH from the registry on Windows.
+///
+/// After `winget install` adds a new entry to the user PATH, the running
+/// process still has the old value. This re-reads the system and user PATH
+/// from the registry via `reg query` and updates the process environment so
+/// that subsequent commands can find newly-installed binaries.
+#[cfg(target_os = "windows")]
+fn refresh_path() {
+    /// Expand `%VAR%` references using the current process environment.
+    fn expand_env_vars(s: &str) -> String {
+        let mut result = s.to_string();
+        while let Some(start) = result.find('%') {
+            if let Some(end) = result[start + 1..].find('%') {
+                let var_name = &result[start + 1..start + 1 + end];
+                if var_name.is_empty() {
+                    break;
+                }
+                let value = std::env::var(var_name)
+                    .or_else(|_| std::env::var(var_name.to_uppercase()))
+                    .unwrap_or_default();
+                result = format!(
+                    "{}{}{}",
+                    &result[..start],
+                    value,
+                    &result[start + 2 + end..]
+                );
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    fn reg_query_path(key: &str) -> Option<String> {
+        let output = hidden_command("reg")
+            .args(["query", key, "/v", "Path"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        // Output format: "    Path    REG_EXPAND_SZ    C:\...;C:\..."
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("Path") || trimmed.starts_with("PATH") {
+                if let Some(pos) = trimmed.find("REG_") {
+                    let after_type = &trimmed[pos..];
+                    if let Some(val_start) = after_type.find("    ") {
+                        let val = after_type[val_start..].trim();
+                        if !val.is_empty() {
+                            return Some(expand_env_vars(val));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    let machine =
+        reg_query_path(r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+            .unwrap_or_default();
+    let user = reg_query_path(r"HKCU\Environment").unwrap_or_default();
+
+    let new_path = format!("{};{}", machine, user);
+    if new_path.len() > 2 {
+        // SAFETY: preflight checks run sequentially on a single blocking
+        // thread; no other thread reads PATH concurrently.
+        unsafe { std::env::set_var("PATH", &new_path) };
+        tracing::debug!("refreshed PATH: {}", new_path);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn refresh_path() {
+    // No-op on non-Windows.
+}
+
+/// Detected host operating system for platform-specific install hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOs {
+    MacOs,
+    Linux,
+    Windows,
+}
+
+impl HostOs {
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
 /// Status of a single preflight check.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckStatus {
@@ -20,6 +132,9 @@ pub struct PreflightCheck {
     pub status: CheckStatus,
     /// Shown when the check fails — tells the user how to fix it.
     pub install_hint: String,
+    /// Optional shell command the UI can run to install the dependency.
+    /// When set, the preflight UI shows an "Install" button.
+    pub install_command: Option<String>,
 }
 
 /// Result of running all preflight checks for a connector.
@@ -50,6 +165,8 @@ impl AggregatePreflightResult {
 
 /// Run preflight checks for a connector by ID (local prerequisites only).
 pub async fn run_preflight(connector_id: &str) -> PreflightResult {
+    // Pick up any PATH changes from installs that happened since launch.
+    refresh_path();
     let (name, checks) = match connector_id {
         "kubestudio" => ("KubeStudio", run_kubestudio_checks().await),
         "pick" => ("Pick", run_pick_checks().await),
@@ -123,6 +240,7 @@ pub async fn run_preflight_full(
                 description: format!("{} connector is running", display_name),
                 status: CheckStatus::Passed,
                 install_hint: String::new(),
+                install_command: None,
             },
             Some(_) => PreflightCheck {
                 name: "Process".into(),
@@ -133,17 +251,49 @@ pub async fn run_preflight_full(
                      Check the application logs for errors.",
                     display_name
                 ),
+                install_command: None,
             },
-            None => PreflightCheck {
-                name: "Process".into(),
-                description: format!("{} connector has not started", display_name),
-                status: CheckStatus::Failed,
-                install_hint: format!(
-                    "The {} connector binary may not be installed.\n\
-                     Ensure the binary is available in your PATH or ~/bin/.",
-                    display_name
-                ),
-            },
+            None => {
+                let binary_name = connector_binary_name(id);
+                // Check if the binary actually exists on disk before
+                // claiming it is missing.
+                let binary_found = find_connector_binary(binary_name);
+                if binary_found {
+                    PreflightCheck {
+                        name: "Process".into(),
+                        description: format!(
+                            "{} connector has not started yet (waiting for sign-in)",
+                            display_name
+                        ),
+                        status: CheckStatus::Checking,
+                        install_hint: String::new(),
+                        install_command: None,
+                    }
+                } else {
+                    let hint = match HostOs::current() {
+                        HostOs::Windows => format!(
+                            "The {d} connector binary ({b}.exe) was not found.\n\n\
+                             Check that {b}.exe is next to strikehub.exe,\n\
+                             or add its location to your PATH.",
+                            d = display_name,
+                            b = binary_name
+                        ),
+                        _ => format!(
+                            "The {d} connector binary was not found.\n\n\
+                             Ensure \"{b}\" is in your PATH or ~/bin/.",
+                            d = display_name,
+                            b = binary_name
+                        ),
+                    };
+                    PreflightCheck {
+                        name: "Process".into(),
+                        description: format!("{} connector binary not found", display_name),
+                        status: CheckStatus::Failed,
+                        install_hint: hint,
+                        install_command: None,
+                    }
+                }
+            }
         });
 
         // Check 2: registered with Matrix
@@ -154,6 +304,7 @@ pub async fn run_preflight_full(
                 description: format!("{} is registered with Strike48", display_name),
                 status: CheckStatus::Passed,
                 install_hint: String::new(),
+                install_command: None,
             }
         } else {
             PreflightCheck {
@@ -168,6 +319,7 @@ pub async fn run_preflight_full(
                      \u{2022} The STRIKE48_URL or TENANT_ID environment is misconfigured",
                     display_name
                 ),
+                install_command: None,
             }
         });
 
@@ -215,6 +367,41 @@ fn connector_display_name(id: &str) -> &str {
     }
 }
 
+fn connector_binary_name(id: &str) -> &str {
+    match id {
+        "kubestudio" => "ks-connector",
+        "pick" => "pentest-agent",
+        _ => id,
+    }
+}
+
+/// Check if a connector binary can be found on disk (next to the exe or on PATH).
+fn find_connector_binary(name: &str) -> bool {
+    // Check next to the running executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return true;
+            }
+            // On Windows, also check with .exe extension
+            #[cfg(target_os = "windows")]
+            {
+                let exe_candidate = dir.join(format!("{}.exe", name));
+                if exe_candidate.exists() {
+                    return true;
+                }
+            }
+        }
+    }
+    // Check on PATH
+    hidden_command(name)
+        .arg("--version")
+        .output()
+        .map(|_| true)
+        .unwrap_or(false)
+}
+
 async fn run_kubestudio_checks() -> Vec<PreflightCheck> {
     let kubectl_check = tokio::task::spawn_blocking(check_kube_context).await;
     vec![kubectl_check.unwrap_or_else(|_| PreflightCheck {
@@ -222,6 +409,7 @@ async fn run_kubestudio_checks() -> Vec<PreflightCheck> {
         description: "A Kubernetes cluster context must be configured".into(),
         status: CheckStatus::Failed,
         install_hint: "Could not verify Kubernetes context.".into(),
+        install_command: None,
     })]
 }
 
@@ -232,6 +420,7 @@ async fn run_pick_checks() -> Vec<PreflightCheck> {
         description: "Docker must be installed and running".into(),
         status: CheckStatus::Failed,
         install_hint: "Could not verify Docker installation.".into(),
+        install_command: None,
     })]
 }
 
@@ -239,57 +428,115 @@ async fn run_pick_checks() -> Vec<PreflightCheck> {
 fn check_kube_context() -> PreflightCheck {
     let name = "Kubernetes Context".to_string();
 
-    // Try kubectl first
-    if let Ok(output) = Command::new("kubectl")
-        .args(["config", "get-contexts", "-o", "name"])
+    // First check if kubectl binary exists at all.
+    let kubectl_found = hidden_command("kubectl")
+        .args(["version", "--client", "--short"])
         .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let contexts: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-            if !contexts.is_empty() {
-                return PreflightCheck {
-                    name,
-                    description: format!(
-                        "Found {} context{}: {}",
-                        contexts.len(),
-                        if contexts.len() == 1 { "" } else { "s" },
-                        contexts.join(", ")
-                    ),
-                    status: CheckStatus::Passed,
-                    install_hint: String::new(),
-                };
-            }
-        }
-    }
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
-    // Fall back: check if ~/.kube/config exists with any context
-    if let Some(home) = dirs::home_dir() {
-        let kubeconfig = home.join(".kube").join("config");
-        if kubeconfig.exists() {
-            if let Ok(content) = std::fs::read_to_string(&kubeconfig) {
-                if content.contains("contexts:") && content.contains("- context:") {
+    if kubectl_found {
+        // kubectl is installed — check for contexts.
+        if let Ok(output) = hidden_command("kubectl")
+            .args(["config", "get-contexts", "-o", "name"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let contexts: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+                if !contexts.is_empty() {
                     return PreflightCheck {
                         name,
-                        description: "Found kubeconfig with cluster contexts".into(),
+                        description: format!(
+                            "Found {} context{}: {}",
+                            contexts.len(),
+                            if contexts.len() == 1 { "" } else { "s" },
+                            contexts.join(", ")
+                        ),
                         status: CheckStatus::Passed,
                         install_hint: String::new(),
+                        install_command: None,
                     };
                 }
             }
         }
+
+        // Fall back: check if ~/.kube/config exists with any context
+        if let Some(home) = dirs::home_dir() {
+            let kubeconfig = home.join(".kube").join("config");
+            if kubeconfig.exists() {
+                if let Ok(content) = std::fs::read_to_string(&kubeconfig) {
+                    if content.contains("contexts:") && content.contains("- context:") {
+                        return PreflightCheck {
+                            name,
+                            description: "Found kubeconfig with cluster contexts".into(),
+                            status: CheckStatus::Passed,
+                            install_hint: String::new(),
+                            install_command: None,
+                        };
+                    }
+                }
+            }
+        }
+
+        // kubectl installed but no context configured.
+        return PreflightCheck {
+            name,
+            description: "kubectl is installed but no cluster context is configured".into(),
+            status: CheckStatus::Failed,
+            install_hint: "\
+# Configure a context:
+kubectl config set-context my-cluster --cluster=<cluster> --user=<user>
+
+# Or use Docker Desktop, Rancher Desktop, minikube, or kind to create a local cluster."
+                .into(),
+            install_command: None,
+        };
     }
+
+    // kubectl not found — show install instructions.
+    let hint = match HostOs::current() {
+        HostOs::MacOs => "\
+brew install kubectl
+
+# Then configure a context:
+kubectl config set-context my-cluster --cluster=<cluster> --user=<user>
+
+# Or use Docker Desktop, Rancher Desktop, minikube, or kind to create a local cluster.",
+
+        HostOs::Linux => "\
+curl -LO \"https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl\"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+
+# Then configure a context:
+kubectl config set-context my-cluster --cluster=<cluster> --user=<user>
+
+# Or use Docker Desktop, Rancher Desktop, minikube, or kind to create a local cluster.",
+
+        HostOs::Windows => "\
+winget install Kubernetes.kubectl --source winget
+
+# Then configure a context:
+kubectl config set-context my-cluster --cluster=<cluster> --user=<user>
+
+# Or use Docker Desktop, Rancher Desktop, minikube, or kind to create a local cluster.",
+    };
+
+    let install_cmd = match HostOs::current() {
+        HostOs::MacOs => Some("brew install kubectl".into()),
+        HostOs::Windows => {
+            Some("winget install Kubernetes.kubectl --source winget --accept-source-agreements --accept-package-agreements".into())
+        }
+        HostOs::Linux => None,
+    };
 
     PreflightCheck {
         name,
-        description: "No Kubernetes cluster context found".into(),
+        description: "kubectl not found".into(),
         status: CheckStatus::Failed,
-        install_hint: "Install kubectl and configure a cluster context:\n\n\
-            macOS:  brew install kubectl\n\
-            Linux:  curl -LO \"https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl\" && chmod +x kubectl && sudo mv kubectl /usr/local/bin/\n\n\
-            Then configure a context:\n  kubectl config set-context my-cluster --cluster=<cluster> --user=<user>\n\n\
-            Or use Docker Desktop, Rancher Desktop, minikube, or kind to create a local cluster."
-            .into(),
+        install_hint: hint.into(),
+        install_command: install_cmd,
     }
 }
 
@@ -298,40 +545,63 @@ fn check_docker_cli() -> PreflightCheck {
     let name = "Docker CLI".to_string();
 
     // Check if docker binary exists
-    let docker_exists = Command::new("docker").arg("--version").output();
+    let docker_exists = hidden_command("docker").arg("--version").output();
     match docker_exists {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
             // Check if daemon is running
-            match Command::new("docker").arg("info").output() {
+            match hidden_command("docker").arg("info").output() {
                 Ok(info_output) if info_output.status.success() => PreflightCheck {
                     name,
                     description: format!("{} (daemon running)", version),
                     status: CheckStatus::Passed,
                     install_hint: String::new(),
+                    install_command: None,
                 },
-                _ => PreflightCheck {
-                    name,
-                    description: format!("{} (daemon not running)", version),
-                    status: CheckStatus::Failed,
-                    install_hint: "Docker is installed but the daemon is not running.\n\n\
-                        Start Docker Desktop, or run:\n  sudo systemctl start docker\n\n\
-                        On macOS you can also run:\n  open -a Docker"
-                        .into(),
-                },
+                _ => {
+                    let (hint, cmd) = match HostOs::current() {
+                        HostOs::MacOs => ("open -a Docker", Some("open -a Docker".into())),
+                        HostOs::Linux => ("sudo systemctl start docker", None),
+                        HostOs::Windows => (
+                            "Launch Docker Desktop from the Start menu.",
+                            Some("Start-Process 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe'".into()),
+                        ),
+                    };
+                    PreflightCheck {
+                        name,
+                        description: format!("{} (daemon not running)", version),
+                        status: CheckStatus::Failed,
+                        install_hint: hint.into(),
+                        install_command: cmd,
+                    }
+                }
             }
         }
-        _ => PreflightCheck {
-            name,
-            description: "Docker CLI not found".into(),
-            status: CheckStatus::Failed,
-            install_hint: "Install Docker Desktop:\n\n\
-                macOS:   https://docs.docker.com/desktop/install/mac-install/\n\
-                Linux:   https://docs.docker.com/engine/install/\n\
-                Windows: https://docs.docker.com/desktop/install/windows-install/\n\n\
-                Or install via Homebrew (macOS):\n  brew install --cask docker"
-                .into(),
-        },
+        _ => {
+            let (hint, cmd) = match HostOs::current() {
+                HostOs::MacOs => (
+                    "brew install --cask docker",
+                    Some("brew install --cask docker".into()),
+                ),
+                HostOs::Linux => (
+                    "\
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh",
+                    None,
+                ),
+                HostOs::Windows => (
+                    "winget install Docker.DockerDesktop --source winget",
+                    Some("winget install Docker.DockerDesktop --source winget --accept-source-agreements --accept-package-agreements".into()),
+                ),
+            };
+            PreflightCheck {
+                name,
+                description: "Docker CLI not found".into(),
+                status: CheckStatus::Failed,
+                install_hint: hint.into(),
+                install_command: cmd,
+            }
+        }
     }
 }

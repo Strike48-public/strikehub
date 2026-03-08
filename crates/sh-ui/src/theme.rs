@@ -782,6 +782,47 @@ pub fn app_css() -> &'static str {
             word-break: break-word;
             line-height: 1.6;
         }
+        .preflight-install-action {
+            margin-top: 8px;
+        }
+        .preflight-btn-install {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 18px;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: var(--radius);
+            background: var(--accent);
+            color: var(--accent-foreground);
+            cursor: pointer;
+            transition: opacity 0.15s;
+        }
+        .preflight-btn-install:hover { opacity: 0.9; }
+        .preflight-btn-install:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+        .preflight-btn-install .preflight-spinner {
+            width: 12px;
+            height: 12px;
+        }
+        .preflight-install-output {
+            font-size: 11px;
+            font-family: var(--font-mono);
+            color: var(--chrome-foreground);
+            background: var(--chrome-input-bg);
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            margin-top: 8px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.5;
+            max-height: 200px;
+            overflow-y: auto;
+        }
 
         /* Hint box (step 2 instructions) */
         .preflight-hint-box {

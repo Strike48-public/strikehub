@@ -132,6 +132,36 @@ impl Drop for IpcConnectorRunner {
 ///    (e.g. `~/code/strike48/scratch/strikehub/` and `~/code/strike48/studio-kube-desktop/`).
 /// 4. Fall back to the bare name (OS PATH lookup).
 fn resolve_binary(binary: &Path) -> PathBuf {
+    // On Windows, also check for the path with .exe appended.
+    #[cfg(target_os = "windows")]
+    let exists = |p: &Path| -> bool {
+        if p.exists() {
+            return true;
+        }
+        if p.extension().is_none() {
+            p.with_extension("exe").exists()
+        } else {
+            false
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let exists = |p: &Path| -> bool { p.exists() };
+
+    // On Windows, return the .exe path if the bare name doesn't exist.
+    #[cfg(target_os = "windows")]
+    let with_exe = |p: PathBuf| -> PathBuf {
+        if p.exists() {
+            p
+        } else if p.extension().is_none() {
+            let exe = p.with_extension("exe");
+            if exe.exists() { exe } else { p }
+        } else {
+            p
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let with_exe = |p: PathBuf| -> PathBuf { p };
+
     // Expand leading ~ to home directory
     let binary = if let Some(rest) = binary.to_str().and_then(|s| s.strip_prefix("~/")) {
         if let Some(home) = dirs::home_dir() {
@@ -145,8 +175,8 @@ fn resolve_binary(binary: &Path) -> PathBuf {
 
     // If the path already contains a separator it is explicit — use as-is.
     if binary.components().count() > 1 {
-        if binary.exists() {
-            return binary;
+        if exists(&binary) {
+            return with_exe(binary);
         }
         // Absolute path that doesn't exist — still return it so the caller
         // gets a clear "not found" error from Command::spawn.
@@ -159,13 +189,14 @@ fn resolve_binary(binary: &Path) -> PathBuf {
         if let Some(target_profile_dir) = exe.parent() {
             // 1. Sibling of current exe (same target dir)
             let sibling = target_profile_dir.join(&binary);
-            if sibling.exists() {
+            if exists(&sibling) {
+                let resolved = with_exe(sibling);
                 tracing::info!(
                     "resolved '{}' → {} (sibling)",
                     binary.display(),
-                    sibling.display()
+                    resolved.display()
                 );
-                return sibling;
+                return resolved;
             }
 
             // 2. Sibling workspaces: walk up from the workspace root and
@@ -210,13 +241,22 @@ fn scan_for_binary(dir: &Path, profile: &str, binary: &Path) -> Option<PathBuf> 
             continue;
         }
         let candidate = path.join("target").join(profile).join(binary);
-        if candidate.exists() {
+        // Check for the candidate as-is, and with .exe on Windows.
+        let found = if candidate.exists() {
+            Some(candidate)
+        } else if cfg!(target_os = "windows") && candidate.extension().is_none() {
+            let exe = candidate.with_extension("exe");
+            if exe.exists() { Some(exe) } else { None }
+        } else {
+            None
+        };
+        if let Some(resolved) = found {
             tracing::info!(
                 "resolved '{}' → {} (sibling workspace)",
                 binary.display(),
-                candidate.display()
+                resolved.display()
             );
-            return Some(candidate);
+            return Some(resolved);
         }
     }
     None

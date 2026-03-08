@@ -325,6 +325,12 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
         CheckStatus::Failed => ("failed", "\u{2718}"),
     };
 
+    let mut installing = use_signal(|| false);
+    let mut install_output = use_signal(|| Option::<String>::None);
+
+    let has_install_cmd = check.install_command.is_some();
+    let install_cmd = check.install_command.clone();
+
     rsx! {
         div { class: "preflight-check-item {status_class}",
             span { class: "preflight-check-status", "{status_icon}" }
@@ -334,7 +340,84 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
                 if check.status == CheckStatus::Failed && !check.install_hint.is_empty() {
                     pre { class: "preflight-install-hint", "{check.install_hint}" }
                 }
+                if check.status == CheckStatus::Failed && has_install_cmd {
+                    div { class: "preflight-install-action",
+                        button {
+                            class: "preflight-btn-install",
+                            disabled: *installing.read(),
+                            onclick: move |_| {
+                                if let Some(ref cmd) = install_cmd {
+                                    let cmd = cmd.clone();
+                                    installing.set(true);
+                                    install_output.set(None);
+                                    spawn(async move {
+                                        let result = run_install_command(&cmd).await;
+                                        install_output.set(Some(result));
+                                        installing.set(false);
+                                    });
+                                }
+                            },
+                            if *installing.read() {
+                                span { class: "preflight-spinner" }
+                                "Installing\u{2026}"
+                            } else {
+                                "Install"
+                            }
+                        }
+                    }
+                }
+                if let Some(ref output) = *install_output.read() {
+                    pre { class: "preflight-install-output", "{output}" }
+                }
             }
         }
+    }
+}
+
+/// Run an install command in a background thread and return the output.
+async fn run_install_command(command: &str) -> String {
+    let cmd = command.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", &cmd])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("sh").args(["-c", &cmd]).output()
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{}{}", stdout, stderr);
+            let lower = combined.to_lowercase();
+
+            // Treat "already installed" / "successfully installed" as success
+            // even if the exit code is non-zero (winget does this).
+            if output.status.success()
+                || lower.contains("successfully installed")
+                || lower.contains("already installed")
+            {
+                let msg = combined.trim().to_string();
+                if msg.is_empty() {
+                    "Installed successfully.".into()
+                } else {
+                    msg
+                }
+            } else {
+                format!("Install failed:\n{}", combined.trim())
+            }
+        }
+        Ok(Err(e)) => format!("Failed to run command: {}", e),
+        Err(e) => format!("Failed to run command: {}", e),
     }
 }

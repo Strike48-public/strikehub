@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bridge;
 pub mod config;
+pub mod embedded;
 pub mod error;
 pub mod ipc;
 pub mod ipc_runner;
@@ -23,8 +24,8 @@ pub use ipc_runner::IpcConnectorRunner;
 pub use matrix_ws::MatrixWsClient;
 pub use oauth::{start_oauth_flow, start_oauth_flow_with};
 pub use preflight::{
-    AggregatePreflightResult, CheckStatus, ConnectorRuntime, PreflightCheck, PreflightResult,
-    run_preflight, run_preflight_all, run_preflight_full,
+    AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
+    PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
 };
 pub use proxy::ConnectorProxy;
 pub use registry::{ConnectorManifest, builtin_manifests};

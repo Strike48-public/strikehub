@@ -103,3 +103,30 @@ build-pinned:
     just build-pick-at "$PICK_VERSION"
     just build-kube-at "$KUBESTUDIO_VERSION"
     echo "✓ All connectors built at pinned versions"
+
+# Package StrikeHub with connector binaries into a dist directory.
+# Copies strikehub + ks-connector + pentest-agent next to each other
+# so the app can find them at runtime via resolve_binary().
+package profile="debug":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dist="dist/{{profile}}"
+    mkdir -p "$dist"
+    hub="target/{{profile}}/strikehub"
+    pick_bin="{{pick_dir}}/target/{{profile}}/pentest-agent"
+    kube_bin="{{kube_dir}}/target/{{profile}}/ks-connector"
+    # On Windows, append .exe
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]] || command -v cmd.exe &>/dev/null; then
+        hub="${hub}.exe"
+        pick_bin="${pick_bin}.exe"
+        kube_bin="${kube_bin}.exe"
+    fi
+    for bin in "$hub" "$pick_bin" "$kube_bin"; do
+        if [ ! -f "$bin" ]; then
+            echo "ERROR: $bin not found — build all targets first (just build-all)"
+            exit 1
+        fi
+        cp "$bin" "$dist/"
+        echo "  → $(basename "$bin")"
+    done
+    echo "✓ Packaged to $dist/"
