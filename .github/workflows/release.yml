@@ -119,6 +119,8 @@ jobs:
       # Build connectors from source at pinned git refs
       - name: Install protoc
         uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
       - name: Checkout and build pentest-agent
         shell: bash
@@ -255,6 +257,8 @@ jobs:
       # Build connectors from source at pinned git refs
       - name: Install protoc
         uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
       - name: Checkout and build pentest-agent
         env:
@@ -336,6 +340,8 @@ jobs:
       # Build connectors from source at pinned git refs
       - name: Install protoc
         uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
       - name: Checkout and build pentest-agent
         env:
