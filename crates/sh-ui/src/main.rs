@@ -1,5 +1,6 @@
 // Prevent a console window from appearing on Windows.
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// TODO: uncomment before release — commented out for debugging
+// #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(feature = "desktop")]
 fn main() {
