@@ -572,6 +572,368 @@ pub fn app_css() -> &'static str {
             opacity: 0.8;
         }
 
+        /* ── Preflight wizard ── */
+        .preflight-overlay {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--chrome);
+            min-height: 0;
+        }
+
+        .preflight-header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 20px 32px 16px;
+            border-bottom: 1px solid var(--chrome-border);
+            flex-shrink: 0;
+        }
+
+        .preflight-icon { color: var(--accent); flex-shrink: 0; }
+
+        .preflight-header-text { flex: 1; min-width: 0; }
+
+        .preflight-heading {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+            margin: 0;
+        }
+
+        .preflight-step-label {
+            font-size: 12px;
+            color: var(--chrome-muted);
+            margin: 2px 0 0;
+        }
+
+        /* Step pills */
+        .preflight-steps {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            flex-shrink: 0;
+        }
+
+        .step-pill {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            border: 2px solid var(--chrome-border);
+            background: transparent;
+            color: var(--chrome-muted);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+        }
+        .step-pill.active {
+            border-color: var(--accent);
+            background: var(--accent);
+            color: var(--accent-foreground);
+        }
+        .step-pill.done {
+            border-color: var(--success);
+            color: var(--success);
+        }
+
+        .step-connector {
+            width: 24px;
+            height: 2px;
+            background: var(--chrome-border);
+        }
+
+        /* Scrollable content */
+        .preflight-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 32px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .preflight-checking-msg {
+            font-size: 14px;
+            color: var(--chrome-muted);
+            text-align: center;
+            padding: 40px 0;
+        }
+
+        .preflight-step-spinner {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            color: var(--chrome-muted);
+            padding: 8px 0;
+        }
+
+        .preflight-body {
+            max-width: 600px;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .preflight-intro {
+            font-size: 13px;
+            color: var(--chrome-muted);
+            margin: 0 0 4px;
+        }
+
+        /* Collapsible groups */
+        .preflight-group {
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: var(--chrome-card);
+            overflow: hidden;
+        }
+
+        .preflight-group-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.1s;
+        }
+        .preflight-group-header:hover { background: var(--chrome-hover); }
+
+        .preflight-group-chevron {
+            font-size: 10px;
+            color: var(--chrome-muted);
+            width: 14px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .preflight-group-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+            margin: 0;
+            flex: 1;
+        }
+
+        .group-summary {
+            font-size: 11px;
+            color: var(--chrome-muted);
+            flex-shrink: 0;
+        }
+        .group-summary.passed { color: var(--success); }
+
+        .preflight-group-body {
+            padding: 4px 14px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            border-top: 1px solid var(--chrome-border);
+        }
+
+        .preflight-check-item {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+            padding: 4px 0;
+        }
+
+        .preflight-check-status {
+            font-size: 14px;
+            line-height: 1.4;
+            flex-shrink: 0;
+            width: 18px;
+            text-align: center;
+        }
+
+        .preflight-check-item.passed .preflight-check-status { color: var(--success); }
+        .preflight-check-item.failed .preflight-check-status { color: var(--destructive); }
+        .preflight-check-item.checking .preflight-check-status { color: var(--warning); }
+
+        .preflight-check-content { flex: 1; min-width: 0; }
+
+        .preflight-check-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+        }
+
+        .preflight-check-desc {
+            font-size: 12px;
+            color: var(--chrome-muted);
+            margin-top: 2px;
+        }
+
+        .preflight-install-hint {
+            font-size: 11px;
+            font-family: var(--font-mono);
+            color: var(--chrome-muted);
+            background: var(--chrome-input-bg);
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            margin-top: 8px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.6;
+        }
+        .preflight-install-action {
+            margin-top: 8px;
+        }
+        .preflight-btn-install {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 18px;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: var(--radius);
+            background: var(--accent);
+            color: var(--accent-foreground);
+            cursor: pointer;
+            transition: opacity 0.15s;
+        }
+        .preflight-btn-install:hover { opacity: 0.9; }
+        .preflight-btn-install:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+        .preflight-btn-install .preflight-spinner {
+            width: 12px;
+            height: 12px;
+        }
+        .preflight-install-output {
+            font-size: 11px;
+            font-family: var(--font-mono);
+            color: var(--chrome-foreground);
+            background: var(--chrome-input-bg);
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            margin-top: 8px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.5;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        /* Hint box (step 2 instructions) */
+        .preflight-hint-box {
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: var(--chrome-card);
+            padding: 14px 16px;
+        }
+        .preflight-hint-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+            margin: 0 0 8px;
+        }
+        .preflight-hint-steps {
+            font-size: 12px;
+            color: var(--chrome-muted);
+            margin: 0;
+            padding-left: 20px;
+            line-height: 1.8;
+        }
+        .preflight-hint-steps strong {
+            color: var(--chrome-foreground);
+        }
+
+        /* Fixed footer */
+        .preflight-footer {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            padding: 12px 32px;
+            border-top: 1px solid var(--chrome-border);
+            flex-shrink: 0;
+        }
+
+        .preflight-poll-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: var(--chrome-muted);
+            margin-right: auto;
+        }
+
+        @keyframes preflight-spin {
+            to { transform: rotate(360deg); }
+        }
+        .preflight-spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--chrome-border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: preflight-spin 0.8s linear infinite;
+        }
+
+        .preflight-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .preflight-btn-continue {
+            padding: 8px 28px;
+            font-size: 13px;
+            font-weight: 500;
+            border: none;
+            border-radius: var(--radius);
+            background: var(--accent);
+            color: var(--accent-foreground);
+            cursor: pointer;
+            transition: opacity 0.15s;
+        }
+        .preflight-btn-continue:hover { opacity: 0.9; }
+
+        .preflight-btn-skip {
+            padding: 8px 28px;
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: transparent;
+            color: var(--chrome-muted);
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .preflight-btn-skip:hover {
+            background: var(--chrome-hover);
+            color: var(--chrome-foreground);
+        }
+
+        .preflight-btn-recheck {
+            padding: 8px 28px;
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: transparent;
+            color: var(--chrome-muted);
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .preflight-btn-recheck:hover {
+            background: var(--chrome-hover);
+            color: var(--chrome-foreground);
+        }
+        .preflight-btn-recheck:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
         /* ── Locked sidebar items ── */
         .rail-item.locked,
         .rail-action.locked {

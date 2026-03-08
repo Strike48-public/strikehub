@@ -104,31 +104,35 @@ jobs:
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
 
+      - name: Load connector refs
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
       - name: Prepare dist directory
         run: mkdir -p dist
 
-      # Download connectors (best-effort) so the CI DMG is fully testable
-      - name: Download pentest-agent
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download v0.1.0 \
-            --repo Strike48-public/pick \
-            --pattern "pentest-agent-${{ matrix.target == 'aarch64-apple-darwin' && 'darwin-aarch64' || 'darwin-x86_64' }}.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf pentest-agent-*.tar.gz && rm -f pentest-agent-*.tar.gz
+      # Build connectors from source at pinned git refs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
-      - name: Download ks-connector
-        continue-on-error: true
+      - name: Checkout and build pentest-agent
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download v0.1.0 \
-            --repo Strike48-public/kubestudio \
-            --pattern "ks-connector-${{ matrix.target == 'aarch64-apple-darwin' && 'darwin-aarch64' || 'darwin-x86_64' }}.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf ks-connector-*.tar.gz && rm -f ks-connector-*.tar.gz
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target ${{ matrix.target }}
+          cp /tmp/pick/target/${{ matrix.target }}/release/pentest-agent dist/
+
+      - name: Checkout and build ks-connector
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
+          cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector dist/
 
       - name: Build DMG
         run: |

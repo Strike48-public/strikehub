@@ -63,7 +63,7 @@ if [ -f "dist/pentest-agent" ]; then
 fi
 
 # Convert SVG icon to icns if possible
-ICON_SRC="crates/sh-ui/src/assets/icons/strike48-mark.svg"
+ICON_SRC="crates/sh-ui/src/assets/icons/strike48-appicon.svg"
 if command -v sips &> /dev/null && command -v iconutil &> /dev/null; then
     echo "Generating app icon..."
     ICONSET_DIR="StrikeHub.iconset"

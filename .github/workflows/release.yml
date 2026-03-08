@@ -23,8 +23,6 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  PICK_VERSION: v0.1.1
-  KUBESTUDIO_VERSION: v0.1.0
 
 jobs:
   docker:
@@ -92,6 +90,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load connector refs
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -115,62 +116,31 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.binary_name }}
 
-      # Connector downloads are best-effort — releases may not exist yet.
-      - name: Download pentest-agent (Unix)
-        if: runner.os != 'Windows'
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download ${{ env.PICK_VERSION }} \
-            --repo Strike48-public/pick \
-            --pattern "pentest-agent-${{ matrix.connector_suffix }}.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf pentest-agent-${{ matrix.connector_suffix }}.tar.gz \
-            && rm -f pentest-agent-${{ matrix.connector_suffix }}.tar.gz
+      # Build connectors from source at pinned git refs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
-      - name: Download pentest-agent (Windows)
-        if: runner.os == 'Windows'
-        continue-on-error: true
+      - name: Checkout and build pentest-agent
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download ${{ env.PICK_VERSION }} \
-            --repo Strike48-public/pick \
-            --pattern "pentest-agent-${{ matrix.connector_suffix }}.zip" \
-            --dir dist
-          cd dist && unzip pentest-agent-${{ matrix.connector_suffix }}.zip \
-            && rm -f pentest-agent-${{ matrix.connector_suffix }}.zip
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target ${{ matrix.target }}
+          cp /tmp/pick/target/${{ matrix.target }}/release/pentest-agent${{ runner.os == 'Windows' && '.exe' || '' }} dist/
 
-      - name: Download ks-connector (Unix)
-        if: runner.os != 'Windows'
-        continue-on-error: true
+      - name: Checkout and build ks-connector
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download ${{ env.KUBESTUDIO_VERSION }} \
-            --repo Strike48-public/kubestudio \
-            --pattern "ks-connector-${{ matrix.connector_suffix }}.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf ks-connector-${{ matrix.connector_suffix }}.tar.gz \
-            && rm -f ks-connector-${{ matrix.connector_suffix }}.tar.gz
-
-      - name: Download ks-connector (Windows)
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download ${{ env.KUBESTUDIO_VERSION }} \
-            --repo Strike48-public/kubestudio \
-            --pattern "ks-connector-${{ matrix.connector_suffix }}.zip" \
-            --dir dist
-          cd dist && unzip ks-connector-${{ matrix.connector_suffix }}.zip \
-            && rm -f ks-connector-${{ matrix.connector_suffix }}.zip
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
+          cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector${{ runner.os == 'Windows' && '.exe' || '' }} dist/
 
       - name: Package archive (Unix)
         if: runner.os != 'Windows'
@@ -254,6 +224,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load connector refs
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -281,30 +254,29 @@ jobs:
       - name: Prepare dist directory
         run: mkdir -p dist
 
-      # Download connectors (best-effort)
-      - name: Download pentest-agent
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download ${{ env.PICK_VERSION }} \
-            --repo Strike48-public/pick \
-            --pattern "pentest-agent-linux-x86_64.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf pentest-agent-linux-x86_64.tar.gz \
-            && rm -f pentest-agent-linux-x86_64.tar.gz
+      # Build connectors from source at pinned git refs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
-      - name: Download ks-connector
-        continue-on-error: true
+      - name: Checkout and build pentest-agent
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download ${{ env.KUBESTUDIO_VERSION }} \
-            --repo Strike48-public/kubestudio \
-            --pattern "ks-connector-linux-x86_64.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf ks-connector-linux-x86_64.tar.gz \
-            && rm -f ks-connector-linux-x86_64.tar.gz
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target x86_64-unknown-linux-gnu
+          cp /tmp/pick/target/x86_64-unknown-linux-gnu/release/pentest-agent dist/
+
+      - name: Checkout and build ks-connector
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target x86_64-unknown-linux-gnu
+          cp /tmp/kubestudio/target/x86_64-unknown-linux-gnu/release/ks-connector dist/
 
       - name: Make build script executable
         run: chmod +x scripts/build-appimage.sh
@@ -345,6 +317,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load connector refs
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -362,30 +337,29 @@ jobs:
       - name: Prepare dist directory
         run: mkdir -p dist
 
-      # Download connectors (best-effort)
-      - name: Download pentest-agent
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download ${{ env.PICK_VERSION }} \
-            --repo Strike48-public/pick \
-            --pattern "pentest-agent-${{ matrix.connector_suffix }}.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf pentest-agent-${{ matrix.connector_suffix }}.tar.gz \
-            && rm -f pentest-agent-${{ matrix.connector_suffix }}.tar.gz
+      # Build connectors from source at pinned git refs
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
-      - name: Download ks-connector
-        continue-on-error: true
+      - name: Checkout and build pentest-agent
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download ${{ env.KUBESTUDIO_VERSION }} \
-            --repo Strike48-public/kubestudio \
-            --pattern "ks-connector-${{ matrix.connector_suffix }}.tar.gz" \
-            --dir dist
-          cd dist && tar -xzf ks-connector-${{ matrix.connector_suffix }}.tar.gz \
-            && rm -f ks-connector-${{ matrix.connector_suffix }}.tar.gz
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target ${{ matrix.target }}
+          cp /tmp/pick/target/${{ matrix.target }}/release/pentest-agent dist/
+
+      - name: Checkout and build ks-connector
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
+          cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector dist/
 
       - name: Make build script executable
         run: chmod +x scripts/build-dmg.sh
