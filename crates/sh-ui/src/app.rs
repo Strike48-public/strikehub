@@ -710,7 +710,7 @@ pub fn App() -> Element {
                     .map(|c| ConnectorRuntime {
                         id: c.id.clone(),
                         name: c.display_name.clone(),
-                        status: c.status.clone(),
+                        status: c.status,
                     })
                     .collect();
 
@@ -942,7 +942,7 @@ pub fn App() -> Element {
                                     .map(|c| ConnectorRuntime {
                                         id: c.id.clone(),
                                         name: c.display_name.clone(),
-                                        status: c.status.clone(),
+                                        status: c.status,
                                     })
                                     .collect();
                                 let ws = ws_client_signal.read().clone();

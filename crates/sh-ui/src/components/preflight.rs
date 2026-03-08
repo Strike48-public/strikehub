@@ -55,7 +55,7 @@ pub fn PreflightOverlay(
     use_effect(move || {
         let on_reg = *step.read() == WizardStep::Registration;
         if on_reg {
-            let on_recheck = on_recheck.clone();
+            let on_recheck = on_recheck;
             spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;

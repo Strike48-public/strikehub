@@ -325,7 +325,7 @@ pub async fn run_preflight_full(
 
         result.results.push(PreflightResult {
             connector_id: format!("reg-{}", id),
-            connector_name: format!("{}", display_name),
+            connector_name: display_name.to_string(),
             checks,
         });
     }
@@ -378,19 +378,19 @@ fn connector_binary_name(id: &str) -> &str {
 /// Check if a connector binary can be found on disk (next to the exe or on PATH).
 fn find_connector_binary(name: &str) -> bool {
     // Check next to the running executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(name);
-            if candidate.exists() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return true;
+        }
+        // On Windows, also check with .exe extension
+        #[cfg(target_os = "windows")]
+        {
+            let exe_candidate = dir.join(format!("{}.exe", name));
+            if exe_candidate.exists() {
                 return true;
-            }
-            // On Windows, also check with .exe extension
-            #[cfg(target_os = "windows")]
-            {
-                let exe_candidate = dir.join(format!("{}.exe", name));
-                if exe_candidate.exists() {
-                    return true;
-                }
             }
         }
     }
@@ -440,42 +440,41 @@ fn check_kube_context() -> PreflightCheck {
         if let Ok(output) = hidden_command("kubectl")
             .args(["config", "get-contexts", "-o", "name"])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let contexts: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-                if !contexts.is_empty() {
-                    return PreflightCheck {
-                        name,
-                        description: format!(
-                            "Found {} context{}: {}",
-                            contexts.len(),
-                            if contexts.len() == 1 { "" } else { "s" },
-                            contexts.join(", ")
-                        ),
-                        status: CheckStatus::Passed,
-                        install_hint: String::new(),
-                        install_command: None,
-                    };
-                }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let contexts: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+            if !contexts.is_empty() {
+                return PreflightCheck {
+                    name,
+                    description: format!(
+                        "Found {} context{}: {}",
+                        contexts.len(),
+                        if contexts.len() == 1 { "" } else { "s" },
+                        contexts.join(", ")
+                    ),
+                    status: CheckStatus::Passed,
+                    install_hint: String::new(),
+                    install_command: None,
+                };
             }
         }
 
         // Fall back: check if ~/.kube/config exists with any context
         if let Some(home) = dirs::home_dir() {
             let kubeconfig = home.join(".kube").join("config");
-            if kubeconfig.exists() {
-                if let Ok(content) = std::fs::read_to_string(&kubeconfig) {
-                    if content.contains("contexts:") && content.contains("- context:") {
-                        return PreflightCheck {
-                            name,
-                            description: "Found kubeconfig with cluster contexts".into(),
-                            status: CheckStatus::Passed,
-                            install_hint: String::new(),
-                            install_command: None,
-                        };
-                    }
-                }
+            if kubeconfig.exists()
+                && let Ok(content) = std::fs::read_to_string(&kubeconfig)
+                && content.contains("contexts:")
+                && content.contains("- context:")
+            {
+                return PreflightCheck {
+                    name,
+                    description: "Found kubeconfig with cluster contexts".into(),
+                    status: CheckStatus::Passed,
+                    install_hint: String::new(),
+                    install_command: None,
+                };
             }
         }
 
