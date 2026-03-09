@@ -31,13 +31,13 @@ fn main() {
     let mut config = dioxus::desktop::Config::new()
         .with_data_directory(data_dir)
         .with_window(
-        dioxus::desktop::WindowBuilder::new()
-            .with_title("StrikeHub")
-            .with_window_icon(Some(icon))
-            .with_always_on_top(false)
-            .with_inner_size(dioxus::desktop::LogicalSize::new(1024.0, 768.0))
-            .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 600.0)),
-    );
+            dioxus::desktop::WindowBuilder::new()
+                .with_title("StrikeHub")
+                .with_window_icon(Some(icon))
+                .with_always_on_top(false)
+                .with_inner_size(dioxus::desktop::LogicalSize::new(1024.0, 768.0))
+                .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 600.0)),
+        );
 
     // Remove the default File/Edit/Help menu bar on Windows.
     #[cfg(target_os = "windows")]
