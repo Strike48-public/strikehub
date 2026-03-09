@@ -524,7 +524,10 @@ pub fn App() -> Element {
                 {
                     let window = dioxus::desktop::window();
                     if let Err(e) = window.webview.clear_all_browsing_data() {
-                        tracing::warn!("Failed to clear webview browsing data before sign-in: {}", e);
+                        tracing::warn!(
+                            "Failed to clear webview browsing data before sign-in: {}",
+                            e
+                        );
                     }
                 }
 
