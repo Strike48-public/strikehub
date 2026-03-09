@@ -33,9 +33,20 @@ impl IpcConnectorRunner {
             cmd.env(k, v);
         }
 
-        // Inherit stdout/stderr so connector logs appear in StrikeHub's console
-        cmd.stdout(std::process::Stdio::inherit());
-        cmd.stderr(std::process::Stdio::inherit());
+        // On Windows the desktop app has no console, so inheriting stdio would
+        // cause Windows to allocate a visible console window for each connector.
+        // Suppress that by sending output to null and setting CREATE_NO_WINDOW.
+        #[cfg(windows)]
+        {
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        #[cfg(not(windows))]
+        {
+            cmd.stdout(std::process::Stdio::inherit());
+            cmd.stderr(std::process::Stdio::inherit());
+        }
 
         let child = cmd.spawn().map_err(|e| {
             HubError::Runner(format!("failed to spawn {}: {}", binary.display(), e))

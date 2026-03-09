@@ -33,9 +33,15 @@ pub fn ContentArea(
     //          which proxies /api/v1alpha → /v1alpha/graphql with JWT.
     //   TCP  → http://127.0.0.1:{proxy}/c/{port}/liveview  (auth proxy)
     let url = match active_transport {
-        Some(ConnectorTransport::Ipc) => active_id
-            .as_ref()
-            .map(|id| format!("dioxus://index.html/connector/{}/liveview", id)),
+        Some(ConnectorTransport::Ipc) => active_id.as_ref().map(|id| {
+            // Windows/WebView2 uses http:// for the dioxus custom protocol,
+            // Linux/WebKitGTK uses the dioxus:// scheme directly.
+            if cfg!(target_os = "windows") {
+                format!("http://dioxus.index.html/connector/{}/liveview", id)
+            } else {
+                format!("dioxus://index.html/connector/{}/liveview", id)
+            }
+        }),
         _ => match (proxy_port, active_port) {
             (Some(pp), Some(cp)) => Some(format!("http://127.0.0.1:{}/c/{}/liveview", pp, cp)),
             _ => active_url.clone(),
