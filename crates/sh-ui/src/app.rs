@@ -892,6 +892,16 @@ pub fn App() -> Element {
         .unwrap_or_default();
     let account_tenant_id = std::env::var("TENANT_ID").unwrap_or_default();
     let account_instance_id = hub_config.read().instance_id.clone().unwrap_or_default();
+    let account_user_name = auth_manager
+        .read()
+        .as_ref()
+        .and_then(|a| a.user_display_name())
+        .unwrap_or_default();
+    let account_user_email = auth_manager
+        .read()
+        .as_ref()
+        .and_then(|a| a.user_email())
+        .unwrap_or_default();
 
     // Show aggregate preflight overlay after sign-in until dismissed.
     // While checks are still running (preflight_result is None), keep showing
@@ -991,6 +1001,8 @@ pub fn App() -> Element {
                         server_url: account_server_url,
                         tenant_id: account_tenant_id,
                         instance_id: account_instance_id,
+                        user_name: account_user_name,
+                        user_email: account_user_email,
                         on_sign_out: on_sign_out,
                     }
                 } else {

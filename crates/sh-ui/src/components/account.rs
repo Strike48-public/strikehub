@@ -5,6 +5,8 @@ pub fn AccountView(
     server_url: String,
     tenant_id: String,
     instance_id: String,
+    #[props(default)] user_name: String,
+    #[props(default)] user_email: String,
     on_sign_out: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -42,8 +44,16 @@ pub fn AccountView(
                     }
                 }
 
-                h2 { class: "account-heading", "Account" }
-                p { class: "account-status", "Signed In" }
+                if !user_name.is_empty() {
+                    h2 { class: "account-heading", "{user_name}" }
+                } else {
+                    h2 { class: "account-heading", "Account" }
+                }
+                if !user_email.is_empty() {
+                    p { class: "account-status", "{user_email}" }
+                } else {
+                    p { class: "account-status", "Signed In" }
+                }
 
                 div { class: "account-details",
                     div { class: "account-detail-row",
