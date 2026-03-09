@@ -1,10 +1,18 @@
 param(
-    [string]$Version = "0.1.0"
+    [string]$Version = "0.1.0",
+    [string]$Arch = "x86_64"
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "Building StrikeHub MSI installer v$Version" -ForegroundColor Cyan
+# Map arch to Rust target triple and WiX arch identifier
+switch ($Arch) {
+    "x86_64"  { $Target = "x86_64-pc-windows-msvc";  $WixArch = "x64";   $WixPlatform = "x64" }
+    "aarch64" { $Target = "aarch64-pc-windows-msvc";  $WixArch = "arm64"; $WixPlatform = "arm64" }
+    default   { Write-Host "Unsupported arch: $Arch" -ForegroundColor Red; exit 1 }
+}
+
+Write-Host "Building StrikeHub MSI installer v$Version ($Arch)" -ForegroundColor Cyan
 Write-Host "==========================================="
 
 # Check WiX is installed
@@ -30,10 +38,10 @@ if (-not $wixDir) {
 Write-Host "WiX: $wixDir"
 
 # Build the release binary if needed
-$exe = "target\x86_64-pc-windows-msvc\release\strikehub.exe"
+$exe = "target\$Target\release\strikehub.exe"
 if (-not (Test-Path $exe)) {
     Write-Host "Building release binary..." -ForegroundColor Yellow
-    cargo build --release --target x86_64-pc-windows-msvc --no-default-features --features desktop
+    cargo build --release --target $Target --no-default-features --features desktop
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 
@@ -70,7 +78,9 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
 Write-Host "Compiling..." -ForegroundColor Yellow
 & "$wixDir\candle.exe" -nologo `
     -dVersion="$Version" `
-    -arch x64 `
+    -dTargetDir="target\$Target\release" `
+    -dPlatform="$WixPlatform" `
+    -arch $WixArch `
     -out wix\main.wixobj `
     wix\main.wxs
 if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -79,17 +89,17 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 Write-Host "Linking MSI..." -ForegroundColor Yellow
 & "$wixDir\light.exe" -nologo `
     -ext WixUIExtension `
-    -out "StrikeHub-$Version-x86_64.msi" `
+    -out "StrikeHub-$Version-$Arch.msi" `
     wix\main.wixobj
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
 # Cleanup
 Remove-Item "wix\main.wixobj" -ErrorAction SilentlyContinue
 
-$msi = "StrikeHub-$Version-x86_64.msi"
+$msi = "StrikeHub-$Version-$Arch.msi"
 $size = [math]::Round((Get-Item $msi).Length / 1MB, 2)
 Write-Host ""
-Write-Host "StrikeHub-$Version-x86_64.msi ($size MB)" -ForegroundColor Green
+Write-Host "$msi ($size MB)" -ForegroundColor Green
 Write-Host ""
 Write-Host "Install:     msiexec /i $msi"
 Write-Host "Silent:      msiexec /i $msi /qn"

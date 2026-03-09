@@ -20,15 +20,24 @@ fn main() {
     )
     .expect("failed to load window icon");
 
+    // Place the WebView2 data directory in a user-writable location so the
+    // app works when installed under C:\Program Files (which is read-only for
+    // normal users).
+    let data_dir = dirs::data_local_dir()
+        .expect("could not determine local app-data directory")
+        .join("StrikeHub");
+
     #[allow(unused_mut)]
-    let mut config = dioxus::desktop::Config::new().with_window(
-        dioxus::desktop::WindowBuilder::new()
-            .with_title("StrikeHub")
-            .with_window_icon(Some(icon))
-            .with_always_on_top(false)
-            .with_inner_size(dioxus::desktop::LogicalSize::new(1024.0, 768.0))
-            .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 600.0)),
-    );
+    let mut config = dioxus::desktop::Config::new()
+        .with_data_directory(data_dir)
+        .with_window(
+            dioxus::desktop::WindowBuilder::new()
+                .with_title("StrikeHub")
+                .with_window_icon(Some(icon))
+                .with_always_on_top(false)
+                .with_inner_size(dioxus::desktop::LogicalSize::new(1024.0, 768.0))
+                .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 600.0)),
+        );
 
     // Remove the default File/Edit/Help menu bar on Windows.
     #[cfg(target_os = "windows")]

@@ -161,14 +161,52 @@ jobs:
           name: strikehub-dmg-${{ matrix.arch }}
           path: StrikeHub-*.dmg
 
-  build-appimage:
-    name: Build AppImage
+  build-installers:
+    name: Build ${{ matrix.name }}
     if: github.repository_owner == 'Strike48-public'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: AppImage x86_64
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            artifact: strikehub-appimage-x86_64
+            installer: appimage
+            binary_name: strikehub
+          - os: ubuntu-24.04-arm
+            name: AppImage aarch64
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            artifact: strikehub-appimage-aarch64
+            installer: appimage
+            binary_name: strikehub
+          - os: windows-latest
+            name: MSI x86_64
+            target: x86_64-pc-windows-msvc
+            arch: x86_64
+            artifact: strikehub-msi-x86_64
+            installer: msi
+            binary_name: strikehub.exe
+          - os: windows-11-arm
+            name: MSI aarch64
+            target: aarch64-pc-windows-msvc
+            arch: aarch64
+            artifact: strikehub-msi-aarch64
+            installer: msi
+            binary_name: strikehub.exe
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Load connector refs
+        shell: bash
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -184,121 +222,81 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: x86_64-unknown-linux-gnu-appimage
+          key: ${{ matrix.target }}-${{ matrix.installer }}
 
       - name: Build binary
-        run: cargo build --release --target x86_64-unknown-linux-gnu --no-default-features --features desktop
-
-      - name: Load connector refs
-        run: cat connector-versions.env >> "$GITHUB_ENV"
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
 
       - name: Prepare dist directory
-        run: mkdir -p dist
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.binary_name }}
 
+      # Build connectors from source at pinned git refs
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ github.token }}
 
       - name: Checkout and build pentest-agent
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
           git -C /tmp/pick checkout ${{ env.PICK_REF }}
-          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target x86_64-unknown-linux-gnu
-          cp /tmp/pick/target/x86_64-unknown-linux-gnu/release/pentest-agent dist/
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target ${{ matrix.target }}
+          cp /tmp/pick/target/${{ matrix.target }}/release/pentest-agent${{ runner.os == 'Windows' && '.exe' || '' }} dist/
 
       - name: Checkout and build ks-connector
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
           git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
-          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target x86_64-unknown-linux-gnu
-          cp /tmp/kubestudio/target/x86_64-unknown-linux-gnu/release/ks-connector dist/
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
+          cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector${{ runner.os == 'Windows' && '.exe' || '' }} dist/
 
+      # ── AppImage steps ──
       - name: Build AppImage
+        if: matrix.installer == 'appimage'
         run: |
           chmod +x scripts/build-appimage.sh
-          ./scripts/build-appimage.sh ci-test x86_64
+          ./scripts/build-appimage.sh ci-test ${{ matrix.arch }}
 
       - name: Verify AppImage
+        if: matrix.installer == 'appimage'
         run: |
           ls -la StrikeHub-*.AppImage
           chmod +x StrikeHub-*.AppImage
 
       - uses: actions/upload-artifact@v4
+        if: matrix.installer == 'appimage'
         with:
-          name: strikehub-appimage
+          name: ${{ matrix.artifact }}
           path: StrikeHub-*.AppImage
 
-  build-msi:
-    name: Build MSI
-    if: github.repository_owner == 'Strike48-public'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: x86_64-pc-windows-msvc-msi
-
-      - name: Build binary
-        run: cargo build --release --target x86_64-pc-windows-msvc --no-default-features --features desktop
-
-      - name: Load connector refs
-        shell: bash
-        run: cat connector-versions.env >> "$GITHUB_ENV"
-
-      - name: Prepare dist directory
-        shell: bash
-        run: mkdir -p dist
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ github.token }}
-
-      - name: Checkout and build pentest-agent
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
-          git -C /tmp/pick checkout ${{ env.PICK_REF }}
-          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target x86_64-pc-windows-msvc
-          cp /tmp/pick/target/x86_64-pc-windows-msvc/release/pentest-agent.exe dist/
-
-      - name: Checkout and build ks-connector
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
-          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
-          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target x86_64-pc-windows-msvc
-          cp /tmp/kubestudio/target/x86_64-pc-windows-msvc/release/ks-connector.exe dist/
-
+      # ── MSI steps ──
       - name: Install WiX Toolset
+        if: matrix.installer == 'msi'
         run: choco install wixtoolset -y
 
       - name: Build MSI
+        if: matrix.installer == 'msi'
         shell: pwsh
         run: |
-          .\scripts\build-msi.ps1 -Version 0.0.0
+          .\scripts\build-msi.ps1 -Version 0.0.0 -Arch ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
+        if: matrix.installer == 'msi'
         with:
-          name: strikehub-msi
+          name: ${{ matrix.artifact }}
           path: StrikeHub-*.msi
 
   helm-lint:

@@ -19,7 +19,7 @@
             Compressed='yes'
             InstallScope='perMachine'
             SummaryCodepage='1252'
-            Platform='x64' />
+            Platform='$(var.Platform)' />
 
         <MajorUpgrade
             Schedule='afterInstallInitialize'
@@ -50,7 +50,7 @@
             <Component Id='StrikeHubExe' Guid='B1A34567-89AB-CDEF-0123-456789ABC001' Win64='yes'>
                 <File Id='strikehub.exe'
                     Name='strikehub.exe'
-                    Source='target\x86_64-pc-windows-msvc\release\strikehub.exe'
+                    Source='$(var.TargetDir)\strikehub.exe'
                     KeyPath='yes' />
             </Component>
         </DirectoryRef>
