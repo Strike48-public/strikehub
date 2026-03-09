@@ -190,13 +190,6 @@ jobs:
             artifact: strikehub-msi-x86_64
             installer: msi
             binary_name: strikehub.exe
-          - os: windows-11-arm
-            name: MSI aarch64
-            target: aarch64-pc-windows-msvc
-            arch: aarch64
-            artifact: strikehub-msi-aarch64
-            installer: msi
-            binary_name: strikehub.exe
 
     steps:
       - uses: actions/checkout@v4

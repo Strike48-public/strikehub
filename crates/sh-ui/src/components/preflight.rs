@@ -17,12 +17,6 @@ pub fn PreflightOverlay(
     on_continue: EventHandler<()>,
     #[props(default = false)] checking: bool,
 ) -> Element {
-    let mut step = use_signal(|| WizardStep::DevicePosture);
-    // Tracks groups whose collapsed state has been manually toggled by the user.
-    let mut toggled: Signal<Vec<String>> = use_signal(Vec::new);
-
-    let current_step = *step.read();
-
     // Split results: device-posture groups vs registration groups (prefixed "reg-").
     let device_groups: Vec<PreflightResult> = result
         .results
@@ -36,6 +30,19 @@ pub fn PreflightOverlay(
         .filter(|r| r.connector_id.starts_with("reg-"))
         .cloned()
         .collect();
+
+    // When there are no device-posture groups (e.g. on Windows), skip straight
+    // to the registration step.
+    let initial_step = if device_groups.is_empty() {
+        WizardStep::Registration
+    } else {
+        WizardStep::DevicePosture
+    };
+    let mut step = use_signal(move || initial_step);
+    // Tracks groups whose collapsed state has been manually toggled by the user.
+    let mut toggled: Signal<Vec<String>> = use_signal(Vec::new);
+
+    let current_step = *step.read();
 
     let device_all_passed = device_groups.iter().all(|g| g.all_passed());
     let reg_all_passed = !reg_groups.is_empty() && reg_groups.iter().all(|g| g.all_passed());
