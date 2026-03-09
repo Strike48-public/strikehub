@@ -1,7 +1,7 @@
 use crate::components::sidebar::ConnectorItem;
 use crate::components::{
-    ContentArea, CustomConnector, LoginOverlay, PickTosOverlay, PreflightOverlay, SetupConnector,
-    Sidebar,
+    AccountView, ContentArea, CustomConnector, LoginOverlay, PickTosOverlay, PreflightOverlay,
+    SetupConnector, Sidebar,
 };
 use crate::theme;
 use dioxus::prelude::*;
@@ -167,6 +167,9 @@ pub fn App() -> Element {
 
     // Show setup on first launch only; returning users go straight to connectors
     let mut show_setup = use_signal(move || !hub_config.read().setup_complete);
+
+    // Show account details view when the profile icon is clicked.
+    let mut show_account = use_signal(|| false);
 
     // Dev mode: show the "Add Connector" form in Settings only when STRIKEHUB_DEV is set.
     let dev_mode = use_signal(|| std::env::var("STRIKEHUB_DEV").is_ok());
@@ -740,6 +743,7 @@ pub fn App() -> Element {
         ws_client_signal.set(None);
         preflight_result.set(None);
         preflight_dismissed.set(false);
+        show_account.set(false);
         // Detach stale WS client from the proxy so the next sign-in starts fresh
         spawn(async move {
             if let Some(proxy) = proxy_handle.peek().as_ref() {
@@ -762,6 +766,7 @@ pub fn App() -> Element {
         active_id.set(Some(id));
         hovered_id.set(None);
         show_setup.set(false);
+        show_account.set(false);
     };
 
     // Add custom IPC connector: appears in sidebar immediately
@@ -837,6 +842,14 @@ pub fn App() -> Element {
         active_id.set(None);
         hovered_id.set(None);
         show_setup.set(true);
+        show_account.set(false);
+    };
+
+    let on_account = move |_: ()| {
+        active_id.set(None);
+        hovered_id.set(None);
+        show_setup.set(false);
+        show_account.set(true);
     };
 
     let current_connectors = connectors.read();
@@ -869,6 +882,20 @@ pub fn App() -> Element {
     let setup_list = setup_connectors.read().clone();
     let custom_list = custom_connectors.read().clone();
     let is_setup = *show_setup.read();
+    let is_account = *show_account.read();
+
+    // Account details for account view
+    let account_server_url = auth_manager
+        .read()
+        .as_ref()
+        .map(|a| a.matrix_url().to_string())
+        .unwrap_or_default();
+    let account_tenant_id = std::env::var("TENANT_ID").unwrap_or_default();
+    let account_instance_id = hub_config
+        .read()
+        .instance_id
+        .clone()
+        .unwrap_or_default();
 
     // Show aggregate preflight overlay after sign-in until dismissed.
     // While checks are still running (preflight_result is None), keep showing
@@ -904,8 +931,10 @@ pub fn App() -> Element {
                         is_signed_in: *is_signed_in.read(),
                         signing_in: *signing_in.read(),
                         has_matrix_url: has_matrix_url,
+                        show_account: is_account,
                         on_sign_in: on_sign_in,
                         on_sign_out: on_sign_out,
+                        on_account: on_account,
                     }
                 }
                 if !*is_signed_in.read() && has_matrix_url {
@@ -960,6 +989,13 @@ pub fn App() -> Element {
                         on_continue: move |_: ()| {
                             preflight_dismissed.set(true);
                         },
+                    }
+                } else if is_account {
+                    AccountView {
+                        server_url: account_server_url,
+                        tenant_id: account_tenant_id,
+                        instance_id: account_instance_id,
+                        on_sign_out: on_sign_out,
                     }
                 } else {
                     ContentArea {

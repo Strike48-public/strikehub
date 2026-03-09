@@ -86,8 +86,10 @@ pub fn Sidebar(
     #[props(default = false)] is_signed_in: bool,
     #[props(default = false)] signing_in: bool,
     #[props(default = false)] has_matrix_url: bool,
+    #[props(default = false)] show_account: bool,
     on_sign_in: EventHandler<()>,
     on_sign_out: EventHandler<()>,
+    on_account: EventHandler<()>,
 ) -> Element {
     rsx! {
         div { class: "sidebar-rail",
@@ -177,9 +179,9 @@ pub fn Sidebar(
             div { class: "rail-footer",
                 if has_matrix_url && is_signed_in {
                     div {
-                        class: "rail-action signed-in",
-                        onclick: move |_| on_sign_out.call(()),
-                        title: "Sign Out",
+                        class: if show_account { "rail-action signed-in active" } else { "rail-action signed-in" },
+                        onclick: move |_| on_account.call(()),
+                        title: "Account",
                         svg {
                             width: "20",
                             height: "20",
