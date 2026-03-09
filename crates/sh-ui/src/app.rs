@@ -891,11 +891,7 @@ pub fn App() -> Element {
         .map(|a| a.matrix_url().to_string())
         .unwrap_or_default();
     let account_tenant_id = std::env::var("TENANT_ID").unwrap_or_default();
-    let account_instance_id = hub_config
-        .read()
-        .instance_id
-        .clone()
-        .unwrap_or_default();
+    let account_instance_id = hub_config.read().instance_id.clone().unwrap_or_default();
 
     // Show aggregate preflight overlay after sign-in until dismissed.
     // While checks are still running (preflight_result is None), keep showing
