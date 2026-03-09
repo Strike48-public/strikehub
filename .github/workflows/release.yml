@@ -171,13 +171,6 @@ jobs:
             artifact: strikehub-windows-x86_64
             installer: msi
             binary_name: strikehub.exe
-          - os: windows-11-arm
-            name: MSI aarch64
-            target: aarch64-pc-windows-msvc
-            arch: aarch64
-            artifact: strikehub-windows-aarch64
-            installer: msi
-            binary_name: strikehub.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -432,7 +425,6 @@ jobs:
             | Linux AppImage | x86_64 | `StrikeHub-*-x86_64.AppImage` |
             | Linux AppImage | aarch64 | `StrikeHub-*-aarch64.AppImage` |
             | Windows MSI | x86_64 | `strikehub-windows-x86_64.msi` |
-            | Windows MSI | aarch64 | `strikehub-windows-aarch64.msi` |
 
             All packages include bundled connectors (`ks-connector` and `pentest-agent`) and pre-configured environment variables.
             - **`.msi`** — Windows installer with Start Menu, desktop shortcut, and system env vars
