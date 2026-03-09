@@ -33,9 +33,10 @@ mkdir -p "$APPDIR/usr/bin"
 mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 
-# Copy binaries
-echo "Copying binaries..."
-cp "target/${TARGET}/release/strikehub" "$APPDIR/usr/bin/strikehub-real"
+# Copy binaries (BIN_DIR can be overridden for debug builds)
+BIN_DIR="${BIN_DIR:-target/${TARGET}/release}"
+echo "Copying binaries from ${BIN_DIR}..."
+cp "${BIN_DIR}/strikehub" "$APPDIR/usr/bin/strikehub-real"
 chmod +x "$APPDIR/usr/bin/strikehub-real"
 
 # Create wrapper script that sets env vars

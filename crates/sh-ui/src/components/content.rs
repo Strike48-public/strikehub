@@ -35,7 +35,8 @@ pub fn ContentArea(
     let url = match active_transport {
         Some(ConnectorTransport::Ipc) => active_id.as_ref().map(|id| {
             // Windows/WebView2 uses http:// for the dioxus custom protocol,
-            // Linux/WebKitGTK uses the dioxus:// scheme directly.
+            // Linux/macOS piggyback on the dioxus:// scheme so the iframe
+            // stays same-origin (WebKitGTK blocks custom schemes in iframes).
             if cfg!(target_os = "windows") {
                 format!("http://dioxus.index.html/connector/{}/liveview", id)
             } else {
