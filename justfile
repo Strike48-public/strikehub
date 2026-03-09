@@ -114,6 +114,154 @@ pin:
     echo "✓ Pinned connector refs:"
     cat connector-versions.env
 
+# Build on a remote host via SSH.
+# Syncs the repo (excluding target/), builds natively, and copies the
+# artifact back. First run installs Rust and system deps automatically.
+#
+# Examples:
+#   just remote-build dgx-spark appimage 0.1.0
+#   just remote-build my-arm-box msi 0.2.0
+#   just remote-build user@10.0.0.5 appimage
+remote-build host artifact="appimage" version="0.0.0-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    HOST="{{host}}"
+    ARTIFACT="{{artifact}}"
+    VERSION="{{version}}"
+    REMOTE_DIR="strikehub-build"
+
+    echo "→ Remote build: ${ARTIFACT} v${VERSION} on ${HOST}"
+
+    # Bootstrap: install Rust and build deps if not present
+    echo "→ Checking build environment on ${HOST}..."
+    ssh "$HOST" bash -s << 'BOOTSTRAP'
+    set -e
+    NEED_DEPS=0
+
+    # Check Rust
+    if ! command -v cargo &>/dev/null; then
+        echo "  Installing Rust toolchain..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        NEED_DEPS=1
+    fi
+    source "$HOME/.cargo/env" 2>/dev/null || true
+    echo "  rustc: $(rustc --version)"
+
+    # Check system deps (only try to install if missing)
+    if ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+        NEED_DEPS=1
+    fi
+
+    if [ "$NEED_DEPS" = "1" ]; then
+        echo "  Installing system build dependencies..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+            build-essential pkg-config git \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev libxdo-dev \
+            libpcap-dev libssl-dev \
+            file wget imagemagick libfuse2 \
+            protobuf-compiler
+    fi
+    echo "  ✓ Build environment ready"
+    BOOTSTRAP
+
+    # Sync the repo to the remote (exclude build artifacts)
+    echo "→ Syncing repo to ${HOST}:~/${REMOTE_DIR}/..."
+    rsync -az --delete \
+        --exclude='target/' \
+        --exclude='.git/objects/' \
+        --exclude='*.AppImage' \
+        --exclude='*.msi' \
+        --exclude='StrikeHub.AppDir/' \
+        --exclude='appimagetool-*.AppImage' \
+        -e ssh \
+        ./ "${HOST}:~/${REMOTE_DIR}/"
+
+    # Also sync .git/HEAD and refs so git works on remote
+    rsync -az -e ssh ./.git/ "${HOST}:~/${REMOTE_DIR}/.git/" \
+        --include='HEAD' --include='refs/***' --include='config' \
+        --exclude='objects/' --exclude='hooks/'
+
+    # Determine the target triple from remote arch
+    REMOTE_ARCH=$(ssh "$HOST" uname -m)
+    case "$REMOTE_ARCH" in
+        x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
+        aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+        *)       echo "ERROR: Unsupported remote arch: $REMOTE_ARCH"; exit 1 ;;
+    esac
+    echo "→ Remote arch: ${REMOTE_ARCH} (target: ${TARGET})"
+
+    # Run the build on the remote
+    echo "→ Building on ${HOST}..."
+    ssh "$HOST" bash -s "$REMOTE_DIR" "$TARGET" "$VERSION" "$ARTIFACT" "$REMOTE_ARCH" << 'BUILD'
+    set -ex
+    REMOTE_DIR="$1"; TARGET="$2"; VERSION="$3"; ARTIFACT="$4"; ARCH="$5"
+    source "$HOME/.cargo/env"
+    cd ~/"$REMOTE_DIR"
+
+    # Ensure the right Rust target is installed
+    rustup target add "$TARGET"
+
+    # Build StrikeHub
+    cargo build --release --target "$TARGET" --no-default-features --features desktop
+
+    # Build connectors
+    source connector-versions.env
+    mkdir -p dist
+
+    if [ ! -d /tmp/pick ]; then
+        git clone https://github.com/Strike48-public/pick.git /tmp/pick
+    fi
+    git -C /tmp/pick fetch --all
+    git -C /tmp/pick checkout "$PICK_REF"
+    cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target "$TARGET"
+    cp "/tmp/pick/target/${TARGET}/release/pentest-agent" dist/
+
+    if [ ! -d /tmp/kubestudio ]; then
+        git clone https://github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+    fi
+    git -C /tmp/kubestudio fetch --all
+    git -C /tmp/kubestudio checkout "$KUBESTUDIO_REF"
+    cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target "$TARGET"
+    cp "/tmp/kubestudio/target/${TARGET}/release/ks-connector" dist/
+
+    # Build the artifact
+    case "$ARTIFACT" in
+        appimage)
+            chmod +x scripts/build-appimage.sh
+            ./scripts/build-appimage.sh "$VERSION" "$ARCH"
+            echo "RESULT=$(ls -1 StrikeHub-*.AppImage)"
+            ;;
+        msi)
+            echo "ERROR: MSI builds require Windows"; exit 1
+            ;;
+        *)
+            echo "ERROR: Unknown artifact type: $ARTIFACT"; exit 1
+            ;;
+    esac
+    BUILD
+
+    # Copy the built artifact back
+    echo "→ Fetching artifact from ${HOST}..."
+    case "$ARTIFACT" in
+        appimage)
+            scp "${HOST}:~/${REMOTE_DIR}/StrikeHub-*-${REMOTE_ARCH}.AppImage" .
+            RESULT="$(ls -1t StrikeHub-*-${REMOTE_ARCH}.AppImage 2>/dev/null | head -1)"
+            ;;
+    esac
+
+    if [ -n "${RESULT:-}" ]; then
+        echo ""
+        echo "✅ ${RESULT} ($(du -h "$RESULT" | cut -f1))"
+    else
+        echo ""
+        echo "❌ Build failed — no artifact found."
+        exit 1
+    fi
+
+
 # Package StrikeHub with connector binaries into a dist directory.
 # Copies strikehub + ks-connector + pentest-agent next to each other
 # so the app can find them at runtime via resolve_binary().
