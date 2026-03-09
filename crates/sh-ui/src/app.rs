@@ -892,19 +892,21 @@ pub fn App() -> Element {
         div { class: "app-shell",
             div {
                 class: "app-container",
-                Sidebar {
-                    connectors: sidebar_items,
-                    active_id: active_id.read().clone(),
-                    show_settings: is_setup,
-                    on_select: on_select,
-                    on_hover: on_hover,
-                    hovered_id: hovered_id.read().clone(),
-                    on_settings: on_settings,
-                    is_signed_in: *is_signed_in.read(),
-                    signing_in: *signing_in.read(),
-                    has_matrix_url: has_matrix_url,
-                    on_sign_in: on_sign_in,
-                    on_sign_out: on_sign_out,
+                if show_preflight.is_none() {
+                    Sidebar {
+                        connectors: sidebar_items,
+                        active_id: active_id.read().clone(),
+                        show_settings: is_setup,
+                        on_select: on_select,
+                        on_hover: on_hover,
+                        hovered_id: hovered_id.read().clone(),
+                        on_settings: on_settings,
+                        is_signed_in: *is_signed_in.read(),
+                        signing_in: *signing_in.read(),
+                        has_matrix_url: has_matrix_url,
+                        on_sign_in: on_sign_in,
+                        on_sign_out: on_sign_out,
+                    }
                 }
                 if !*is_signed_in.read() && has_matrix_url {
                     LoginOverlay {
