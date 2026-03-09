@@ -181,7 +181,9 @@ pub fn App() -> Element {
     // Runs automatically after sign-in; dismissed via Continue/Skip.
     let mut preflight_result: Signal<Option<AggregatePreflightResult>> = use_signal(|| None);
     let mut preflight_checking = use_signal(|| false);
-    let mut preflight_dismissed = use_signal(|| false);
+    // On Windows, skip the preflight wizard entirely — bundled connectors
+    // handle their own dependencies so the step-1/step-2 checks are unnecessary.
+    let mut preflight_dismissed = use_signal(|| cfg!(target_os = "windows"));
 
     // Register a "connector" asset handler so that connector content can be served
     // through the dioxus:// scheme (which passes the hardcoded navigation handler).
@@ -693,7 +695,11 @@ pub fn App() -> Element {
     // Run preflight checks for all enabled connectors after sign-in.
     // Waits a few seconds for connectors to start and register before
     // checking their Matrix registration status.
+    // Skipped entirely on Windows — bundled connectors handle their own deps.
     use_effect(move || {
+        if cfg!(target_os = "windows") {
+            return;
+        }
         let signed_in = *is_signed_in.read();
         if signed_in && !*preflight_dismissed.peek() && preflight_result.peek().is_none() {
             let connector_ids: Vec<String> = {
