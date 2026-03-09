@@ -934,6 +934,112 @@ pub fn app_css() -> &'static str {
             cursor: default;
         }
 
+        /* ── Account view ── */
+        .account-view {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: var(--chrome);
+            min-height: 0;
+        }
+
+        .account-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            padding: 32px 40px;
+            border: 1px solid var(--chrome-card-border);
+            border-radius: var(--radius);
+            background: var(--chrome-card);
+            min-width: 300px;
+        }
+
+        .account-avatar {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: oklch(0.28 0 0);
+            color: var(--success);
+            margin-bottom: 8px;
+        }
+
+        .account-heading {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--chrome-foreground);
+            margin: 0;
+        }
+
+        .account-status {
+            font-size: 13px;
+            color: var(--success);
+            font-weight: 500;
+            margin: 0 0 12px;
+        }
+
+        .account-details {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 12px 0;
+            border-top: 1px solid var(--chrome-border);
+            border-bottom: 1px solid var(--chrome-border);
+            margin-bottom: 16px;
+        }
+
+        .account-detail-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 16px;
+        }
+
+        .account-detail-label {
+            font-size: 12px;
+            color: var(--chrome-muted);
+            flex-shrink: 0;
+        }
+
+        .account-detail-value {
+            font-size: 12px;
+            font-family: var(--font-mono);
+            color: var(--chrome-foreground);
+            text-align: right;
+            word-break: break-all;
+            min-width: 0;
+        }
+
+        .account-sign-out-btn {
+            width: 100%;
+            padding: 8px 28px;
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid var(--destructive);
+            border-radius: var(--radius);
+            background: transparent;
+            color: var(--destructive);
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .account-sign-out-btn:hover {
+            background: var(--destructive);
+            color: var(--accent-foreground);
+        }
+
+        .rail-action.signed-in.active {
+            background: var(--accent);
+            border-radius: 10px;
+            color: var(--accent-foreground);
+        }
+
         /* ── Locked sidebar items ── */
         .rail-item.locked,
         .rail-action.locked {

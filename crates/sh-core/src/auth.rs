@@ -103,6 +103,36 @@ impl AuthManager {
         read_lock(&self.token).clone()
     }
 
+    /// Extract the user's display name from the current JWT, decoded transiently.
+    /// Returns `None` if not authenticated or if the claim is missing.
+    /// Tries `name` first, then falls back to `preferred_username`.
+    pub fn user_display_name(&self) -> Option<String> {
+        let token = self.token();
+        if token.is_empty() {
+            return None;
+        }
+        let claims = parse_jwt_claims(&token)?;
+        claims
+            .get("name")
+            .and_then(|v| v.as_str())
+            .or_else(|| claims.get("preferred_username").and_then(|v| v.as_str()))
+            .map(String::from)
+    }
+
+    /// Extract the user's email from the current JWT, decoded transiently.
+    /// Returns `None` if not authenticated or if the claim is missing.
+    pub fn user_email(&self) -> Option<String> {
+        let token = self.token();
+        if token.is_empty() {
+            return None;
+        }
+        let claims = parse_jwt_claims(&token)?;
+        claims
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
     /// Get the sandbox token for Matrix API calls.
     /// Returns empty string if not yet bootstrapped.
     pub fn sandbox_token(&self) -> String {
@@ -383,9 +413,8 @@ fn ttl_sleep_secs(token: &str) -> u64 {
     sleep.max(MIN_SECS)
 }
 
-/// Extract the `exp` field from a JWT's payload (no signature verification needed —
-/// we just need the expiry for scheduling).
-fn parse_jwt_exp(token: &str) -> Option<u64> {
+/// Decode the JWT payload into a JSON object (no signature verification).
+fn parse_jwt_claims(token: &str) -> Option<serde_json::Value> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
@@ -393,8 +422,13 @@ fn parse_jwt_exp(token: &str) -> Option<u64> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(parts[1])
         .ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    json.get("exp")?.as_u64()
+    serde_json::from_slice(&payload).ok()
+}
+
+/// Extract the `exp` field from a JWT's payload (no signature verification needed —
+/// we just need the expiry for scheduling).
+fn parse_jwt_exp(token: &str) -> Option<u64> {
+    parse_jwt_claims(token)?.get("exp")?.as_u64()
 }
 
 /// Extract `window.__MATRIX_SESSION_TOKEN__ = '...'` from HTML.
