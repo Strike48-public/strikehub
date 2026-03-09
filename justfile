@@ -1,8 +1,8 @@
 # StrikeHub development commands
 
 # Paths to sibling connector repos
-pick_dir     := env("PICK_DIR", home_directory() / "work/pick")
-kube_dir     := env("KUBE_DIR", home_directory() / "work/kubestudio")
+pick_dir     := env("PICK_DIR", justfile_directory() / "../pick")
+kube_dir     := env("KUBE_DIR", justfile_directory() / "../kubestudio")
 bin_dir      := env("BIN_DIR", home_directory() / "bin")
 
 # Build all connectors and StrikeHub, copy binaries, then run
@@ -103,6 +103,36 @@ build-pinned:
     just build-pick-at "$PICK_REF"
     just build-kube-at "$KUBESTUDIO_REF"
     echo "✓ All connectors built at pinned refs"
+
+# Build a local AppImage (native arch). Pass profile=debug for devtools.
+build-appimage profile="release" version="0.0.0-dev": build-all
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Avoid Nix glibc header conflicts with vendored C crates
+    unset C_INCLUDE_PATH CPLUS_INCLUDE_PATH
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+      x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
+      aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+      *)       echo "Unsupported arch: $ARCH"; exit 1 ;;
+    esac
+    PROFILE="{{profile}}"
+    if [ "$PROFILE" = "release" ]; then
+        echo "→ Building release binary for $TARGET..."
+        cargo build --release --target "$TARGET" --no-default-features --features desktop
+        BIN_DIR="target/$TARGET/release"
+    else
+        echo "→ Building debug binary for $TARGET (devtools enabled)..."
+        cargo build --target "$TARGET" --no-default-features --features desktop
+        BIN_DIR="target/$TARGET/debug"
+    fi
+    mkdir -p dist
+    cp "{{pick_dir}}/target/debug/pentest-agent" dist/
+    cp "{{kube_dir}}/target/debug/ks-connector" dist/
+    chmod +x scripts/build-appimage.sh
+    BIN_DIR="$BIN_DIR" ./scripts/build-appimage.sh "{{version}}" "$ARCH"
+    echo ""
+    ls -lh StrikeHub-*.AppImage
 
 # Update connector-versions.env to the latest main HEAD of each connector repo
 pin:
