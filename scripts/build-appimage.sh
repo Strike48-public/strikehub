@@ -7,17 +7,25 @@ VERSION=${1:-latest}
 ARCH=${2:-x86_64}
 APPDIR="StrikeHub.AppDir"
 
-echo "Building StrikeHub AppImage with working env vars..."
+# Derive the Rust target triple from ARCH
+case "$ARCH" in
+  x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
+  aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+  *)       echo "Unsupported arch: $ARCH"; exit 1 ;;
+esac
+
+echo "Building StrikeHub AppImage ($ARCH) with working env vars..."
 
 # Clean up
 rm -rf "$APPDIR"
 rm -f StrikeHub*.AppImage
 
 # Download appimagetool if needed
-if [ ! -f "appimagetool-x86_64.AppImage" ]; then
-    echo "Downloading appimagetool..."
-    wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-    chmod +x appimagetool-x86_64.AppImage
+APPIMAGETOOL="appimagetool-${ARCH}.AppImage"
+if [ ! -f "$APPIMAGETOOL" ]; then
+    echo "Downloading $APPIMAGETOOL..."
+    wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/${APPIMAGETOOL}"
+    chmod +x "$APPIMAGETOOL"
 fi
 
 # Create AppDir structure
@@ -27,7 +35,7 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 
 # Copy binaries
 echo "Copying binaries..."
-cp "target/x86_64-unknown-linux-gnu/release/strikehub" "$APPDIR/usr/bin/strikehub-real"
+cp "target/${TARGET}/release/strikehub" "$APPDIR/usr/bin/strikehub-real"
 chmod +x "$APPDIR/usr/bin/strikehub-real"
 
 # Create wrapper script that sets env vars
@@ -42,6 +50,9 @@ fi
 if [ -z "$STRIKE48_URL" ]; then
     export STRIKE48_URL="wss://studio.strike48.com"
 fi
+
+# Force X11 backend to avoid Wayland protocol errors with WebKitGTK
+export GDK_BACKEND=x11
 
 # Execute the real binary
 exec "$HERE/strikehub-real" "$@"
@@ -68,18 +79,18 @@ cp "crates/sh-ui/src/assets/icons/strike48-mark.svg" "$APPDIR/usr/share/icons/hi
 cp "crates/sh-ui/src/assets/icons/strike48-mark.svg" "$APPDIR/strikehub.svg"
 
 # Create a simple AppRun
-cat > "$APPDIR/AppRun" << 'EOF'
+cat > "$APPDIR/AppRun" << RUNEOF
 #!/bin/bash
-HERE="$(dirname "$(readlink -f "${0}")")"
-export PATH="${HERE}/usr/bin:${PATH}"
-export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
-exec "$HERE/usr/bin/strikehub" "$@"
-EOF
+HERE="\$(dirname "\$(readlink -f "\${0}")")"
+export PATH="\${HERE}/usr/bin:\${PATH}"
+export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${HERE}/usr/lib/${ARCH}-linux-gnu:\${LD_LIBRARY_PATH}"
+exec "\$HERE/usr/bin/strikehub" "\$@"
+RUNEOF
 chmod +x "$APPDIR/AppRun"
 
 # Build the AppImage
 echo "Creating AppImage..."
-ARCH=$ARCH ./appimagetool-x86_64.AppImage "$APPDIR" "StrikeHub-${VERSION}-${ARCH}.AppImage"
+ARCH=$ARCH "./${APPIMAGETOOL}" "$APPDIR" "StrikeHub-${VERSION}-${ARCH}.AppImage"
 
 echo ""
 echo "✅ AppImage created: StrikeHub-${VERSION}-${ARCH}.AppImage"
