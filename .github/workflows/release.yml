@@ -192,6 +192,7 @@ jobs:
             file \
             wget \
             imagemagick \
+            librsvg2-bin \
             libfuse2
 
       - uses: dtolnay/rust-toolchain@stable

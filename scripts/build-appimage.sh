@@ -76,7 +76,23 @@ fi
 cp "assets/strikehub.desktop" "$APPDIR/usr/share/applications/"
 cp "assets/strikehub.desktop" "$APPDIR/"
 cp "crates/sh-ui/src/assets/icons/strike48-mark.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/strikehub.svg"
-cp "crates/sh-ui/src/assets/icons/strike48-mark.svg" "$APPDIR/strikehub.svg"
+
+# Generate PNG icons from SVG for desktop environment compatibility.
+# Many DEs (GNOME, KDE, XFCE) prefer PNG over SVG for app icons.
+SVG_ICON="crates/sh-ui/src/assets/icons/strike48-mark.svg"
+for SIZE in 256 128 64 48 32 16; do
+    DIR="$APPDIR/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps"
+    mkdir -p "$DIR"
+    if command -v rsvg-convert &> /dev/null; then
+        rsvg-convert -w "$SIZE" -h "$SIZE" "$SVG_ICON" -o "$DIR/strikehub.png"
+    else
+        convert -background none "$SVG_ICON" -resize "${SIZE}x${SIZE}" "$DIR/strikehub.png"
+    fi
+done
+
+# AppImage requires a PNG icon at the AppDir root and a .DirIcon for file managers.
+cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/strikehub.png" "$APPDIR/strikehub.png"
+cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/strikehub.png" "$APPDIR/.DirIcon"
 
 # Create a simple AppRun
 cat > "$APPDIR/AppRun" << RUNEOF
