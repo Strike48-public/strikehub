@@ -60,6 +60,11 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+
+    // Axum has stopped accepting connections. The Dioxus component tree
+    // will be torn down, dropping IpcConnectorRunner handles which kill
+    // and reap child connector processes via their Drop impl.
+    tracing::info!("Server stopped, connector cleanup via Drop");
 }
 
 async fn shutdown_signal() {
