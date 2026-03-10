@@ -39,8 +39,8 @@ fn main() {
                 .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 600.0)),
         );
 
-    // Remove the default File/Edit/Help menu bar on Windows.
-    #[cfg(target_os = "windows")]
+    // Remove the default File/Edit/Help menu bar on Windows and Linux.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         config = config.with_menu(None::<dioxus::desktop::muda::Menu>);
     }
