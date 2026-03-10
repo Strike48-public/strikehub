@@ -58,6 +58,15 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         }
     }
 
+    // On Windows, forward USERPROFILE as HOME so child connectors (and the SDK
+    // OttProvider) can locate ~/.strike48 for credential storage.
+    #[cfg(windows)]
+    if !vars.iter().any(|(k, _)| k == "HOME") {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            vars.push(("HOME".to_string(), profile));
+        }
+    }
+
     vars
 }
 
