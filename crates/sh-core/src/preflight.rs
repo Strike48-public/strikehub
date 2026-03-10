@@ -245,19 +245,7 @@ impl AggregatePreflightResult {
 }
 
 /// Run preflight checks for a connector by ID (local prerequisites only).
-///
-/// On Windows the step-1 device-posture checks (Docker, kubectl, etc.) are
-/// skipped because bundled connectors handle their own dependencies.
 pub async fn run_preflight(connector_id: &str) -> PreflightResult {
-    // Skip device-posture checks on Windows — they are not actionable there.
-    if cfg!(target_os = "windows") {
-        return PreflightResult {
-            connector_id: connector_id.to_string(),
-            connector_name: connector_id.to_string(),
-            checks: vec![],
-        };
-    }
-
     // Pick up any PATH changes from installs that happened since launch.
     refresh_path();
     let (name, checks) = match connector_id {
