@@ -69,10 +69,17 @@ fn sync_config(
     hub_config: &mut Signal<HubConfig>,
     connectors: &mut Signal<Vec<ConnectorConfig>>,
 ) {
-    let enabled: Vec<_> = setup_connectors.iter().filter(|c| c.enabled).map(|c| c.manifest.id).collect();
+    let enabled: Vec<_> = setup_connectors
+        .iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.manifest.id)
+        .collect();
     tracing::info!(
         "[sync_config] called: setup_connectors={} (enabled: {:?}), custom_connectors={}, existing_connectors={}",
-        setup_connectors.len(), enabled, custom_connectors.len(), connectors.read().len()
+        setup_connectors.len(),
+        enabled,
+        custom_connectors.len(),
+        connectors.read().len()
     );
     // Snapshot runtime state (fetched name, icon, online status) before rebuilding.
     // sync_config recreates ConnectorConfigs from HubConfig which doesn't carry
@@ -339,10 +346,16 @@ pub fn App() -> Element {
             signed_in,
             setup_complete,
             current.len(),
-            current.iter().map(|c| format!("{}({:?})", c.id, c.status)).collect::<Vec<_>>().join(", ")
+            current
+                .iter()
+                .map(|c| format!("{}({:?})", c.id, c.status))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         if current.is_empty() {
-            tracing::warn!("[connector-start] connectors list is EMPTY — nothing to start. sync_config may not have been called yet.");
+            tracing::warn!(
+                "[connector-start] connectors list is EMPTY — nothing to start. sync_config may not have been called yet."
+            );
         }
         spawn(async move {
             let mut env_vars = matrix_env_vars();
@@ -372,7 +385,10 @@ pub fn App() -> Element {
 
                 // Check if already running
                 if runners.read().contains_key(&conn.id) {
-                    tracing::debug!("[connector-start] '{}' already in runners, skipping", conn.id);
+                    tracing::debug!(
+                        "[connector-start] '{}' already in runners, skipping",
+                        conn.id
+                    );
                     continue;
                 }
 
@@ -382,7 +398,10 @@ pub fn App() -> Element {
 
                 // Double-check after acquiring lock (another task may have started it)
                 if starting.contains(&conn.id) || runners.read().contains_key(&conn.id) {
-                    tracing::debug!("[connector-start] '{}' already starting or in runners (post-lock), skipping", conn.id);
+                    tracing::debug!(
+                        "[connector-start] '{}' already starting or in runners (post-lock), skipping",
+                        conn.id
+                    );
                     continue;
                 }
 
@@ -721,7 +740,9 @@ pub fn App() -> Element {
                     .map(|c| c.id.clone())
                     .collect();
                 if ids.is_empty() {
-                    tracing::info!("[preflight] connectors signal is empty, falling back to builtin_manifests");
+                    tracing::info!(
+                        "[preflight] connectors signal is empty, falling back to builtin_manifests"
+                    );
                     builtin_manifests()
                         .iter()
                         .map(|m| m.id.to_string())
@@ -732,7 +753,11 @@ pub fn App() -> Element {
                 }
             };
             let auth = auth_manager.read().clone();
-            tracing::info!("[preflight] starting preflight check for {:?}, auth={}", connector_ids, auth.is_some());
+            tracing::info!(
+                "[preflight] starting preflight check for {:?}, auth={}",
+                connector_ids,
+                auth.is_some()
+            );
             preflight_checking.set(true);
             spawn(async move {
                 // Give connectors time to start and register with Matrix.
@@ -792,11 +817,16 @@ pub fn App() -> Element {
         // If setup hasn't been completed yet, sync config first to populate
         // the connectors signal from the manifest defaults.
         if !hub_config.read().setup_complete {
-            tracing::info!("[on_select] setup not complete, calling sync_config to populate connectors");
+            tracing::info!(
+                "[on_select] setup not complete, calling sync_config to populate connectors"
+            );
             let sc = setup_connectors.read().clone();
             let cc = custom_connectors.read().clone();
             sync_config(&sc, &cc, &mut hub_config, &mut connectors);
-            tracing::info!("[on_select] sync_config done, connectors now has {} entries", connectors.read().len());
+            tracing::info!(
+                "[on_select] sync_config done, connectors now has {} entries",
+                connectors.read().len()
+            );
         }
         active_id.set(Some(id));
         hovered_id.set(None);
