@@ -58,11 +58,19 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         }
     }
 
-    // On Windows, forward USERPROFILE as HOME so child connectors (and the SDK
-    // OttProvider) can locate ~/.strike48 for credential storage.
+    // On Windows, set HOME for child connectors so the SDK OttProvider can
+    // locate ~/.strike48 for key/credential storage.  Prefer LOCALAPPDATA
+    // (e.g. C:\Users\<user>\AppData\Local) because:
+    //  - USERPROFILE root may be restricted by Controlled Folder Access or
+    //    antivirus on consumer Windows editions.
+    //  - LOCALAPPDATA is always writable and is the idiomatic location for
+    //    per-user application data on Windows.
+    //  - StrikeHub already writes its own logs to LOCALAPPDATA.
     #[cfg(windows)]
     if !vars.iter().any(|(k, _)| k == "HOME") {
-        if let Ok(profile) = std::env::var("USERPROFILE") {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            vars.push(("HOME".to_string(), local));
+        } else if let Ok(profile) = std::env::var("USERPROFILE") {
             vars.push(("HOME".to_string(), profile));
         }
     }
