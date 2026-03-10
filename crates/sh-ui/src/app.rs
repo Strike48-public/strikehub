@@ -518,6 +518,19 @@ pub fn App() -> Element {
                 let Some(auth) = auth else { continue };
                 signing_in.set(true);
 
+                // Clear stale webview browsing data (cookies, local storage)
+                // before starting a fresh OAuth flow so no old session leaks.
+                #[cfg(feature = "desktop")]
+                {
+                    let window = dioxus::desktop::window();
+                    if let Err(e) = window.webview.clear_all_browsing_data() {
+                        tracing::warn!(
+                            "Failed to clear webview browsing data before sign-in: {}",
+                            e
+                        );
+                    }
+                }
+
                 let auth_clone = auth.clone();
                 let callback_base = std::env::var("STRIKEHUB_CALLBACK_URL").ok();
                 let browser_api_url = std::env::var("STRIKE48_EXTERNAL_URL").ok();
@@ -744,6 +757,15 @@ pub fn App() -> Element {
         preflight_result.set(None);
         preflight_dismissed.set(false);
         show_account.set(false);
+        // Clear webview browsing data (cookies, local storage, etc.) so no
+        // Keycloak/Matrix session tokens persist on disk after sign-out.
+        #[cfg(feature = "desktop")]
+        {
+            let window = dioxus::desktop::window();
+            if let Err(e) = window.webview.clear_all_browsing_data() {
+                tracing::warn!("Failed to clear webview browsing data: {}", e);
+            }
+        }
         // Detach stale WS client from the proxy so the next sign-in starts fresh
         spawn(async move {
             if let Some(proxy) = proxy_handle.peek().as_ref() {
@@ -752,7 +774,7 @@ pub fn App() -> Element {
         });
         let next = *auth_version.peek() + 1;
         auth_version.set(next);
-        tracing::info!("Signed out");
+        tracing::info!("Signed out (auth + browsing data cleared)");
     };
 
     let on_select = move |id: String| {
