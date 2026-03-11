@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod preflight;
 pub mod proxy;
 pub mod registry;
+pub mod transport;
 pub mod ws_relay;
 
 pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant_id};
@@ -29,4 +30,5 @@ pub use preflight::{
 };
 pub use proxy::ConnectorProxy;
 pub use registry::{ConnectorManifest, builtin_manifests};
+pub use transport::detect_transport;
 pub use ws_relay::WsRelay;

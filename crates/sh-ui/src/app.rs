@@ -10,7 +10,7 @@ use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, ConnectorConfig, ConnectorProxy, ConnectorRuntime,
     ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner, MatrixWsClient, WsRelay,
-    builtin_manifests, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
+    builtin_manifests, detect_transport, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
     run_preflight_full, start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
@@ -43,20 +43,14 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         "KUBESTUDIO_MODE",
     ];
 
+    // Default for STRIKE48_API_URL only. STRIKE48_URL is set dynamically
+    // by transport detection at startup, so no static default is needed.
+    let defaults: &[(&str, &str)] = &[("STRIKE48_API_URL", AuthManager::DEFAULT_API_URL)];
+
     let mut vars: Vec<(String, String)> = FORWARD_KEYS
         .iter()
         .filter_map(|&key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
         .collect();
-
-    // Derive defaults from the build-time constant so they stay in sync.
-    let default_api = AuthManager::DEFAULT_API_URL;
-    let default_wss = default_api
-        .replacen("https://", "wss://", 1)
-        .replacen("http://", "ws://", 1);
-    let defaults: &[(&str, &str)] = &[
-        ("STRIKE48_API_URL", default_api),
-        ("STRIKE48_URL", &default_wss),
-    ];
 
     for &(key, default) in defaults {
         if !vars.iter().any(|(k, _)| k == key) {
@@ -367,6 +361,22 @@ pub fn App() -> Element {
                         tracing::error!("Failed to start WsRelay: {}", e);
                     }
                 }
+            }
+
+            // Auto-detect the best transport (gRPC vs WebSocket) at startup
+            // so the logs show the probing immediately and STRIKE48_URL is
+            // ready before sign-in completes.
+            let api_url = auth.matrix_url().to_string();
+            let tls_insecure = auth.tls_insecure();
+            let transport = detect_transport(&api_url, tls_insecure).await;
+            tracing::info!(
+                "Startup transport: {} ({})",
+                transport.url(),
+                transport.scheme
+            );
+            // SAFETY: single-threaded Dioxus runtime; no concurrent env reads.
+            unsafe {
+                std::env::set_var("STRIKE48_URL", transport.url());
             }
 
             auth_manager.set(Some(auth));
@@ -701,14 +711,18 @@ pub fn App() -> Element {
                             hub_config.set(cfg);
                         }
 
+                        // Re-detect transport for the custom URL.
+                        let transport = detect_transport(studio_url, tls_insecure).await;
+                        tracing::info!(
+                            "Custom-URL transport: {} ({})",
+                            transport.url(),
+                            transport.scheme
+                        );
                         // SAFETY: Dioxus runs on a single thread; no concurrent env reads
                         // happen during sign-in. Child connectors are spawned later.
                         unsafe {
                             std::env::set_var("STRIKE48_API_URL", studio_url);
-                            let wss = studio_url
-                                .replacen("https://", "wss://", 1)
-                                .replacen("http://", "ws://", 1);
-                            std::env::set_var("STRIKE48_URL", &wss);
+                            std::env::set_var("STRIKE48_URL", transport.url());
                         }
                     }
                 }
@@ -856,8 +870,8 @@ pub fn App() -> Element {
                     sync_config(&sc, &cc, &mut hub_config, &mut connectors);
                 }
 
-                // Signal sign-in AFTER tenant is in env so the connector
-                // startup effect sees the tenant when it fires.
+                // Signal sign-in AFTER tenant + transport URL are in env so
+                // the connector startup effect sees them when it fires.
                 is_signed_in.set(true);
                 tracing::info!("Sign-in completed, connectors may now start");
 
