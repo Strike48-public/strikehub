@@ -460,6 +460,7 @@ fn success_page(matrix_base_url: &str) -> String {
     } else {
         format!("https://{}/studio/#/admin/gateways", base)
     };
+    let safe_redirect = js_string_escape(&redirect_url);
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>StrikeHub - Signed In</title>
@@ -474,8 +475,31 @@ fn success_page(matrix_base_url: &str) -> String {
 <div class="container"><h2>Signed in!</h2><p class="status">Redirecting to Studio gateways…</p></div>
 <script>setTimeout(function(){{window.location.href='{}'}},1000)</script>
 </body></html>"#,
-        redirect_url
+        safe_redirect
     )
+}
+
+/// Escape a string for safe embedding inside a JavaScript single-quoted
+/// string literal.  Handles quote breakout, backslash injection, newlines,
+/// and `</script>` tag injection.
+fn js_string_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\x00"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            '<' => out.push_str("\\x3c"),
+            '>' => out.push_str("\\x3e"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn html_escape(s: &str) -> String {
