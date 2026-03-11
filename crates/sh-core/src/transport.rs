@@ -334,9 +334,11 @@ fn fallback_ws_candidate(base_url: &str) -> TransportCandidate {
 }
 
 /// Parse `host:port` or just `host`, stripping any path component.
+/// Handles bracketed IPv6 (`[::1]:8443`) and bare IPv6 (`::1`).
 fn parse_host_port(input: &str, default_port: u16) -> (&str, u16) {
     let authority = input.split('/').next().unwrap_or(input);
 
+    // Bracketed IPv6: [::1]:port
     if authority.starts_with('[')
         && let Some(bracket_end) = authority.find(']')
     {
@@ -349,6 +351,13 @@ fn parse_host_port(input: &str, default_port: u16) -> (&str, u16) {
         return (host, port);
     }
 
+    // Bare IPv6 (multiple colons, no brackets) — don't try to split port.
+    let colon_count = authority.chars().filter(|&c| c == ':').count();
+    if colon_count > 1 {
+        return (authority, default_port);
+    }
+
+    // IPv4 or hostname: host:port
     if let Some(colon) = authority.rfind(':') {
         let maybe_port = &authority[colon + 1..];
         if let Ok(port) = maybe_port.parse::<u16>() {
@@ -497,5 +506,17 @@ mod tests {
             parse_host_port("studio.strike48.com:9090/path", 443),
             ("studio.strike48.com", 9090)
         );
+
+        // Bracketed IPv6
+        assert_eq!(parse_host_port("[::1]:8443", 443), ("[::1]", 8443));
+        assert_eq!(parse_host_port("[::1]", 443), ("[::1]", 443));
+        assert_eq!(
+            parse_host_port("[2001:db8::1]:9090", 443),
+            ("[2001:db8::1]", 9090)
+        );
+
+        // Bare IPv6 (no brackets) — should not misparse last segment as port
+        assert_eq!(parse_host_port("::1", 443), ("::1", 443));
+        assert_eq!(parse_host_port("2001:db8::1", 443), ("2001:db8::1", 443));
     }
 }

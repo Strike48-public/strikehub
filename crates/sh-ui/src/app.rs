@@ -82,6 +82,17 @@ fn validate_studio_url(raw: &str) -> Option<String> {
     if host_part.is_empty() || host_part.starts_with('/') {
         return None;
     }
+    // Reject URLs with userinfo (user:pass@host) to prevent confusion attacks.
+    // Also reject percent-encoded %40 which decodes to @ in URL parsers.
+    if let Some(before_slash) = host_part.split('/').next()
+        && (before_slash.contains('@') || before_slash.to_lowercase().contains("%40"))
+    {
+        return None;
+    }
+    // Reject excessively long URLs.
+    if u.len() > 2048 {
+        return None;
+    }
     Some(u)
 }
 
@@ -193,6 +204,7 @@ pub fn App() -> Element {
     let mut proxy_port = use_signal(|| None::<u16>);
     let mut proxy_handle = use_signal(|| None::<ConnectorProxy>);
     let mut ws_bridge_port = use_signal(|| None::<u16>);
+    let mut ws_relay_handle = use_signal(|| None::<WsRelay>);
     let mut auth_manager = use_signal(|| None::<AuthManager>);
     let mut is_signed_in = use_signal(|| false);
     let mut signing_in = use_signal(|| false);
@@ -351,7 +363,7 @@ pub fn App() -> Element {
                     Ok(relay) => {
                         let port = relay.port();
                         ws_bridge_port.set(Some(port));
-                        // Store in bridge state so the HTML rewriter knows the port
+                        ws_relay_handle.set(Some(relay));
                         if let Some(bs) = crate::get_bridge_state() {
                             bs.write().await.ws_bridge_port = Some(port);
                         }
@@ -421,12 +433,16 @@ pub fn App() -> Element {
             // Override STRIKE48_API_URL so the connector's chat panel routes
             // API calls through our proxy (which proxies /api/v1alpha
             // → /v1alpha/graphql with Keycloak JWT as ?token= param).
-            if let Some(pp) = *proxy_port.peek() {
-                env_vars.push((
-                    "STRIKE48_API_URL".into(),
-                    format!("http://127.0.0.1:{}", pp),
-                ));
-            }
+            let Some(pp) = *proxy_port.peek() else {
+                tracing::warn!(
+                    "[connector-start] proxy_port is None — auth proxy not running, skipping connector startup"
+                );
+                return;
+            };
+            env_vars.push((
+                "STRIKE48_API_URL".into(),
+                format!("http://127.0.0.1:{}", pp),
+            ));
 
             for conn in &current {
                 // Custom IPC connectors are externally managed — just register
@@ -646,6 +662,15 @@ pub fn App() -> Element {
 
                     if needs_new_auth {
                         tracing::info!("Custom Studio URL: {}, recreating auth stack", studio_url);
+
+                        // Shut down old proxy/relay before starting replacements.
+                        if let Some(old_proxy) = proxy_handle.read().as_ref() {
+                            old_proxy.shutdown();
+                        }
+                        if let Some(old_relay) = ws_relay_handle.read().as_ref() {
+                            old_relay.shutdown();
+                        }
+
                         let Some(new_auth) = AuthManager::new(studio_url.clone(), tls_insecure)
                         else {
                             let msg = format!("Failed to connect to {}", studio_url);
@@ -670,14 +695,16 @@ pub fn App() -> Element {
                             guard.proxy_port = Some(new_proxy.port());
                         }
 
-                        let new_relay_port = {
+                        let new_relay = {
                             let bridge = crate::get_bridge_state().cloned();
                             if let Some(bridge) = bridge {
                                 match WsRelay::start(bridge, Some(new_auth.clone())).await {
                                     Ok(relay) => {
-                                        let port = relay.port();
-                                        tracing::info!("WsRelay restarted on port {}", port);
-                                        Some(port)
+                                        tracing::info!(
+                                            "WsRelay restarted on port {}",
+                                            relay.port()
+                                        );
+                                        Some(relay)
                                     }
                                     Err(e) => {
                                         let msg = format!("Failed to start WebSocket relay: {}", e);
@@ -694,11 +721,12 @@ pub fn App() -> Element {
                         // All services started successfully — commit state atomically.
                         proxy_port.set(Some(new_proxy.port()));
                         proxy_handle.set(Some(new_proxy));
-                        if let Some(port) = new_relay_port {
-                            ws_bridge_port.set(Some(port));
+                        if let Some(relay) = new_relay {
+                            ws_bridge_port.set(Some(relay.port()));
                             if let Some(bs) = crate::get_bridge_state() {
-                                bs.write().await.ws_bridge_port = Some(port);
+                                bs.write().await.ws_bridge_port = Some(relay.port());
                             }
+                            ws_relay_handle.set(Some(relay));
                         }
                         auth_manager.set(Some(new_auth));
 
@@ -728,7 +756,12 @@ pub fn App() -> Element {
                 }
 
                 let auth = auth_manager.read().clone();
-                let Some(auth) = auth else { continue };
+                let Some(auth) = auth else {
+                    sign_in_error.set(Some(
+                        "Sign-in is not ready yet. Please wait a moment.".into(),
+                    ));
+                    continue;
+                };
                 signing_in.set(true);
 
                 // Clear stale webview browsing data (cookies, local storage)
@@ -1005,8 +1038,23 @@ pub fn App() -> Element {
                 tracing::warn!("Failed to clear webview browsing data: {}", e);
             }
         }
-        // Detach stale WS client from the proxy so the next sign-in starts fresh
+        // Stop running connectors, clear bridge sockets, and detach the WS
+        // client so the next sign-in starts with a clean slate.
         spawn(async move {
+            // Gracefully stop all running connector child processes.
+            let mut stopped = runners.write();
+            for (id, mut runner) in stopped.drain() {
+                if let Err(e) = runner.stop().await {
+                    tracing::warn!("Failed to stop connector '{}' on sign-out: {}", id, e);
+                }
+            }
+            drop(stopped);
+
+            // Clear stale IPC socket registrations.
+            if let Some(bridge) = crate::get_bridge_state() {
+                bridge.write().await.sockets.clear();
+            }
+
             if let Some(proxy) = proxy_handle.peek().as_ref() {
                 proxy.clear_matrix_ws().await;
             }
@@ -1206,7 +1254,6 @@ pub fn App() -> Element {
                         signing_in: *signing_in.read(),
                         has_matrix_url: has_matrix_url,
                         show_account: is_account,
-                        on_sign_in: on_sign_in,
                         on_sign_out: on_sign_out,
                         on_account: on_account,
                     }

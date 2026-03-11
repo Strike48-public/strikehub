@@ -22,6 +22,7 @@ struct RelayState {
 /// (for IPC connectors) or to the Matrix GraphQL socket.
 pub struct WsRelay {
     port: u16,
+    shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl WsRelay {
@@ -56,17 +57,28 @@ impl WsRelay {
 
         tracing::info!("WsRelay listening on ws://127.0.0.1:{}", port);
 
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_rx = shutdown.clone();
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async move { shutdown_rx.notified().await })
+                .await
+            {
                 tracing::error!("WsRelay server error: {}", e);
             }
         });
 
-        Ok(Self { port })
+        Ok(Self { port, shutdown })
     }
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Signal the background server to gracefully shut down.
+    pub fn shutdown(&self) {
+        tracing::info!("Shutting down WsRelay on port {}", self.port);
+        self.shutdown.notify_one();
     }
 }
 

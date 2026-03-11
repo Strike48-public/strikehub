@@ -50,7 +50,7 @@ pub fn LoginOverlay(
             h1 { class: "login-title", "StrikeHub" }
 
             if let Some(ref msg) = error_message {
-                p { class: "login-error", "{msg}" }
+                p { class: "login-error", role: "alert", "{msg}" }
             }
 
             button {
@@ -70,8 +70,9 @@ pub fn LoginOverlay(
 
             if custom_visible {
                 div { class: "login-url-group",
-                    label { class: "login-url-label", "Studio URL" }
+                    label { class: "login-url-label", r#for: "login-studio-url", "Studio URL" }
                     input {
+                        id: "login-studio-url",
                         class: "login-url-input",
                         r#type: "text",
                         placeholder: "{AuthManager::DEFAULT_API_URL}",

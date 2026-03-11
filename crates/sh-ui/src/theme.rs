@@ -523,9 +523,9 @@ pub fn app_css() -> &'static str {
             margin-bottom: 8px;
             padding: 8px 14px;
             font-size: 13px;
-            color: #f87171;
-            background: rgba(248, 113, 113, 0.1);
-            border: 1px solid rgba(248, 113, 113, 0.25);
+            color: var(--destructive);
+            background: color-mix(in oklch, var(--destructive) 10%, transparent);
+            border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
             border-radius: var(--radius);
             max-width: 320px;
             text-align: center;
@@ -534,7 +534,7 @@ pub fn app_css() -> &'static str {
         .login-custom-url-link {
             margin-top: 4px;
             font-size: 13px;
-            color: #4a9eff;
+            color: var(--accent);
             text-decoration: none;
             cursor: pointer;
         }

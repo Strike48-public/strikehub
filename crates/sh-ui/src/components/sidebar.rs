@@ -87,7 +87,6 @@ pub fn Sidebar(
     #[props(default = false)] signing_in: bool,
     #[props(default = false)] has_matrix_url: bool,
     #[props(default = false)] show_account: bool,
-    on_sign_in: EventHandler<String>,
     on_sign_out: EventHandler<()>,
     on_account: EventHandler<()>,
 ) -> Element {
