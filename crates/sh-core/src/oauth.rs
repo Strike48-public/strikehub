@@ -482,7 +482,7 @@ fn success_page(matrix_base_url: &str) -> String {
 /// Escape a string for safe embedding inside a JavaScript single-quoted
 /// string literal.  Handles quote breakout, backslash injection, newlines,
 /// and `</script>` tag injection.
-fn js_string_escape(s: &str) -> String {
+pub fn js_string_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

@@ -18,6 +18,9 @@ pub fn LoginOverlay(
     /// shown first — the input only appears after clicking.
     #[props(default)]
     saved_studio_url: Option<String>,
+    /// Error message to display (e.g. invalid URL, auth failure).
+    #[props(default)]
+    error_message: Option<String>,
 ) -> Element {
     let mut custom_url = use_signal(move || {
         saved_studio_url
@@ -46,6 +49,10 @@ pub fn LoginOverlay(
 
             h1 { class: "login-title", "StrikeHub" }
 
+            if let Some(ref msg) = error_message {
+                p { class: "login-error", "{msg}" }
+            }
+
             button {
                 class: "{btn_class}",
                 disabled: signing_in,
@@ -66,7 +73,7 @@ pub fn LoginOverlay(
                     label { class: "login-url-label", "Studio URL" }
                     input {
                         class: "login-url-input",
-                        r#type: "url",
+                        r#type: "text",
                         placeholder: "{AuthManager::DEFAULT_API_URL}",
                         value: "{url_val}",
                         disabled: signing_in,

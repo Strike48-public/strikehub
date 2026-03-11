@@ -22,7 +22,7 @@ pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
 pub use matrix_ws::MatrixWsClient;
-pub use oauth::{start_oauth_flow, start_oauth_flow_with};
+pub use oauth::{js_string_escape, start_oauth_flow, start_oauth_flow_with};
 pub use preflight::{
     AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
