@@ -918,11 +918,11 @@ pub fn App() -> Element {
                     sync_config(&sc, &cc, &mut hub_config, &mut connectors);
                 }
 
-                // Signal sign-in AFTER tenant + transport URL are in env so
-                // the connector startup effect sees them when it fires.
-                is_signed_in.set(true);
-                tracing::info!("Sign-in completed, connectors may now start");
-
+                // Bootstrap sandbox token and discover connector apps BEFORE
+                // signalling sign-in. This ensures the best auth token
+                // (sandbox or Keycloak JWT) is available on AuthManager when
+                // the connector startup effect fires and the WS relay appends
+                // __st to the connector WebSocket URL.
                 if !tenant.is_empty() && !instance.is_empty() {
                     let addr = format!("matrix:{}:app-kube-studio:{}", tenant, instance);
                     tracing::info!("Matrix app address: {}", addr);
@@ -936,7 +936,7 @@ pub fn App() -> Element {
                         Err(e) => {
                             tracing::warn!(
                                 "Failed to bootstrap sandbox token: {} — \
-                                 GraphQL will route through WS client",
+                                 Keycloak JWT will be used as fallback",
                                 e
                             );
                         }
@@ -957,6 +957,12 @@ pub fn App() -> Element {
                     let next = *auth_version.peek() + 1;
                     auth_version.set(next);
                 }
+
+                // Signal sign-in AFTER tenant is in env and sandbox token is
+                // bootstrapped so the connector startup effect sees both when
+                // it fires.
+                is_signed_in.set(true);
+                tracing::info!("Sign-in completed, connectors may now start");
 
                 signing_in.set(false);
                 tracing::info!("signing_in reset to false");
@@ -1021,6 +1027,29 @@ pub fn App() -> Element {
                 };
                 preflight_result.set(Some(result));
                 preflight_checking.set(false);
+
+                // Retry sandbox token bootstrap now that connectors are
+                // registered and accepted. The initial bootstrap (before
+                // is_signed_in) may have failed if the connector app wasn't
+                // approved yet.
+                if let Some(ref auth) = auth {
+                    if let Some(ref addr) = *matrix_app_address.peek() {
+                        if auth.sandbox_token().is_empty() {
+                            match auth.bootstrap_sandbox_token(addr).await {
+                                Ok(()) => {
+                                    tracing::info!("Post-preflight sandbox token bootstrapped");
+                                    auth.spawn_sandbox_refresh_loop();
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Post-preflight sandbox bootstrap failed: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             });
         }
     });
