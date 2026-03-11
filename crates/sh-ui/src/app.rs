@@ -5,10 +5,12 @@ use crate::components::{
 };
 use crate::theme;
 use dioxus::prelude::*;
+#[cfg(not(feature = "desktop"))]
+use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, ConnectorConfig, ConnectorProxy, ConnectorRuntime,
     ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner, MatrixWsClient, WsRelay,
-    builtin_manifests, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
+    builtin_manifests, detect_transport, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
     run_preflight_full, start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
@@ -41,25 +43,57 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         "KUBESTUDIO_MODE",
     ];
 
-    // Defaults for keys that should always be present.
-    const DEFAULTS: &[(&str, &str)] = &[
-        ("STRIKE48_API_URL", "https://studio.strike48.com"),
-        ("STRIKE48_URL", "wss://studio.strike48.com"),
-    ];
+    // Default for STRIKE48_API_URL only. STRIKE48_URL is set dynamically
+    // by transport detection at startup, so no static default is needed.
+    let defaults: &[(&str, &str)] = &[("STRIKE48_API_URL", AuthManager::DEFAULT_API_URL)];
 
     let mut vars: Vec<(String, String)> = FORWARD_KEYS
         .iter()
         .filter_map(|&key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
         .collect();
 
-    // Fill in defaults for any keys not already present.
-    for &(key, default) in DEFAULTS {
+    for &(key, default) in defaults {
         if !vars.iter().any(|(k, _)| k == key) {
             vars.push((key.to_string(), default.to_string()));
         }
     }
 
     vars
+}
+
+/// Normalize and validate a Studio URL. Returns `Some(url)` if valid
+/// (http/https scheme, non-empty host), or `None` if invalid.
+fn validate_studio_url(raw: &str) -> Option<String> {
+    let mut u = raw.trim().to_string();
+    if u.is_empty() {
+        return None;
+    }
+    if !u.starts_with("http://") && !u.starts_with("https://") {
+        u = format!("https://{}", u);
+    }
+    u = u.trim_end_matches('/').to_string();
+    if !u.starts_with("https://") && !u.starts_with("http://") {
+        return None;
+    }
+    let host_part = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))
+        .unwrap_or("");
+    if host_part.is_empty() || host_part.starts_with('/') {
+        return None;
+    }
+    // Reject URLs with userinfo (user:pass@host) to prevent confusion attacks.
+    // Also reject percent-encoded %40 which decodes to @ in URL parsers.
+    if let Some(before_slash) = host_part.split('/').next()
+        && (before_slash.contains('@') || before_slash.to_lowercase().contains("%40"))
+    {
+        return None;
+    }
+    // Reject excessively long URLs.
+    if u.len() > 2048 {
+        return None;
+    }
+    Some(u)
 }
 
 /// Helper: rebuild the connectors list from setup + custom state and persist.
@@ -157,6 +191,7 @@ pub fn App() -> Element {
             pick_tos_accepted: false,
             connectors: Default::default(),
             instance_id: None,
+            studio_url: None,
         });
         // Merge manifest defaults so that saved configs pick up transport
         // and binary changes when the code is upgraded.
@@ -169,9 +204,11 @@ pub fn App() -> Element {
     let mut proxy_port = use_signal(|| None::<u16>);
     let mut proxy_handle = use_signal(|| None::<ConnectorProxy>);
     let mut ws_bridge_port = use_signal(|| None::<u16>);
+    let mut ws_relay_handle = use_signal(|| None::<WsRelay>);
     let mut auth_manager = use_signal(|| None::<AuthManager>);
     let mut is_signed_in = use_signal(|| false);
     let mut signing_in = use_signal(|| false);
+    let mut sign_in_error: Signal<Option<String>> = use_signal(|| None);
     let mut auth_version = use_signal(|| 0u32);
     // Matrix app address discovered via connectorApps GraphQL after sign-in.
     // Used to route content through /app-content/{address}/ for sandbox tokens.
@@ -275,11 +312,27 @@ pub fn App() -> Element {
             .collect()
     });
 
-    // Start proxy + WsRelay on mount (if STRIKE48_API_URL is set).
+    // Start proxy + WsRelay on mount.
     // Auth is deferred — user clicks "Sign In" to complete the OAuth flow.
+    // Precedence for the initial URL: persisted config > env var > compiled default.
     use_effect(move || {
         spawn(async move {
-            let Some(auth) = AuthManager::from_env() else {
+            let auth = {
+                let saved_url = hub_config
+                    .read()
+                    .studio_url
+                    .as_deref()
+                    .and_then(validate_studio_url);
+                if let Some(url) = saved_url {
+                    let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+                    AuthManager::new(url, tls_insecure)
+                } else {
+                    AuthManager::from_env()
+                }
+            };
+            let Some(auth) = auth else {
                 tracing::info!("Auth proxy disabled (no API URL configured)");
                 return;
             };
@@ -310,7 +363,7 @@ pub fn App() -> Element {
                     Ok(relay) => {
                         let port = relay.port();
                         ws_bridge_port.set(Some(port));
-                        // Store in bridge state so the HTML rewriter knows the port
+                        ws_relay_handle.set(Some(relay));
                         if let Some(bs) = crate::get_bridge_state() {
                             bs.write().await.ws_bridge_port = Some(port);
                         }
@@ -320,6 +373,22 @@ pub fn App() -> Element {
                         tracing::error!("Failed to start WsRelay: {}", e);
                     }
                 }
+            }
+
+            // Auto-detect the best transport (gRPC vs WebSocket) at startup
+            // so the logs show the probing immediately and STRIKE48_URL is
+            // ready before sign-in completes.
+            let api_url = auth.matrix_url().to_string();
+            let tls_insecure = auth.tls_insecure();
+            let transport = detect_transport(&api_url, tls_insecure).await;
+            tracing::info!(
+                "Startup transport: {} ({})",
+                transport.url(),
+                transport.scheme
+            );
+            // SAFETY: single-threaded Dioxus runtime; no concurrent env reads.
+            unsafe {
+                std::env::set_var("STRIKE48_URL", transport.url());
             }
 
             auth_manager.set(Some(auth));
@@ -364,12 +433,16 @@ pub fn App() -> Element {
             // Override STRIKE48_API_URL so the connector's chat panel routes
             // API calls through our proxy (which proxies /api/v1alpha
             // → /v1alpha/graphql with Keycloak JWT as ?token= param).
-            if let Some(pp) = *proxy_port.peek() {
-                env_vars.push((
-                    "STRIKE48_API_URL".into(),
-                    format!("http://127.0.0.1:{}", pp),
-                ));
-            }
+            let Some(pp) = *proxy_port.peek() else {
+                tracing::warn!(
+                    "[connector-start] proxy_port is None — auth proxy not running, skipping connector startup"
+                );
+                return;
+            };
+            env_vars.push((
+                "STRIKE48_API_URL".into(),
+                format!("http://127.0.0.1:{}", pp),
+            ));
 
             for conn in &current {
                 // Custom IPC connectors are externally managed — just register
@@ -550,12 +623,145 @@ pub fn App() -> Element {
     // async work survives LoginOverlay being unmounted during the flow.
     // The OAuth browser callback runs in tokio::spawn (Send-safe), while
     // signal updates happen here in the Dioxus coroutine context.
-    let sign_in_coro = use_coroutine(move |mut rx: dioxus::prelude::UnboundedReceiver<()>| {
+    //
+    // Receives the Studio URL the user entered on the login screen.
+    // An empty string means "use the env/packaged default" (normal Sign In).
+    // A non-empty string means the user provided a custom URL.
+    let sign_in_coro = use_coroutine(move |mut rx: dioxus::prelude::UnboundedReceiver<String>| {
         async move {
             use futures_util::StreamExt;
-            while rx.next().await.is_some() {
+            while let Some(raw_url) = rx.next().await {
+                sign_in_error.set(None);
+
+                // Empty → normal sign-in using the already-initialised AuthManager.
+                // Non-empty → user provided a custom URL via the login overlay.
+                let custom_url = if raw_url.trim().is_empty() {
+                    None
+                } else {
+                    match validate_studio_url(&raw_url) {
+                        Some(u) => Some(u),
+                        None => {
+                            let msg = format!("Invalid Studio URL: {}", raw_url.trim());
+                            tracing::error!("{}", msg);
+                            sign_in_error.set(Some(msg));
+                            continue;
+                        }
+                    }
+                };
+
+                if let Some(ref studio_url) = custom_url {
+                    let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+
+                    let needs_new_auth = auth_manager
+                        .read()
+                        .as_ref()
+                        .map(|a| a.matrix_url() != studio_url.as_str())
+                        .unwrap_or(true);
+
+                    if needs_new_auth {
+                        tracing::info!("Custom Studio URL: {}, recreating auth stack", studio_url);
+
+                        // Shut down old proxy/relay before starting replacements.
+                        if let Some(old_proxy) = proxy_handle.read().as_ref() {
+                            old_proxy.shutdown();
+                        }
+                        if let Some(old_relay) = ws_relay_handle.read().as_ref() {
+                            old_relay.shutdown();
+                        }
+
+                        let Some(new_auth) = AuthManager::new(studio_url.clone(), tls_insecure)
+                        else {
+                            let msg = format!("Failed to connect to {}", studio_url);
+                            tracing::error!("{}", msg);
+                            sign_in_error.set(Some(msg));
+                            continue;
+                        };
+
+                        let new_proxy = match ConnectorProxy::start(new_auth.clone()).await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                let msg = format!("Failed to start auth proxy: {}", e);
+                                tracing::error!("{}", msg);
+                                sign_in_error.set(Some(msg));
+                                continue;
+                            }
+                        };
+
+                        if let Some(bridge) = crate::get_bridge_state() {
+                            let mut guard = bridge.write().await;
+                            guard.auth = Some(new_auth.clone());
+                            guard.proxy_port = Some(new_proxy.port());
+                        }
+
+                        let new_relay = {
+                            let bridge = crate::get_bridge_state().cloned();
+                            if let Some(bridge) = bridge {
+                                match WsRelay::start(bridge, Some(new_auth.clone())).await {
+                                    Ok(relay) => {
+                                        tracing::info!(
+                                            "WsRelay restarted on port {}",
+                                            relay.port()
+                                        );
+                                        Some(relay)
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("Failed to start WebSocket relay: {}", e);
+                                        tracing::error!("{}", msg);
+                                        sign_in_error.set(Some(msg));
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                None
+                            }
+                        };
+
+                        // All services started successfully — commit state atomically.
+                        proxy_port.set(Some(new_proxy.port()));
+                        proxy_handle.set(Some(new_proxy));
+                        if let Some(relay) = new_relay {
+                            ws_bridge_port.set(Some(relay.port()));
+                            if let Some(bs) = crate::get_bridge_state() {
+                                bs.write().await.ws_bridge_port = Some(relay.port());
+                            }
+                            ws_relay_handle.set(Some(relay));
+                        }
+                        auth_manager.set(Some(new_auth));
+
+                        {
+                            let mut cfg = hub_config.read().clone();
+                            cfg.studio_url = Some(studio_url.clone());
+                            if let Err(e) = cfg.save() {
+                                tracing::warn!("Failed to persist config: {}", e);
+                            }
+                            hub_config.set(cfg);
+                        }
+
+                        // Re-detect transport for the custom URL.
+                        let transport = detect_transport(studio_url, tls_insecure).await;
+                        tracing::info!(
+                            "Custom-URL transport: {} ({})",
+                            transport.url(),
+                            transport.scheme
+                        );
+                        // SAFETY: Dioxus runs on a single thread; no concurrent env reads
+                        // happen during sign-in. Child connectors are spawned later.
+                        unsafe {
+                            std::env::set_var("STRIKE48_API_URL", studio_url);
+                            std::env::set_var("STRIKE48_URL", transport.url());
+                        }
+                    }
+                }
+
                 let auth = auth_manager.read().clone();
-                let Some(auth) = auth else { continue };
+                let Some(auth) = auth else {
+                    sign_in_error.set(Some(
+                        "Sign-in is not ready yet. Please wait a moment.".into(),
+                    ));
+                    continue;
+                };
                 signing_in.set(true);
 
                 // Clear stale webview browsing data (cookies, local storage)
@@ -603,10 +809,8 @@ pub fn App() -> Element {
                 #[cfg(not(feature = "desktop"))]
                 {
                     if let Ok(login_url) = url_rx.await {
-                        let js = format!(
-                            "window.open('{}', '_blank')",
-                            login_url.replace('\'', "\\'")
-                        );
+                        let js =
+                            format!("window.open('{}', '_blank')", js_string_escape(&login_url));
                         let _ = document::eval(&js);
                     }
                 }
@@ -614,12 +818,16 @@ pub fn App() -> Element {
                 let oauth_result = match oauth_handle.await {
                     Ok(Ok(result)) => result,
                     Ok(Err(e)) => {
-                        tracing::error!("Sign-in failed: {:#}", e);
+                        let msg = format!("Sign-in failed: {}", e);
+                        tracing::error!("{}", msg);
+                        sign_in_error.set(Some(msg));
                         signing_in.set(false);
                         continue;
                     }
                     Err(e) => {
-                        tracing::error!("Sign-in task panicked: {:#}", e);
+                        let msg = format!("Sign-in error: {}", e);
+                        tracing::error!("{}", msg);
+                        sign_in_error.set(Some(msg));
                         signing_in.set(false);
                         continue;
                     }
@@ -695,8 +903,8 @@ pub fn App() -> Element {
                     sync_config(&sc, &cc, &mut hub_config, &mut connectors);
                 }
 
-                // Signal sign-in AFTER tenant is in env so the connector
-                // startup effect sees the tenant when it fires.
+                // Signal sign-in AFTER tenant + transport URL are in env so
+                // the connector startup effect sees them when it fires.
                 is_signed_in.set(true);
                 tracing::info!("Sign-in completed, connectors may now start");
 
@@ -806,8 +1014,8 @@ pub fn App() -> Element {
         }
     });
 
-    let on_sign_in = move |_: ()| {
-        sign_in_coro.send(());
+    let on_sign_in = move |url: String| {
+        sign_in_coro.send(url);
     };
 
     let on_sign_out = move |_: ()| {
@@ -830,8 +1038,23 @@ pub fn App() -> Element {
                 tracing::warn!("Failed to clear webview browsing data: {}", e);
             }
         }
-        // Detach stale WS client from the proxy so the next sign-in starts fresh
+        // Stop running connectors, clear bridge sockets, and detach the WS
+        // client so the next sign-in starts with a clean slate.
         spawn(async move {
+            // Gracefully stop all running connector child processes.
+            let mut stopped = runners.write();
+            for (id, mut runner) in stopped.drain() {
+                if let Err(e) = runner.stop().await {
+                    tracing::warn!("Failed to stop connector '{}' on sign-out: {}", id, e);
+                }
+            }
+            drop(stopped);
+
+            // Clear stale IPC socket registrations.
+            if let Some(bridge) = crate::get_bridge_state() {
+                bridge.write().await.sockets.clear();
+            }
+
             if let Some(proxy) = proxy_handle.peek().as_ref() {
                 proxy.clear_matrix_ws().await;
             }
@@ -1031,7 +1254,6 @@ pub fn App() -> Element {
                         signing_in: *signing_in.read(),
                         has_matrix_url: has_matrix_url,
                         show_account: is_account,
-                        on_sign_in: on_sign_in,
                         on_sign_out: on_sign_out,
                         on_account: on_account,
                     }
@@ -1040,6 +1262,8 @@ pub fn App() -> Element {
                     LoginOverlay {
                         on_sign_in: on_sign_in,
                         signing_in: *signing_in.read(),
+                        saved_studio_url: hub_config.read().studio_url.clone(),
+                        error_message: sign_in_error.read().clone(),
                     }
                 } else if active_id.read().as_deref() == Some("pick") && !hub_config.read().pick_tos_accepted {
                     PickTosOverlay {

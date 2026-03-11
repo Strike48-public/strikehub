@@ -462,6 +462,42 @@ pub fn app_css() -> &'static str {
         }
 
 
+        .login-url-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            width: 320px;
+            max-width: 90%;
+        }
+
+        .login-url-label {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--chrome-muted);
+            text-align: left;
+        }
+
+        .login-url-input {
+            padding: 8px 12px;
+            font-size: 13px;
+            font-family: inherit;
+            border: 1px solid var(--chrome-border);
+            border-radius: var(--radius);
+            background: var(--chrome-input-bg);
+            color: var(--chrome-foreground);
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .login-url-input:focus {
+            border-color: var(--accent);
+        }
+
+        .login-url-input:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
         .login-btn {
             margin-top: 8px;
             padding: 10px 36px;
@@ -481,6 +517,30 @@ pub fn app_css() -> &'static str {
         .login-btn:disabled {
             opacity: 0.5;
             cursor: default;
+        }
+
+        .login-error {
+            margin-bottom: 8px;
+            padding: 8px 14px;
+            font-size: 13px;
+            color: var(--destructive);
+            background: color-mix(in oklch, var(--destructive) 10%, transparent);
+            border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+            border-radius: var(--radius);
+            max-width: 320px;
+            text-align: center;
+        }
+
+        .login-custom-url-link {
+            margin-top: 4px;
+            font-size: 13px;
+            color: var(--accent);
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .login-custom-url-link:hover {
+            text-decoration: underline;
         }
 
         /* ── TOS overlay ── */

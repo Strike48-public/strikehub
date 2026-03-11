@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod preflight;
 pub mod proxy;
 pub mod registry;
+pub mod transport;
 pub mod ws_relay;
 
 pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant_id};
@@ -22,11 +23,12 @@ pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
 pub use matrix_ws::MatrixWsClient;
-pub use oauth::{start_oauth_flow, start_oauth_flow_with};
+pub use oauth::{js_string_escape, start_oauth_flow, start_oauth_flow_with};
 pub use preflight::{
     AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
 };
 pub use proxy::ConnectorProxy;
 pub use registry::{ConnectorManifest, builtin_manifests};
+pub use transport::detect_transport;
 pub use ws_relay::WsRelay;

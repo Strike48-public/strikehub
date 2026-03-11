@@ -35,23 +35,10 @@ pub struct AuthManager {
 }
 
 impl AuthManager {
-    pub const DEFAULT_API_URL: &str = "https://studio.strike48.com";
+    pub const DEFAULT_API_URL: &str = env!("STRIKEHUB_DEFAULT_STUDIO_URL");
 
-    /// Create from env vars, falling back to the default Strike48 API URL.
-    ///
-    /// | Var | Purpose | Default |
-    /// |-----|---------|---------|
-    /// | `STRIKE48_API_URL` | Strike48 API server URL | `wss://studio.strike48.com` |
-    /// | `MATRIX_TLS_INSECURE` | Skip TLS verify | `false` |
-    pub fn from_env() -> Option<Self> {
-        let matrix_url = std::env::var("STRIKE48_API_URL")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| Self::DEFAULT_API_URL.to_string());
-        let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
+    /// Create with an explicit Matrix API URL.
+    pub fn new(matrix_url: String, tls_insecure: bool) -> Option<Self> {
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(tls_insecure)
             .timeout(std::time::Duration::from_secs(15))
@@ -68,6 +55,24 @@ impl AuthManager {
             sandbox_token: Arc::new(RwLock::new(String::new())),
             client,
         })
+    }
+
+    /// Create from env vars, falling back to the default Strike48 API URL.
+    ///
+    /// | Var | Purpose | Default |
+    /// |-----|---------|---------|
+    /// | `STRIKE48_API_URL` | Strike48 API server URL | `https://studio.strike48.com` |
+    /// | `MATRIX_TLS_INSECURE` | Skip TLS verify | `false` |
+    pub fn from_env() -> Option<Self> {
+        let matrix_url = std::env::var("STRIKE48_API_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| Self::DEFAULT_API_URL.to_string());
+        let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        Self::new(matrix_url, tls_insecure)
     }
 
     /// Set the token and Keycloak refresh parameters after OAuth completes.

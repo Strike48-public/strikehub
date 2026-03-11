@@ -27,6 +27,10 @@ pub struct HubConfig {
     /// Stable instance ID for this StrikeHub installation, persisted across sessions.
     #[serde(default)]
     pub instance_id: Option<String>,
+    /// User-provided Studio URL override. When set, takes precedence over the
+    /// `STRIKE48_API_URL` env var and the compiled-in default.
+    #[serde(default)]
+    pub studio_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +182,7 @@ impl HubConfig {
                 pick_tos_accepted: false,
                 connectors: BTreeMap::new(),
                 instance_id: None,
+                studio_url: None,
             });
         }
         let contents = std::fs::read_to_string(&path)?;

@@ -31,6 +31,7 @@ struct ProxyState {
 pub struct ConnectorProxy {
     port: u16,
     state: Arc<ProxyState>,
+    shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl ConnectorProxy {
@@ -69,17 +70,32 @@ impl ConnectorProxy {
 
         tracing::info!("Auth proxy listening on http://127.0.0.1:{}", port);
 
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_rx = shutdown.clone();
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async move { shutdown_rx.notified().await })
+                .await
+            {
                 tracing::error!("Auth proxy server error: {}", e);
             }
         });
 
-        Ok(Self { port, state })
+        Ok(Self {
+            port,
+            state,
+            shutdown,
+        })
     }
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Signal the background server to gracefully shut down.
+    pub fn shutdown(&self) {
+        tracing::info!("Shutting down auth proxy on port {}", self.port);
+        self.shutdown.notify_one();
     }
 
     /// Attach a persistent Absinthe WS client so that GraphQL requests
