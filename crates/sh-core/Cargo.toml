@@ -3,6 +3,9 @@ name = "sh-core"
 version.workspace = true
 edition.workspace = true
 
+[build-dependencies]
+toml = "0.8"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

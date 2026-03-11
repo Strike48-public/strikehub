@@ -1,0 +1,7 @@
+# Build-time defaults for StrikeHub.
+# Edit these values before building to change the compiled-in defaults.
+# These can still be overridden at runtime via environment variables or
+# the "Custom URL sign in" option in the login screen.
+
+[studio]
+default_url = "https://studio.strike48.com"

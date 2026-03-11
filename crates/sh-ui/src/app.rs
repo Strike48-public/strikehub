@@ -41,19 +41,22 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         "KUBESTUDIO_MODE",
     ];
 
-    // Defaults for keys that should always be present.
-    const DEFAULTS: &[(&str, &str)] = &[
-        ("STRIKE48_API_URL", "https://studio.strike48.com"),
-        ("STRIKE48_URL", "wss://studio.strike48.com"),
-    ];
-
     let mut vars: Vec<(String, String)> = FORWARD_KEYS
         .iter()
         .filter_map(|&key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
         .collect();
 
-    // Fill in defaults for any keys not already present.
-    for &(key, default) in DEFAULTS {
+    // Derive defaults from the build-time constant so they stay in sync.
+    let default_api = AuthManager::DEFAULT_API_URL;
+    let default_wss = default_api
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
+    let defaults: &[(&str, &str)] = &[
+        ("STRIKE48_API_URL", default_api),
+        ("STRIKE48_URL", &default_wss),
+    ];
+
+    for &(key, default) in defaults {
         if !vars.iter().any(|(k, _)| k == key) {
             vars.push((key.to_string(), default.to_string()));
         }
@@ -157,6 +160,7 @@ pub fn App() -> Element {
             pick_tos_accepted: false,
             connectors: Default::default(),
             instance_id: None,
+            studio_url: None,
         });
         // Merge manifest defaults so that saved configs pick up transport
         // and binary changes when the code is upgraded.
@@ -275,11 +279,23 @@ pub fn App() -> Element {
             .collect()
     });
 
-    // Start proxy + WsRelay on mount (if STRIKE48_API_URL is set).
+    // Start proxy + WsRelay on mount.
     // Auth is deferred — user clicks "Sign In" to complete the OAuth flow.
+    // Precedence for the initial URL: persisted config > env var > compiled default.
     use_effect(move || {
         spawn(async move {
-            let Some(auth) = AuthManager::from_env() else {
+            let auth = {
+                let saved_url = hub_config.read().studio_url.clone();
+                if let Some(url) = saved_url {
+                    let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+                    AuthManager::new(url, tls_insecure)
+                } else {
+                    AuthManager::from_env()
+                }
+            };
+            let Some(auth) = auth else {
                 tracing::info!("Auth proxy disabled (no API URL configured)");
                 return;
             };
@@ -550,10 +566,117 @@ pub fn App() -> Element {
     // async work survives LoginOverlay being unmounted during the flow.
     // The OAuth browser callback runs in tokio::spawn (Send-safe), while
     // signal updates happen here in the Dioxus coroutine context.
-    let sign_in_coro = use_coroutine(move |mut rx: dioxus::prelude::UnboundedReceiver<()>| {
+    //
+    // Receives the Studio URL the user entered on the login screen.
+    // An empty string means "use the env/packaged default" (normal Sign In).
+    // A non-empty string means the user provided a custom URL.
+    let sign_in_coro = use_coroutine(move |mut rx: dioxus::prelude::UnboundedReceiver<String>| {
         async move {
             use futures_util::StreamExt;
-            while rx.next().await.is_some() {
+            while let Some(raw_url) = rx.next().await {
+                // Empty → normal sign-in using the already-initialised AuthManager.
+                // Non-empty → user provided a custom URL via the login overlay.
+                let custom_url = {
+                    let mut u = raw_url.trim().to_string();
+                    if u.is_empty() {
+                        None
+                    } else {
+                        if !u.starts_with("http://") && !u.starts_with("https://") {
+                            u = format!("https://{}", u);
+                        }
+                        let u = u.trim_end_matches('/').to_string();
+                        // Reject non-HTTP schemes (e.g. javascript:, data:, file:).
+                        if !u.starts_with("https://") && !u.starts_with("http://") {
+                            tracing::error!("Invalid custom URL scheme: {}", u);
+                            continue;
+                        }
+                        // Basic sanity: must have a host after the scheme.
+                        let host_part = u
+                            .strip_prefix("https://")
+                            .or_else(|| u.strip_prefix("http://"))
+                            .unwrap_or("");
+                        if host_part.is_empty() || host_part.starts_with('/') {
+                            tracing::error!("Invalid custom URL (no host): {}", u);
+                            continue;
+                        }
+                        Some(u)
+                    }
+                };
+
+                if let Some(ref studio_url) = custom_url {
+                    let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+
+                    // Recreate AuthManager when a custom URL was provided.
+                    let needs_new_auth = auth_manager
+                        .read()
+                        .as_ref()
+                        .map(|a| a.matrix_url() != studio_url.as_str())
+                        .unwrap_or(true);
+
+                    if needs_new_auth {
+                        tracing::info!("Custom Studio URL: {}, recreating auth stack", studio_url);
+                        let Some(new_auth) = AuthManager::new(studio_url.clone(), tls_insecure)
+                        else {
+                            tracing::error!("Failed to create AuthManager for {}", studio_url);
+                            continue;
+                        };
+
+                        match ConnectorProxy::start(new_auth.clone()).await {
+                            Ok(p) => {
+                                proxy_port.set(Some(p.port()));
+                                proxy_handle.set(Some(p));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to start auth proxy: {}", e);
+                            }
+                        }
+
+                        if let Some(bridge) = crate::get_bridge_state() {
+                            let mut guard = bridge.write().await;
+                            guard.auth = Some(new_auth.clone());
+                            guard.proxy_port = *proxy_port.peek();
+                        }
+
+                        let bridge = crate::get_bridge_state().cloned();
+                        if let Some(bridge) = bridge {
+                            match WsRelay::start(bridge, Some(new_auth.clone())).await {
+                                Ok(relay) => {
+                                    let port = relay.port();
+                                    ws_bridge_port.set(Some(port));
+                                    if let Some(bs) = crate::get_bridge_state() {
+                                        bs.write().await.ws_bridge_port = Some(port);
+                                    }
+                                    tracing::info!("WsRelay restarted on port {}", port);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to restart WsRelay: {}", e);
+                                }
+                            }
+                        }
+
+                        auth_manager.set(Some(new_auth));
+
+                        // Persist the custom URL so it survives restarts.
+                        {
+                            let mut cfg = hub_config.read().clone();
+                            cfg.studio_url = Some(studio_url.clone());
+                            let _ = cfg.save();
+                            hub_config.set(cfg);
+                        }
+
+                        // Update process env so child connectors see the new URL.
+                        unsafe {
+                            std::env::set_var("STRIKE48_API_URL", studio_url);
+                            let wss = studio_url
+                                .replacen("https://", "wss://", 1)
+                                .replacen("http://", "ws://", 1);
+                            std::env::set_var("STRIKE48_URL", &wss);
+                        }
+                    }
+                }
+
                 let auth = auth_manager.read().clone();
                 let Some(auth) = auth else { continue };
                 signing_in.set(true);
@@ -806,8 +929,8 @@ pub fn App() -> Element {
         }
     });
 
-    let on_sign_in = move |_: ()| {
-        sign_in_coro.send(());
+    let on_sign_in = move |url: String| {
+        sign_in_coro.send(url);
     };
 
     let on_sign_out = move |_: ()| {
@@ -1040,6 +1163,7 @@ pub fn App() -> Element {
                     LoginOverlay {
                         on_sign_in: on_sign_in,
                         signing_in: *signing_in.read(),
+                        saved_studio_url: hub_config.read().studio_url.clone(),
                     }
                 } else if active_id.read().as_deref() == Some("pick") && !hub_config.read().pick_tos_accepted {
                     PickTosOverlay {

@@ -131,6 +131,7 @@ pub async fn start_oauth_flow_with(
         redirect_uri: pkce_redirect_uri.clone(),
         code_verifier,
         tx,
+        matrix_base_url: browser_base.clone(),
     });
 
     let keycloak_auth_url_clone = keycloak_auth_url.clone();
@@ -244,6 +245,7 @@ struct CallbackState {
     redirect_uri: String,
     code_verifier: String,
     tx: mpsc::Sender<OAuthResult>,
+    matrix_base_url: String,
 }
 
 /// Handle the OAuth callback: exchange the authorization code for tokens server-side.
@@ -351,7 +353,7 @@ async fn handle_oauth_callback(
         }
     }
 
-    Html(success_page())
+    Html(success_page(&state.matrix_base_url))
 }
 
 // ---------------------------------------------------------------------------
@@ -451,24 +453,41 @@ async fn fetch_oidc_config(
 // HTML helpers
 // ---------------------------------------------------------------------------
 
-fn success_page() -> String {
-    r#"<!DOCTYPE html><html><head><meta charset="utf-8">
+fn success_page(matrix_base_url: &str) -> String {
+    let base = matrix_base_url.trim_end_matches('/');
+    let redirect_url = if base.starts_with("https://") || base.starts_with("http://") {
+        format!("{}/studio/#/admin/gateways", base)
+    } else {
+        format!("https://{}/studio/#/admin/gateways", base)
+    };
+    format!(
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>StrikeHub - Signed In</title>
 <style>
-  body { font-family: system-ui, sans-serif; display: flex; align-items: center;
+  body {{ font-family: system-ui, sans-serif; display: flex; align-items: center;
          justify-content: center; min-height: 100vh; margin: 0;
-         background: #1a1a1a; color: #e0e0e0; }
-  .container { text-align: center; max-width: 400px; padding: 2rem; }
-  h2 { margin-bottom: 1rem; font-weight: 600; color: #4ade80; }
-  .status { color: #888; font-size: 14px; }
+         background: #1a1a1a; color: #e0e0e0; }}
+  .container {{ text-align: center; max-width: 400px; padding: 2rem; }}
+  h2 {{ margin-bottom: 1rem; font-weight: 600; color: #4ade80; }}
+  .status {{ color: #888; font-size: 14px; }}
 </style></head><body>
 <div class="container"><h2>Signed in!</h2><p class="status">Redirecting to Studio gateways…</p></div>
-<script>setTimeout(function(){window.location.href='https://studio.strike48.com/studio/#/admin/gateways'},1000)</script>
-</body></html>"#
-        .to_string()
+<script>setTimeout(function(){{window.location.href='{}'}},1000)</script>
+</body></html>"#,
+        redirect_url
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 fn error_page(message: &str) -> String {
+    let safe_message = html_escape(message);
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>StrikeHub - Sign-in Error</title>
@@ -482,7 +501,7 @@ fn error_page(message: &str) -> String {
 </style></head><body>
 <div class="container"><h2>Sign-in failed</h2><p class="status">{}</p></div>
 </body></html>"#,
-        message
+        safe_message
     )
 }
 
