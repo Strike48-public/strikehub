@@ -459,6 +459,18 @@ pub fn App() -> Element {
                 format!("http://127.0.0.1:{}", pp),
             ));
 
+            // Pass the best auth token to connector processes so their
+            // chat panel can use it immediately at mount time (via
+            // std::env::var("MATRIX_AUTH_TOKEN") fallback in WorkspaceApp).
+            // This bypasses the document::eval() polling path that fails
+            // on Windows WebView2.
+            if let Some(ref auth) = *auth_manager.peek() {
+                let token = auth.api_token();
+                if !token.is_empty() {
+                    env_vars.push(("MATRIX_AUTH_TOKEN".into(), token));
+                }
+            }
+
             for conn in &current {
                 // Custom IPC connectors are externally managed — just register
                 // their socket in bridge state so the protocol handler can reach them.
