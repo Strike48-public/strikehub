@@ -5,6 +5,13 @@
 fn main() {
     tracing_subscriber::fmt::init();
 
+    // Install a Ctrl+C / SIGTERM handler so the process shuts down cleanly.
+    // On Unix this sends SIGTERM to our entire process group, which kills any
+    // child connector processes that are still in our group. On all platforms,
+    // kill_on_drop(true) on the tokio::process::Child handles provides a
+    // secondary safety net when the Child handle is dropped.
+    install_signal_handler();
+
     // Extract bundled connector binaries (Windows: next to exe; other: no-op).
     sh_core::embedded::extract_bundled_binaries();
 
@@ -75,6 +82,54 @@ fn main() {
             },
         ))
         .launch(sh_ui::App);
+}
+
+#[cfg(feature = "desktop")]
+fn install_signal_handler() {
+    // On Unix, send SIGTERM to our process group so all child connector
+    // processes are terminated, then exit. This covers Ctrl+C and external
+    // SIGTERM delivery where Dioxus might not get a chance to run Drop impls.
+    #[cfg(unix)]
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+        // SAFETY: signal handler only calls async-signal-safe functions
+        // (getpgrp, killpg, _exit).
+        unsafe {
+            libc::signal(
+                libc::SIGINT,
+                signal_handler as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGTERM,
+                signal_handler as *const () as libc::sighandler_t,
+            );
+        }
+
+        extern "C" fn signal_handler(sig: libc::c_int) {
+            // Guard against re-entry if a second signal arrives while we're
+            // shutting down.
+            if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+                unsafe { libc::_exit(128 + sig) };
+            }
+            unsafe {
+                // Kill every process in our process group. Child connectors
+                // spawned without setsid() share our group, so they receive
+                // SIGTERM and can exit cleanly.
+                let pgrp = libc::getpgrp();
+                libc::killpg(pgrp, libc::SIGTERM);
+                // Give children a brief moment to exit, then force-exit.
+                // sleep() is async-signal-safe per POSIX.
+                libc::sleep(1);
+                libc::_exit(128 + sig);
+            }
+        }
+    }
+
+    // On Windows, the default Ctrl+C behaviour terminates the process.
+    // kill_on_drop(true) on the tokio Child handles ensures connector
+    // processes are cleaned up when the runtime tears down.
 }
 
 #[cfg(not(feature = "desktop"))]

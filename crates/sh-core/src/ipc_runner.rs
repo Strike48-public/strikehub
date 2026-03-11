@@ -33,6 +33,11 @@ impl IpcConnectorRunner {
             cmd.env(k, v);
         }
 
+        // Ensure tokio kills the child process if the Child handle is dropped
+        // without an explicit wait/kill. This is the primary defense against
+        // orphaned connector processes when StrikeHub exits unexpectedly.
+        cmd.kill_on_drop(true);
+
         // On Windows the desktop app has no console, so inheriting stdio would
         // cause Windows to allocate a visible console window for each connector.
         // Suppress that by sending output to null and setting CREATE_NO_WINDOW.
@@ -46,6 +51,29 @@ impl IpcConnectorRunner {
         {
             cmd.stdout(std::process::Stdio::inherit());
             cmd.stderr(std::process::Stdio::inherit());
+        }
+
+        // On Unix, arrange for the child to receive SIGHUP when the parent
+        // process dies. This covers abrupt kills (SIGKILL, OOM, crash) where
+        // Drop destructors never run.
+        #[cfg(unix)]
+        {
+            // SAFETY: pre_exec runs in the forked child before exec.
+            // setsid/setpgid are not called, so the child remains in
+            // the parent's process group — no async-signal-safety concern.
+            unsafe {
+                cmd.pre_exec(|| {
+                    // On Linux, PR_SET_PDEATHSIG asks the kernel to send the
+                    // specified signal to this process when its parent dies.
+                    #[cfg(target_os = "linux")]
+                    {
+                        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGHUP);
+                    }
+                    // On macOS there is no PR_SET_PDEATHSIG equivalent, but
+                    // kill_on_drop(true) and the Drop reap loop cover this case.
+                    Ok(())
+                });
+            }
         }
 
         let child = cmd.spawn().map_err(|e| {
@@ -127,6 +155,14 @@ impl IpcConnectorRunner {
 impl Drop for IpcConnectorRunner {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+        // Synchronously reap the child to prevent zombie processes.
+        // Drop cannot be async, so spin briefly with try_wait.
+        for _ in 0..20 {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
         self.ipc_addr.cleanup();
     }
 }

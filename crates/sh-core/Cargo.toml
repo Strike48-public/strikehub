@@ -29,3 +29,6 @@ hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
 http.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
