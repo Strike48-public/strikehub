@@ -282,14 +282,22 @@ async fn probe_h2(url: &str, tls_insecure: bool) -> bool {
 
     match client.get(url).send().await {
         Ok(resp) => {
+            let status = resp.status();
             let is_h2 = resp.version() == reqwest::Version::HTTP_2;
             tracing::info!(
                 "HTTP/2 probe {}: status={}, version={:?}, h2={}",
                 url,
-                resp.status(),
+                status,
                 resp.version(),
                 is_h2,
             );
+            // A 404 means the gRPC endpoint doesn't exist at this host
+            // (e.g. a reverse proxy speaks h2 but has no route for the
+            // gRPC service). Fall back to WebSocket in that case.
+            if status == reqwest::StatusCode::NOT_FOUND {
+                tracing::info!("HTTP/2 probe {}: got 404, treating as unreachable", url,);
+                return false;
+            }
             is_h2
         }
         Err(e) => {
