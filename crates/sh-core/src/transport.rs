@@ -295,10 +295,7 @@ async fn probe_h2(url: &str, tls_insecure: bool) -> bool {
             // (e.g. a reverse proxy speaks h2 but has no route for the
             // gRPC service). Fall back to WebSocket in that case.
             if status == reqwest::StatusCode::NOT_FOUND {
-                tracing::info!(
-                    "HTTP/2 probe {}: got 404, treating as unreachable",
-                    url,
-                );
+                tracing::info!("HTTP/2 probe {}: got 404, treating as unreachable", url,);
                 return false;
             }
             is_h2
