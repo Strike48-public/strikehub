@@ -33,7 +33,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # HTTP client (for health checks + OIDC auth flow)
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+# rustls-tls enables ALPN h2 negotiation for gRPC transport probing.
+reqwest = { version = "0.12", features = ["json", "cookies", "rustls-tls"] }
 
 # Error handling (anyhow for auth/proxy)
 anyhow = "1"

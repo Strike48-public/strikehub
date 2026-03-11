@@ -260,10 +260,14 @@ pub async fn detect_transport(base_url: &str, tls_insecure: bool) -> TransportCa
     }
 }
 
-/// Probe with an HTTP/2 request. gRPC requires HTTP/2, so any h2 response
-/// (even an error status) confirms the endpoint speaks the right protocol.
+/// Probe whether the endpoint speaks HTTP/2 (required for gRPC).
+///
+/// Uses `rustls` TLS backend which advertises ALPN `h2` during the TLS
+/// handshake — matching what the connector SDK does with `tonic` + `rustls`.
+/// If the server negotiates HTTP/2, the probe succeeds.
 async fn probe_h2(url: &str, tls_insecure: bool) -> bool {
     let client = match reqwest::Client::builder()
+        .use_rustls_tls()
         .danger_accept_invalid_certs(tls_insecure)
         .connect_timeout(PROBE_TIMEOUT)
         .timeout(PROBE_TIMEOUT)
