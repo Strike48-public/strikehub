@@ -165,6 +165,7 @@
 
         <!-- WixUI dialog set -->
         <UIRef Id='WixUI_FeatureTree' />
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf' />
 
     </Product>
 </Wix>

@@ -31,6 +31,7 @@ lucide-dioxus = { version = "=2.40.0", features = ["all-icons"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # HTTP client (for health checks + OIDC auth flow)
 # rustls-tls enables ALPN h2 negotiation for gRPC transport probing.

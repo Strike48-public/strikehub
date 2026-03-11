@@ -3,7 +3,29 @@
 
 #[cfg(feature = "desktop")]
 fn main() {
-    tracing_subscriber::fmt::init();
+    // Set up file logging so diagnostics are available even when there is no
+    // console (Windows GUI).  Logs are written to:
+    //   Windows: %LOCALAPPDATA%\StrikeHub\logs\
+    //   macOS:   ~/Library/Application Support/StrikeHub/logs/
+    //   Linux:   ~/.local/share/strikehub/logs/
+    let log_dir = dirs::data_local_dir()
+        .expect("could not determine local app-data directory")
+        .join("StrikeHub")
+        .join("logs");
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "strikehub.log");
+
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with(fmt::layer().with_writer(file_appender))
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .init();
+
+    tracing::info!("StrikeHub starting — logs at {}", log_dir.display());
 
     // Install a Ctrl+C / SIGTERM handler so the process shuts down cleanly.
     // On Unix this sends SIGTERM to our entire process group, which kills any

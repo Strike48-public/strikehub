@@ -192,7 +192,26 @@ async fn run_connector_ws_relay(
 
     // Connect WebSocket over IPC using tokio-tungstenite
     let ipc_stream = crate::ipc::IpcStream::connect(&ipc_addr).await?;
-    let ws_url = format!("ws://localhost{}", upstream_path);
+
+    // Append the best auth token (__st) to the connector WebSocket URL so
+    // the connector's LiveView handle_ws_open() can extract it immediately,
+    // avoiding the fallback polling path that fails on Windows WebView2.
+    let ws_url = {
+        let token = state
+            .auth
+            .as_ref()
+            .map(|a| a.api_token())
+            .unwrap_or_default();
+        if token.is_empty() {
+            format!("ws://localhost{}", upstream_path)
+        } else {
+            format!(
+                "ws://localhost{}?__st={}",
+                upstream_path,
+                urlencoding::encode(&token)
+            )
+        }
+    };
 
     let (upstream_ws, _) = tokio_tungstenite::client_async(ws_url, ipc_stream).await?;
 

@@ -58,6 +58,23 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         }
     }
 
+    // On Windows, set HOME for child connectors so the SDK OttProvider can
+    // locate ~/.strike48 for key/credential storage.  Prefer LOCALAPPDATA
+    // (e.g. C:\Users\<user>\AppData\Local) because:
+    //  - USERPROFILE root may be restricted by Controlled Folder Access or
+    //    antivirus on consumer Windows editions.
+    //  - LOCALAPPDATA is always writable and is the idiomatic location for
+    //    per-user application data on Windows.
+    //  - StrikeHub already writes its own logs to LOCALAPPDATA.
+    #[cfg(windows)]
+    if !vars.iter().any(|(k, _)| k == "HOME") {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            vars.push(("HOME".to_string(), local));
+        } else if let Ok(profile) = std::env::var("USERPROFILE") {
+            vars.push(("HOME".to_string(), profile));
+        }
+    }
+
     vars
 }
 
@@ -230,9 +247,7 @@ pub fn App() -> Element {
     // Runs automatically after sign-in; dismissed via Continue/Skip.
     let mut preflight_result: Signal<Option<AggregatePreflightResult>> = use_signal(|| None);
     let mut preflight_checking = use_signal(|| false);
-    // On Windows, skip the preflight wizard entirely — bundled connectors
-    // handle their own dependencies so the step-1/step-2 checks are unnecessary.
-    let mut preflight_dismissed = use_signal(|| cfg!(target_os = "windows"));
+    let mut preflight_dismissed = use_signal(|| false);
 
     // Register a "connector" asset handler so that connector content can be served
     // through the dioxus:// scheme (which passes the hardcoded navigation handler).
@@ -443,6 +458,18 @@ pub fn App() -> Element {
                 "STRIKE48_API_URL".into(),
                 format!("http://127.0.0.1:{}", pp),
             ));
+
+            // Pass the best auth token to connector processes so their
+            // chat panel can use it immediately at mount time (via
+            // std::env::var("MATRIX_AUTH_TOKEN") fallback in WorkspaceApp).
+            // This bypasses the document::eval() polling path that fails
+            // on Windows WebView2.
+            if let Some(ref auth) = *auth_manager.peek() {
+                let token = auth.api_token();
+                if !token.is_empty() {
+                    env_vars.push(("MATRIX_AUTH_TOKEN".into(), token));
+                }
+            }
 
             for conn in &current {
                 // Custom IPC connectors are externally managed — just register
@@ -903,11 +930,11 @@ pub fn App() -> Element {
                     sync_config(&sc, &cc, &mut hub_config, &mut connectors);
                 }
 
-                // Signal sign-in AFTER tenant + transport URL are in env so
-                // the connector startup effect sees them when it fires.
-                is_signed_in.set(true);
-                tracing::info!("Sign-in completed, connectors may now start");
-
+                // Bootstrap sandbox token and discover connector apps BEFORE
+                // signalling sign-in. This ensures the best auth token
+                // (sandbox or Keycloak JWT) is available on AuthManager when
+                // the connector startup effect fires and the WS relay appends
+                // __st to the connector WebSocket URL.
                 if !tenant.is_empty() && !instance.is_empty() {
                     let addr = format!("matrix:{}:app-kube-studio:{}", tenant, instance);
                     tracing::info!("Matrix app address: {}", addr);
@@ -921,7 +948,7 @@ pub fn App() -> Element {
                         Err(e) => {
                             tracing::warn!(
                                 "Failed to bootstrap sandbox token: {} — \
-                                 GraphQL will route through WS client",
+                                 Keycloak JWT will be used as fallback",
                                 e
                             );
                         }
@@ -943,6 +970,12 @@ pub fn App() -> Element {
                     auth_version.set(next);
                 }
 
+                // Signal sign-in AFTER tenant is in env and sandbox token is
+                // bootstrapped so the connector startup effect sees both when
+                // it fires.
+                is_signed_in.set(true);
+                tracing::info!("Sign-in completed, connectors may now start");
+
                 signing_in.set(false);
                 tracing::info!("signing_in reset to false");
             }
@@ -952,11 +985,7 @@ pub fn App() -> Element {
     // Run preflight checks for all enabled connectors after sign-in.
     // Waits a few seconds for connectors to start and register before
     // checking their Matrix registration status.
-    // Skipped entirely on Windows — bundled connectors handle their own deps.
     use_effect(move || {
-        if cfg!(target_os = "windows") {
-            return;
-        }
         let signed_in = *is_signed_in.read();
         if signed_in && !*preflight_dismissed.peek() && preflight_result.peek().is_none() {
             let connector_ids: Vec<String> = {
@@ -1010,6 +1039,25 @@ pub fn App() -> Element {
                 };
                 preflight_result.set(Some(result));
                 preflight_checking.set(false);
+
+                // Retry sandbox token bootstrap now that connectors are
+                // registered and accepted. The initial bootstrap (before
+                // is_signed_in) may have failed if the connector app wasn't
+                // approved yet.
+                if let Some(ref auth) = auth
+                    && let Some(ref addr) = *matrix_app_address.peek()
+                    && auth.sandbox_token().is_empty()
+                {
+                    match auth.bootstrap_sandbox_token(addr).await {
+                        Ok(()) => {
+                            tracing::info!("Post-preflight sandbox token bootstrapped");
+                            auth.spawn_sandbox_refresh_loop();
+                        }
+                        Err(e) => {
+                            tracing::warn!("Post-preflight sandbox bootstrap failed: {}", e);
+                        }
+                    }
+                }
             });
         }
     });

@@ -93,7 +93,88 @@ fn refresh_path() {
 
 #[cfg(not(target_os = "windows"))]
 fn refresh_path() {
-    // No-op on non-Windows.
+    // When launched as a GUI app (e.g. .app bundle from Finder, or a Linux
+    // .desktop launcher), the process inherits a minimal PATH from launchd /
+    // systemd — typically just /usr/bin:/bin:/usr/sbin:/sbin.  Tools installed
+    // via Homebrew, Docker Desktop, snap, or package managers won't be found.
+    //
+    // On macOS, /usr/libexec/path_helper merges /etc/paths and /etc/paths.d/*
+    // (which is how Homebrew, Docker Desktop, etc. register themselves).
+    // We run it first, then append a few well-known fallback directories that
+    // might not be covered.
+
+    let current = std::env::var("PATH").unwrap_or_default();
+
+    // On macOS, use path_helper to get the system-configured PATH.
+    #[cfg(target_os = "macos")]
+    let base = {
+        std::process::Command::new("/usr/libexec/path_helper")
+            .arg("-s")
+            .output()
+            .ok()
+            .and_then(|o| {
+                if !o.status.success() {
+                    return None;
+                }
+                let out = String::from_utf8_lossy(&o.stdout).to_string();
+                // Output is: PATH="..."; export PATH;
+                out.strip_prefix("PATH=\"")
+                    .and_then(|s| s.split('"').next())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| current.clone())
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let base = current.clone();
+
+    // Well-known directories where kubectl / docker / other tools are commonly
+    // installed.  We only append ones that actually exist on disk and are not
+    // already present in the PATH string.
+    let home = dirs::home_dir().unwrap_or_default();
+    let extra_dirs: Vec<std::path::PathBuf> = vec![
+        // Homebrew (Apple Silicon + Intel)
+        "/opt/homebrew/bin".into(),
+        "/opt/homebrew/sbin".into(),
+        "/usr/local/bin".into(),
+        "/usr/local/sbin".into(),
+        // Snap (Linux)
+        "/snap/bin".into(),
+        // Flatpak (Linux)
+        "/var/lib/flatpak/exports/bin".into(),
+        // User-local
+        home.join("bin"),
+        home.join(".local/bin"),
+        // Rancher Desktop
+        home.join(".rd/bin"),
+    ];
+
+    let mut parts: Vec<String> = base.split(':').map(|s| s.to_string()).collect();
+    let mut changed = false;
+    for dir in &extra_dirs {
+        let s = dir.to_string_lossy().into_owned();
+        if dir.is_dir() && !parts.contains(&s) {
+            parts.push(s);
+            changed = true;
+        }
+    }
+
+    // Also merge back anything from the original PATH that path_helper may
+    // have missed (e.g. entries added by the parent shell).
+    for entry in current.split(':') {
+        if !entry.is_empty() && !parts.iter().any(|p| p == entry) {
+            parts.push(entry.to_string());
+            changed = true;
+        }
+    }
+
+    if changed {
+        let new_path = parts.join(":");
+        tracing::debug!("refreshed PATH: {}", new_path);
+        // SAFETY: preflight checks run sequentially on a single blocking
+        // thread before any concurrent readers.
+        unsafe { std::env::set_var("PATH", &new_path) };
+    }
 }
 
 /// Detected host operating system for platform-specific install hints.
@@ -164,19 +245,7 @@ impl AggregatePreflightResult {
 }
 
 /// Run preflight checks for a connector by ID (local prerequisites only).
-///
-/// On Windows the step-1 device-posture checks (Docker, kubectl, etc.) are
-/// skipped because bundled connectors handle their own dependencies.
 pub async fn run_preflight(connector_id: &str) -> PreflightResult {
-    // Skip device-posture checks on Windows — they are not actionable there.
-    if cfg!(target_os = "windows") {
-        return PreflightResult {
-            connector_id: connector_id.to_string(),
-            connector_name: connector_id.to_string(),
-            checks: vec![],
-        };
-    }
-
     // Pick up any PATH changes from installs that happened since launch.
     refresh_path();
     let (name, checks) = match connector_id {
@@ -441,8 +510,10 @@ fn check_kube_context() -> PreflightCheck {
     let name = "Kubernetes Context".to_string();
 
     // First check if kubectl binary exists at all.
+    // NOTE: do NOT use --short here — it was removed in kubectl v1.28+ and
+    // causes a non-zero exit code, making us think kubectl is missing.
     let kubectl_found = hidden_command("kubectl")
-        .args(["version", "--client", "--short"])
+        .args(["version", "--client"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
