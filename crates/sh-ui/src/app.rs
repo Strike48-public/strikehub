@@ -5,14 +5,14 @@ use crate::components::{
 };
 use crate::theme;
 use dioxus::prelude::*;
+#[cfg(not(feature = "desktop"))]
+use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, ConnectorConfig, ConnectorProxy, ConnectorRuntime,
     ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner, MatrixWsClient, WsRelay,
     builtin_manifests, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
     run_preflight_full, start_oauth_flow_with,
 };
-#[cfg(not(feature = "desktop"))]
-use sh_core::js_string_escape;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -762,10 +762,8 @@ pub fn App() -> Element {
                 #[cfg(not(feature = "desktop"))]
                 {
                     if let Ok(login_url) = url_rx.await {
-                        let js = format!(
-                            "window.open('{}', '_blank')",
-                            js_string_escape(&login_url)
-                        );
+                        let js =
+                            format!("window.open('{}', '_blank')", js_string_escape(&login_url));
                         let _ = document::eval(&js);
                     }
                 }
