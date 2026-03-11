@@ -1044,21 +1044,17 @@ pub fn App() -> Element {
                 // registered and accepted. The initial bootstrap (before
                 // is_signed_in) may have failed if the connector app wasn't
                 // approved yet.
-                if let Some(ref auth) = auth {
-                    if let Some(ref addr) = *matrix_app_address.peek() {
-                        if auth.sandbox_token().is_empty() {
-                            match auth.bootstrap_sandbox_token(addr).await {
-                                Ok(()) => {
-                                    tracing::info!("Post-preflight sandbox token bootstrapped");
-                                    auth.spawn_sandbox_refresh_loop();
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Post-preflight sandbox bootstrap failed: {}",
-                                        e
-                                    );
-                                }
-                            }
+                if let Some(ref auth) = auth
+                    && let Some(ref addr) = *matrix_app_address.peek()
+                    && auth.sandbox_token().is_empty()
+                {
+                    match auth.bootstrap_sandbox_token(addr).await {
+                        Ok(()) => {
+                            tracing::info!("Post-preflight sandbox token bootstrapped");
+                            auth.spawn_sandbox_refresh_loop();
+                        }
+                        Err(e) => {
+                            tracing::warn!("Post-preflight sandbox bootstrap failed: {}", e);
                         }
                     }
                 }
