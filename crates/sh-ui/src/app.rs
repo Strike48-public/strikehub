@@ -1080,34 +1080,42 @@ pub fn App() -> Element {
         // Remove credential and key files from disk so connectors cannot
         // re-read them after sign-out.
         if let Some(home) = dirs::home_dir() {
-            for subdir in &["credentials", "keys"] {
-                let dir = home.join(".strike48").join(subdir);
-                if dir.is_dir() {
-                    match std::fs::read_dir(&dir) {
-                        Ok(entries) => {
-                            for entry in entries.flatten() {
-                                let path = entry.path();
-                                if path.is_file() {
-                                    if let Err(e) = std::fs::remove_file(&path) {
-                                        tracing::warn!(
-                                            "Failed to remove {}: {}",
-                                            path.display(),
-                                            e
-                                        );
+            // Clean both ~/.strike48 (pick/SDK default) and ~/.matrix
+            // (kubestudio) credential directories.
+            let base_dirs = [".strike48", ".matrix"];
+            let subdirs = ["credentials", "keys"];
+            for base in &base_dirs {
+                for subdir in &subdirs {
+                    let dir = home.join(base).join(subdir);
+                    if dir.is_dir() {
+                        match std::fs::read_dir(&dir) {
+                            Ok(entries) => {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.is_file() {
+                                        if let Err(e) = std::fs::remove_file(&path) {
+                                            tracing::warn!(
+                                                "Failed to remove {}: {}",
+                                                path.display(),
+                                                e
+                                            );
+                                        }
                                     }
                                 }
+                                tracing::info!(
+                                    "Cleared ~/{}/{} on sign-out",
+                                    base,
+                                    subdir
+                                );
                             }
-                            tracing::info!(
-                                "Cleared ~/.strike48/{} on sign-out",
-                                subdir
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to read ~/.strike48/{}: {}",
-                                subdir,
-                                e
-                            );
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read ~/{}/{}: {}",
+                                    base,
+                                    subdir,
+                                    e
+                                );
+                            }
                         }
                     }
                 }
