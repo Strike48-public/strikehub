@@ -1077,6 +1077,42 @@ pub fn App() -> Element {
         preflight_result.set(None);
         preflight_dismissed.set(false);
         show_account.set(false);
+        // Remove credential and key files from disk so connectors cannot
+        // re-read them after sign-out.
+        if let Some(home) = dirs::home_dir() {
+            for subdir in &["credentials", "keys"] {
+                let dir = home.join(".strike48").join(subdir);
+                if dir.is_dir() {
+                    match std::fs::read_dir(&dir) {
+                        Ok(entries) => {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if path.is_file() {
+                                    if let Err(e) = std::fs::remove_file(&path) {
+                                        tracing::warn!(
+                                            "Failed to remove {}: {}",
+                                            path.display(),
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            tracing::info!(
+                                "Cleared ~/.strike48/{} on sign-out",
+                                subdir
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to read ~/.strike48/{}: {}",
+                                subdir,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // Clear webview browsing data (cookies, local storage, etc.) so no
         // Keycloak/Matrix session tokens persist on disk after sign-out.
         #[cfg(feature = "desktop")]
