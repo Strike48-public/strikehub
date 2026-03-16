@@ -1092,29 +1092,20 @@ pub fn App() -> Element {
                             Ok(entries) => {
                                 for entry in entries.flatten() {
                                     let path = entry.path();
-                                    if path.is_file() {
-                                        if let Err(e) = std::fs::remove_file(&path) {
-                                            tracing::warn!(
-                                                "Failed to remove {}: {}",
-                                                path.display(),
-                                                e
-                                            );
-                                        }
+                                    if path.is_file()
+                                        && let Err(e) = std::fs::remove_file(&path)
+                                    {
+                                        tracing::warn!(
+                                            "Failed to remove {}: {}",
+                                            path.display(),
+                                            e
+                                        );
                                     }
                                 }
-                                tracing::info!(
-                                    "Cleared ~/{}/{} on sign-out",
-                                    base,
-                                    subdir
-                                );
+                                tracing::info!("Cleared ~/{}/{} on sign-out", base, subdir);
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    "Failed to read ~/{}/{}: {}",
-                                    base,
-                                    subdir,
-                                    e
-                                );
+                                tracing::warn!("Failed to read ~/{}/{}: {}", base, subdir, e);
                             }
                         }
                     }
