@@ -5,6 +5,11 @@ pick_dir     := env("PICK_DIR", justfile_directory() / "../pick")
 kube_dir     := env("KUBE_DIR", justfile_directory() / "../kubestudio")
 bin_dir      := env("BIN_DIR", home_directory() / "bin")
 
+# Initial setup: install git hooks
+setup:
+    git config core.hooksPath .githooks
+    @echo "✓ git hooks installed (.githooks/pre-commit)"
+
 # Build all connectors and StrikeHub, copy binaries, then run
 default: build-all run
 

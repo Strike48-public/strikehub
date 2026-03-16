@@ -13,8 +13,8 @@ set -e
 # This is the Windows equivalent of AppImage: one file, double-click, it works.
 
 VERSION=${1:-latest}
-PICK_VERSION=${PICK_VERSION:-v0.1.0}
-KUBESTUDIO_VERSION=${KUBESTUDIO_VERSION:-v0.1.0}
+PICK_VERSION=${PICK_VERSION:-v0.1.2}
+KUBESTUDIO_VERSION=${KUBESTUDIO_VERSION:-v0.1.1}
 
 echo "Building StrikeHub Windows SFX..."
 echo "================================="

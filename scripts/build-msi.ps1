@@ -50,7 +50,7 @@ if (-not (Test-Path "dist\ks-connector.exe")) {
     Write-Host "Downloading ks-connector..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Path dist -Force | Out-Null
     try {
-        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/v0.1.0/ks-connector-windows-x86_64.zip"
+        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/v0.1.1/ks-connector-windows-x86_64.zip"
         Invoke-WebRequest -Uri $ksUrl -OutFile "dist\ks-connector.zip"
         Expand-Archive -Path "dist\ks-connector.zip" -DestinationPath "dist" -Force
         Remove-Item "dist\ks-connector.zip"
@@ -64,7 +64,7 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
     Write-Host "Downloading pentest-agent..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Path dist -Force | Out-Null
     try {
-        $paUrl = "https://github.com/Strike48-public/pick/releases/download/v0.1.1/pentest-agent-windows-x86_64.zip"
+        $paUrl = "https://github.com/Strike48-public/pick/releases/download/v0.1.2/pentest-agent-windows-x86_64.zip"
         Invoke-WebRequest -Uri $paUrl -OutFile "dist\pentest-agent.zip"
         Expand-Archive -Path "dist\pentest-agent.zip" -DestinationPath "dist" -Force
         Remove-Item "dist\pentest-agent.zip"

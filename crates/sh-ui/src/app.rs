@@ -1077,6 +1077,41 @@ pub fn App() -> Element {
         preflight_result.set(None);
         preflight_dismissed.set(false);
         show_account.set(false);
+        // Remove credential and key files from disk so connectors cannot
+        // re-read them after sign-out.
+        if let Some(home) = dirs::home_dir() {
+            // Clean both ~/.strike48 (pick/SDK default) and ~/.matrix
+            // (kubestudio) credential directories.
+            let base_dirs = [".strike48", ".matrix"];
+            let subdirs = ["credentials", "keys"];
+            for base in &base_dirs {
+                for subdir in &subdirs {
+                    let dir = home.join(base).join(subdir);
+                    if dir.is_dir() {
+                        match std::fs::read_dir(&dir) {
+                            Ok(entries) => {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.is_file()
+                                        && let Err(e) = std::fs::remove_file(&path)
+                                    {
+                                        tracing::warn!(
+                                            "Failed to remove {}: {}",
+                                            path.display(),
+                                            e
+                                        );
+                                    }
+                                }
+                                tracing::info!("Cleared ~/{}/{} on sign-out", base, subdir);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to read ~/{}/{}: {}", base, subdir, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Clear webview browsing data (cookies, local storage, etc.) so no
         // Keycloak/Matrix session tokens persist on disk after sign-out.
         #[cfg(feature = "desktop")]
