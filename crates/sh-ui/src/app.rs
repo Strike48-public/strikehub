@@ -1078,34 +1078,63 @@ pub fn App() -> Element {
         preflight_dismissed.set(false);
         show_account.set(false);
         // Remove credential and key files from disk so connectors cannot
-        // re-read them after sign-out.
-        if let Some(home) = dirs::home_dir() {
-            // Clean both ~/.strike48 (pick/SDK default) and ~/.matrix
-            // (kubestudio) credential directories.
-            let base_dirs = [".strike48", ".matrix"];
+        // re-read them after sign-out. The SDK resolves $HOME/.strike48/
+        // which may point to different locations per platform:
+        //   Linux/macOS: ~/.strike48/  and ~/.matrix/
+        //   Windows:     %LOCALAPPDATA%\.strike48\ and %USERPROFILE%\.matrix\
+        // We clean all candidate roots to cover every case.
+        {
+            let mut roots: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                roots.push(home);
+            }
+            if let Some(data_local) = dirs::data_local_dir() {
+                roots.push(data_local);
+            }
+            if let Ok(home_env) = std::env::var("HOME") {
+                roots.push(std::path::PathBuf::from(home_env));
+            }
+            // Deduplicate paths
+            roots.sort();
+            roots.dedup();
+
+            let dot_dirs = [".strike48", ".matrix"];
             let subdirs = ["credentials", "keys"];
-            for base in &base_dirs {
-                for subdir in &subdirs {
-                    let dir = home.join(base).join(subdir);
-                    if dir.is_dir() {
-                        match std::fs::read_dir(&dir) {
-                            Ok(entries) => {
-                                for entry in entries.flatten() {
-                                    let path = entry.path();
-                                    if path.is_file()
-                                        && let Err(e) = std::fs::remove_file(&path)
-                                    {
-                                        tracing::warn!(
-                                            "Failed to remove {}: {}",
-                                            path.display(),
-                                            e
-                                        );
+            for root in &roots {
+                for dot_dir in &dot_dirs {
+                    for subdir in &subdirs {
+                        let dir = root.join(dot_dir).join(subdir);
+                        if dir.is_dir() {
+                            match std::fs::read_dir(&dir) {
+                                Ok(entries) => {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if path.is_file()
+                                            && let Err(e) = std::fs::remove_file(&path)
+                                        {
+                                            tracing::warn!(
+                                                "Failed to remove {}: {}",
+                                                path.display(),
+                                                e
+                                            );
+                                        }
                                     }
+                                    tracing::info!(
+                                        "Cleared {}/{}/{} on sign-out",
+                                        root.display(),
+                                        dot_dir,
+                                        subdir
+                                    );
                                 }
-                                tracing::info!("Cleared ~/{}/{} on sign-out", base, subdir);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to read ~/{}/{}: {}", base, subdir, e);
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to read {}/{}/{}: {}",
+                                        root.display(),
+                                        dot_dir,
+                                        subdir,
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
