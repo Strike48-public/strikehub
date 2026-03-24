@@ -260,6 +260,7 @@ fn resolve_binary(binary: &Path) -> PathBuf {
 
                 if let Some(workspace_root) = target_dir.parent() {
                     // Scan ancestors: parent, grandparent, etc.
+                    let alt_profile = if profile == "debug" { "release" } else { "debug" };
                     let mut ancestor = workspace_root.to_path_buf();
                     for _ in 0..3 {
                         ancestor = match ancestor.parent() {
@@ -267,6 +268,9 @@ fn resolve_binary(binary: &Path) -> PathBuf {
                             None => break,
                         };
                         if let Some(found) = scan_for_binary(&ancestor, profile, &binary) {
+                            return found;
+                        }
+                        if let Some(found) = scan_for_binary(&ancestor, alt_profile, &binary) {
                             return found;
                         }
                     }

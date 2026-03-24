@@ -525,6 +525,44 @@ pub fn App() -> Element {
                 // Per-connector instance ID (persisted in config).
                 let mut conn_env = env_vars.clone();
                 conn_env.push(("INSTANCE_ID".into(), conn.instance_id.clone()));
+
+                // Create a per-connector OTT if this connector lacks saved
+                // credentials. Each OTT is single-use, so every connector that
+                // needs to register gets its own token.
+                if !sh_core::ott::has_saved_credentials(&conn.id, &conn.instance_id) {
+                    if let Some(ref auth) = *auth_manager.peek() {
+                        let jwt = auth.token();
+                        if !jwt.is_empty() {
+                            let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
+                            match sh_core::ott::create_pre_approved_token(
+                                auth.matrix_url(),
+                                &jwt,
+                                auth.tls_insecure(),
+                                sdk_type,
+                            )
+                            .await
+                            {
+                                Ok(token) => {
+                                    tracing::info!(
+                                        "[connector-start] OTT created for '{}' auto-registration",
+                                        conn.id
+                                    );
+                                    conn_env.push((
+                                        "STRIKE48_REGISTRATION_TOKEN".into(),
+                                        token,
+                                    ));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "[connector-start] Failed to create OTT for '{}': {e}",
+                                        conn.id
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 tracing::info!(
                     "Starting connector '{}' with INSTANCE_ID={}",
                     conn.id,

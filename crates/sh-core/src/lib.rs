@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod ipc_runner;
 pub mod matrix_ws;
 pub mod oauth;
+pub mod ott;
 pub mod preflight;
 pub mod proxy;
 pub mod registry;
@@ -28,6 +29,7 @@ pub use preflight::{
     AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
 };
+pub use ott::{create_pre_approved_token, has_saved_credentials, sdk_connector_type};
 pub use proxy::ConnectorProxy;
 pub use registry::{ConnectorManifest, builtin_manifests};
 pub use transport::detect_transport;
