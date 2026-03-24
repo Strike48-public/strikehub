@@ -47,7 +47,11 @@ pub async fn create_pre_approved_token(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("pre-approve request failed: {} — {}", status, &body[..body.len().min(300)]);
+        anyhow::bail!(
+            "pre-approve request failed: {} — {}",
+            status,
+            &body[..body.len().min(300)]
+        );
     }
 
     let body: serde_json::Value = resp.json().await?;

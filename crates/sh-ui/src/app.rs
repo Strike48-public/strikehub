@@ -528,12 +528,11 @@ pub fn App() -> Element {
 
                 // Ensure connectors inherit the TLS-insecure flag even when
                 // it wasn't set as an env var on the StrikeHub process itself.
-                if let Some(ref auth) = *auth_manager.peek() {
-                    if auth.tls_insecure() {
-                        if !conn_env.iter().any(|(k, _)| k == "MATRIX_TLS_INSECURE") {
-                            conn_env.push(("MATRIX_TLS_INSECURE".into(), "true".into()));
-                        }
-                    }
+                if let Some(ref auth) = *auth_manager.peek()
+                    && auth.tls_insecure()
+                    && !conn_env.iter().any(|(k, _)| k == "MATRIX_TLS_INSECURE")
+                {
+                    conn_env.push(("MATRIX_TLS_INSECURE".into(), "true".into()));
                 }
 
                 // Create a per-connector OTT when no saved credentials exist.
@@ -541,8 +540,8 @@ pub fn App() -> Element {
                 // register gets its own token.  Connectors with valid saved
                 // credentials will authenticate via private_key_jwt instead.
                 if !sh_core::ott::has_saved_credentials(&conn.id, &conn.instance_id)
+                    && let Some(ref auth) = *auth_manager.peek()
                 {
-                if let Some(ref auth) = *auth_manager.peek() {
                     let jwt = auth.token();
                     if !jwt.is_empty() {
                         let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
@@ -559,10 +558,7 @@ pub fn App() -> Element {
                                     "[connector-start] OTT created for '{}' auto-registration",
                                     conn.id
                                 );
-                                conn_env.push((
-                                    "STRIKE48_REGISTRATION_TOKEN".into(),
-                                    token,
-                                ));
+                                conn_env.push(("STRIKE48_REGISTRATION_TOKEN".into(), token));
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -572,7 +568,6 @@ pub fn App() -> Element {
                             }
                         }
                     }
-                }
                 }
 
                 tracing::info!(
