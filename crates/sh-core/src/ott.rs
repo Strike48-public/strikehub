@@ -13,7 +13,10 @@
 /// * `connector_type` — SDK connector type (e.g. `app-kube-studio`, `pentest-connector`)
 ///
 /// # Returns
-/// The OTT token string (e.g. `ott_Dpwt9Ykn...`) on success.
+/// JSON string `{"token":"ott_...","matrix_url":"https://..."}` for the SDK's
+/// `OttProvider.parse_ott()`.  The `matrix_url` is needed because
+/// `STRIKE48_API_URL` points to the local proxy which doesn't handle
+/// `/api/connectors/register-with-ott`.
 pub async fn create_pre_approved_token(
     matrix_url: &str,
     jwt: &str,
