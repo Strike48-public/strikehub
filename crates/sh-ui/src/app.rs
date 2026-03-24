@@ -526,6 +526,16 @@ pub fn App() -> Element {
                 let mut conn_env = env_vars.clone();
                 conn_env.push(("INSTANCE_ID".into(), conn.instance_id.clone()));
 
+                // Ensure connectors inherit the TLS-insecure flag even when
+                // it wasn't set as an env var on the StrikeHub process itself.
+                if let Some(ref auth) = *auth_manager.peek() {
+                    if auth.tls_insecure() {
+                        if !conn_env.iter().any(|(k, _)| k == "MATRIX_TLS_INSECURE") {
+                            conn_env.push(("MATRIX_TLS_INSECURE".into(), "true".into()));
+                        }
+                    }
+                }
+
                 // Create a per-connector OTT if this connector lacks saved
                 // credentials. Each OTT is single-use, so every connector that
                 // needs to register gets its own token.
