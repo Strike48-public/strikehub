@@ -392,6 +392,15 @@ pub fn url_slug(studio_url: &str) -> String {
     }
 }
 
+/// Derive a filesystem-safe slug from a socket path for use as a connector id.
+pub fn slug_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("custom")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,13 +425,4 @@ mod tests {
         // Same URL produces same slug
         assert_eq!(s1, url_slug("https://studio.strike48.test"));
     }
-}
-
-/// Derive a filesystem-safe slug from a socket path for use as a connector id.
-pub fn slug_from_path(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("custom")
-        .to_string()
 }
