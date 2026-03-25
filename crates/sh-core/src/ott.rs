@@ -88,11 +88,13 @@ pub fn sdk_connector_type(strikehub_id: &str) -> &str {
     }
 }
 
-/// Check whether saved SDK credentials exist on disk for a given connector.
+/// Check whether saved SDK credentials exist on disk for a given connector
+/// and are complete enough for `private_key_jwt` authentication.
 ///
 /// The SDK saves credentials to `~/.strike48/credentials/{type}_{instance}.json`
-/// after successful OTT registration. If these exist, the connector will use
-/// them on startup (priority 3 in the auth chain) and no new OTT is needed.
+/// after successful OTT registration. A valid file must contain a `kid` field
+/// (key-ID) so Keycloak can look up the public key. Files without `kid` were
+/// created by an older SDK and will fail with "Unable to load public key".
 pub fn has_saved_credentials(strikehub_id: &str, instance_id: &str) -> bool {
     let home = match dirs::home_dir() {
         Some(h) => h.to_string_lossy().to_string(),
@@ -101,26 +103,40 @@ pub fn has_saved_credentials(strikehub_id: &str, instance_id: &str) -> bool {
 
     let sdk_type = sdk_connector_type(strikehub_id);
     let filename = format!("{}_{}.json", sdk_type, instance_id);
-    let path = std::path::Path::new(&home)
-        .join(".strike48")
-        .join("credentials")
-        .join(&filename);
 
-    if path.exists() {
-        tracing::debug!("Found saved credentials at {}", path.display());
-        return true;
-    }
+    for dir in &[".strike48", ".matrix"] {
+        let path = std::path::Path::new(&home)
+            .join(dir)
+            .join("credentials")
+            .join(&filename);
 
-    // Also check ~/.matrix/credentials (kubestudio uses this path).
-    let alt_path = std::path::Path::new(&home)
-        .join(".matrix")
-        .join("credentials")
-        .join(&filename);
-
-    if alt_path.exists() {
-        tracing::debug!("Found saved credentials at {}", alt_path.display());
-        return true;
+        if path.exists() {
+            if credentials_have_kid(&path) {
+                tracing::debug!("Found valid credentials at {}", path.display());
+                return true;
+            }
+            tracing::warn!(
+                "Credentials at {} missing 'kid' (old SDK), will create fresh OTT",
+                path.display()
+            );
+        }
     }
 
     false
+}
+
+/// Check whether a credential JSON file contains a `kid` (key ID) field.
+///
+/// The `kid` is required for Keycloak to locate the public key during
+/// `private_key_jwt` token exchange. Files without it are from an older SDK.
+fn credentials_have_kid(path: &std::path::Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    json.get("kid")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
 }

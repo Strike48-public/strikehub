@@ -18,7 +18,7 @@ pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant
 pub use bridge::{BridgeState, SharedBridgeState, new_bridge_state};
 pub use config::{
     ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport, HubConfig,
-    generate_instance_id, slug_from_path,
+    generate_instance_id, slug_from_path, url_slug,
 };
 pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};

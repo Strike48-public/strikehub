@@ -24,9 +24,10 @@ pub struct HubConfig {
     pub pick_tos_accepted: bool,
     #[serde(default)]
     pub connectors: BTreeMap<String, ConnectorEntry>,
-    /// Stable instance ID for this StrikeHub installation, persisted across sessions.
+    /// Stable instance IDs for this StrikeHub installation, keyed by URL slug.
+    /// Each Studio URL gets its own instance ID so credentials don't collide.
     #[serde(default)]
-    pub instance_id: Option<String>,
+    pub instance_ids: BTreeMap<String, String>,
     /// User-provided Studio URL override. When set, takes precedence over the
     /// `STRIKE48_API_URL` env var and the compiled-in default.
     #[serde(default)]
@@ -52,10 +53,10 @@ pub struct ConnectorEntry {
     /// Explicit socket path for custom IPC connectors (externally managed).
     #[serde(default)]
     pub socket_path: Option<String>,
-    /// Stable per-connector instance ID, generated on first use and persisted.
-    /// Format: `strikehub-{connector_id}-{short_hash}`.
+    /// Stable per-connector instance IDs, keyed by URL slug.
+    /// Each Studio URL gets its own instance ID so credentials don't collide.
     #[serde(default)]
-    pub instance_id: Option<String>,
+    pub instance_ids: BTreeMap<String, String>,
 }
 
 fn default_enabled() -> bool {
@@ -95,10 +96,10 @@ pub struct ConnectorConfig {
 
 impl ConnectorConfig {
     /// Create a config for an externally-managed IPC connector at a given socket path.
-    pub fn from_socket(name: String, socket_path: String) -> Self {
+    pub fn from_socket(name: String, socket_path: String, studio_url: &str) -> Self {
         // Derive a stable id from the socket path.
         let id = format!("ipc-{}", slug_from_path(&socket_path));
-        let instance_id = generate_instance_id(&id);
+        let instance_id = generate_instance_id(&id, studio_url);
         Self {
             id,
             display_name: name,
@@ -181,7 +182,7 @@ impl HubConfig {
                 setup_complete: false,
                 pick_tos_accepted: false,
                 connectors: BTreeMap::new(),
-                instance_id: None,
+                instance_ids: BTreeMap::new(),
                 studio_url: None,
             });
         }
@@ -200,13 +201,15 @@ impl HubConfig {
         Ok(())
     }
 
-    /// Get or generate the stable instance ID for this StrikeHub installation.
-    pub fn get_or_create_instance_id(&mut self) -> String {
-        if let Some(ref id) = self.instance_id {
+    /// Get or generate the stable instance ID for this StrikeHub installation,
+    /// scoped to the given Studio URL.
+    pub fn get_or_create_instance_id(&mut self, studio_url: &str) -> String {
+        let slug = url_slug(studio_url);
+        if let Some(id) = self.instance_ids.get(&slug) {
             return id.clone();
         }
-        let id = generate_instance_id("hub");
-        self.instance_id = Some(id.clone());
+        let id = generate_instance_id("hub", studio_url);
+        self.instance_ids.insert(slug, id.clone());
         let _ = self.save();
         id
     }
@@ -227,17 +230,22 @@ impl HubConfig {
         }
     }
 
-    /// Ensure every enabled connector and the hub itself have a persisted instance ID.
-    /// Call once after loading (or before first use). Returns true if config was modified.
-    pub fn ensure_instance_ids(&mut self) -> bool {
+    /// Ensure every enabled connector and the hub itself have a persisted instance ID
+    /// for the given Studio URL. Call after the studio URL is known.
+    /// Returns true if config was modified.
+    pub fn ensure_instance_ids(&mut self, studio_url: &str) -> bool {
+        let slug = url_slug(studio_url);
         let mut dirty = false;
-        if self.instance_id.is_none() {
-            self.instance_id = Some(generate_instance_id("hub"));
+        if !self.instance_ids.contains_key(&slug) {
+            self.instance_ids
+                .insert(slug.clone(), generate_instance_id("hub", studio_url));
             dirty = true;
         }
         for (id, entry) in self.connectors.iter_mut() {
-            if entry.instance_id.is_none() {
-                entry.instance_id = Some(generate_instance_id(id));
+            if !entry.instance_ids.contains_key(&slug) {
+                entry
+                    .instance_ids
+                    .insert(slug.clone(), generate_instance_id(id, studio_url));
                 dirty = true;
             }
         }
@@ -247,16 +255,18 @@ impl HubConfig {
         dirty
     }
 
-    pub fn to_connectors(&self) -> Vec<ConnectorConfig> {
+    pub fn to_connectors(&self, studio_url: &str) -> Vec<ConnectorConfig> {
+        let slug = url_slug(studio_url);
         self.connectors
             .iter()
             .filter(|(_, entry)| entry.enabled)
             .map(|(id, entry)| {
                 let display_name = entry.display_name.clone().unwrap_or_else(|| id.clone());
                 let instance_id = entry
-                    .instance_id
-                    .clone()
-                    .unwrap_or_else(|| generate_instance_id(id));
+                    .instance_ids
+                    .get(&slug)
+                    .cloned()
+                    .unwrap_or_else(|| generate_instance_id(id, studio_url));
                 ConnectorConfig {
                     id: id.clone(),
                     display_name,
@@ -275,6 +285,8 @@ impl HubConfig {
     }
 
     /// Create a `ConnectorEntry` from a manifest and insert it into the config.
+    /// Instance IDs are generated lazily when `ensure_instance_ids` is called
+    /// with a Studio URL.
     pub fn enable_from_manifest(&mut self, manifest: &ConnectorManifest) {
         self.connectors.insert(
             manifest.id.to_string(),
@@ -287,7 +299,7 @@ impl HubConfig {
                 enabled: true,
                 transport: manifest.default_transport,
                 socket_path: None,
-                instance_id: Some(generate_instance_id(manifest.id)),
+                instance_ids: BTreeMap::new(),
             },
         );
     }
@@ -295,7 +307,6 @@ impl HubConfig {
     /// Add a custom IPC connector by socket path.
     pub fn add_socket(&mut self, name: String, socket_path: String) {
         let id = format!("ipc-{}", slug_from_path(&socket_path));
-        let instance_id = generate_instance_id(&id);
         self.connectors.insert(
             id,
             ConnectorEntry {
@@ -307,7 +318,7 @@ impl HubConfig {
                 enabled: true,
                 transport: ConnectorTransport::Ipc,
                 socket_path: Some(socket_path),
-                instance_id: Some(instance_id),
+                instance_ids: BTreeMap::new(),
             },
         );
     }
@@ -317,13 +328,94 @@ impl HubConfig {
     }
 }
 
-/// Generate a stable instance ID for a connector: `strikehub-{id}-{hex}`.
-pub fn generate_instance_id(connector_id: &str) -> String {
+/// Generate a stable instance ID for a connector.
+///
+/// Format: `strikehub-{connector_id}-{url_slug}-{hex}`
+/// where `url_slug` scopes the ID to a specific Studio URL so switching
+/// between studios produces distinct credential files.
+pub fn generate_instance_id(connector_id: &str, studio_url: &str) -> String {
     use rand::RngCore;
     let mut buf = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut buf);
     let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("strikehub-{}-{}", connector_id, hex)
+    let slug = url_slug(studio_url);
+    format!("strikehub-{}-{}-{}", connector_id, slug, hex)
+}
+
+/// Derive a short, readable slug from a Studio URL.
+///
+/// Takes the hostname, strips everything after (and including) `.strike48.`,
+/// keeps up to 6 chars of the subdomain, appends the TLD, and adds the first
+/// 4 hex chars of a hash for uniqueness.
+///
+/// Examples:
+///   `https://studio.strike48.test`                    → `studio-test-a1b2`
+///   `https://studio.strike48.com`                     → `studio-com-e5f6`
+///   `https://studio.johnson-and-johnson.strike48.com` → `johnso-com-c3d4`
+pub fn url_slug(studio_url: &str) -> String {
+    let host = studio_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("unknown")
+        .split(':')
+        .next()
+        .unwrap_or("unknown");
+
+    // Hash the full URL for uniqueness (4 hex chars)
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        studio_url.hash(&mut hasher);
+        format!("{:04x}", hasher.finish() & 0xFFFF)
+    };
+
+    // Split on ".strike48." to extract subdomain and TLD
+    if let Some(idx) = host.find(".strike48.") {
+        let before = &host[..idx]; // e.g. "studio" or "studio.johnson-and-johnson"
+        let tld = &host[idx + ".strike48.".len()..]; // e.g. "com", "test"
+
+        // Take the last segment before .strike48. (customer name, or "studio")
+        let subdomain = before.rsplit('.').next().unwrap_or(before);
+        let sub_short: String = subdomain.chars().take(6).collect();
+
+        format!("{}-{}-{}", sub_short, tld, hash)
+    } else {
+        // Non-strike48 URL: use first 6 chars of hostname + hash
+        let short: String = host
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .take(6)
+            .collect();
+        format!("{}-{}", short, hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_slug() {
+        let s1 = url_slug("https://studio.strike48.test");
+        assert!(s1.starts_with("studio-test-"), "got: {s1}");
+
+        let s2 = url_slug("https://studio.strike48.com");
+        assert!(s2.starts_with("studio-com-"), "got: {s2}");
+
+        let s3 = url_slug("https://studio.johnson-and-johnson.strike48.com");
+        assert!(s3.starts_with("johnso-com-"), "got: {s3}");
+
+        let s4 = url_slug("https://studio.acme.strike48.engineering");
+        assert!(s4.starts_with("acme-engineering-"), "got: {s4}");
+
+        // Different URLs produce different slugs
+        assert_ne!(s1, s2);
+
+        // Same URL produces same slug
+        assert_eq!(s1, url_slug("https://studio.strike48.test"));
+    }
 }
 
 /// Derive a filesystem-safe slug from a socket path for use as a connector id.
