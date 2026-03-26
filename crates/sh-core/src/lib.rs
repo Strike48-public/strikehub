@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod ipc_runner;
 pub mod matrix_ws;
 pub mod oauth;
+pub mod ott;
 pub mod preflight;
 pub mod proxy;
 pub mod registry;
@@ -17,13 +18,14 @@ pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant
 pub use bridge::{BridgeState, SharedBridgeState, new_bridge_state};
 pub use config::{
     ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport, HubConfig,
-    generate_instance_id, slug_from_path,
+    generate_instance_id, slug_from_path, url_slug,
 };
 pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
 pub use matrix_ws::MatrixWsClient;
 pub use oauth::{js_string_escape, start_oauth_flow, start_oauth_flow_with};
+pub use ott::{create_pre_approved_token, has_saved_credentials, sdk_connector_type};
 pub use preflight::{
     AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,

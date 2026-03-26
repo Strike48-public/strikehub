@@ -157,7 +157,7 @@ fn sync_config(
                     enabled: true,
                     transport: c.manifest.default_transport,
                     socket_path: None,
-                    instance_id: Some(sh_core::generate_instance_id(c.manifest.id)),
+                    instance_ids: Default::default(),
                 },
             );
         }
@@ -165,7 +165,6 @@ fn sync_config(
 
     for c in custom_connectors {
         let id = format!("ipc-{}", sh_core::slug_from_path(&c.socket_path));
-        let inst_id = sh_core::generate_instance_id(&id);
         cfg.connectors.insert(
             id,
             sh_core::ConnectorEntry {
@@ -177,14 +176,17 @@ fn sync_config(
                 enabled: true,
                 transport: ConnectorTransport::Ipc,
                 socket_path: Some(c.socket_path.clone()),
-                instance_id: Some(inst_id),
+                instance_ids: Default::default(),
             },
         );
     }
 
     cfg.setup_complete = true;
     let _ = cfg.save();
-    let mut new_connectors = cfg.to_connectors();
+    // Studio URL not yet known at setup time; instance IDs will be
+    // filled in by ensure_instance_ids() after sign-in.
+    let studio = cfg.studio_url.clone().unwrap_or_default();
+    let mut new_connectors = cfg.to_connectors(&studio);
 
     // Restore runtime state for connectors that were already online with
     // fetched info — avoids clobbering names/icons from /connector/info.
@@ -207,16 +209,21 @@ pub fn App() -> Element {
             setup_complete: false,
             pick_tos_accepted: false,
             connectors: Default::default(),
-            instance_id: None,
+            instance_ids: Default::default(),
             studio_url: None,
         });
         // Merge manifest defaults so that saved configs pick up transport
         // and binary changes when the code is upgraded.
         cfg.apply_manifest_defaults(&builtin_manifests());
-        cfg.ensure_instance_ids();
+        // Instance IDs are generated lazily after the studio URL is known
+        // (in the sign-in effect). Don't call ensure_instance_ids here.
         cfg
     });
-    let mut connectors = use_signal(move || hub_config.read().to_connectors());
+    let mut connectors = use_signal(move || {
+        let cfg = hub_config.read();
+        let studio = cfg.studio_url.clone().unwrap_or_default();
+        cfg.to_connectors(&studio)
+    });
     let mut active_id = use_signal(|| None::<String>);
     let mut proxy_port = use_signal(|| None::<u16>);
     let mut proxy_handle = use_signal(|| None::<ConnectorProxy>);
@@ -525,6 +532,51 @@ pub fn App() -> Element {
                 // Per-connector instance ID (persisted in config).
                 let mut conn_env = env_vars.clone();
                 conn_env.push(("INSTANCE_ID".into(), conn.instance_id.clone()));
+
+                // Ensure connectors inherit the TLS-insecure flag even when
+                // it wasn't set as an env var on the StrikeHub process itself.
+                if let Some(ref auth) = *auth_manager.peek()
+                    && auth.tls_insecure()
+                    && !conn_env.iter().any(|(k, _)| k == "MATRIX_TLS_INSECURE")
+                {
+                    conn_env.push(("MATRIX_TLS_INSECURE".into(), "true".into()));
+                }
+
+                // Create a per-connector OTT when no saved credentials exist.
+                // Each OTT is single-use, so every connector that needs to
+                // register gets its own token.  Connectors with valid saved
+                // credentials will authenticate via private_key_jwt instead.
+                if !sh_core::ott::has_saved_credentials(&conn.id, &conn.instance_id)
+                    && let Some(ref auth) = *auth_manager.peek()
+                {
+                    let jwt = auth.token();
+                    if !jwt.is_empty() {
+                        let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
+                        match sh_core::ott::create_pre_approved_token(
+                            auth.matrix_url(),
+                            &jwt,
+                            auth.tls_insecure(),
+                            sdk_type,
+                        )
+                        .await
+                        {
+                            Ok(token) => {
+                                tracing::info!(
+                                    "[connector-start] OTT created for '{}' auto-registration",
+                                    conn.id
+                                );
+                                conn_env.push(("STRIKE48_REGISTRATION_TOKEN".into(), token));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[connector-start] Failed to create OTT for '{}': {e}",
+                                    conn.id
+                                );
+                            }
+                        }
+                    }
+                }
+
                 tracing::info!(
                     "Starting connector '{}' with INSTANCE_ID={}",
                     conn.id,
@@ -904,7 +956,20 @@ pub fn App() -> Element {
                     })
                     .unwrap_or_default();
                 tracing::info!("Resolved tenant_id={:?}", tenant);
-                let instance = hub_config.read().instance_id.clone().unwrap_or_default();
+
+                // Now that the studio URL is known, generate instance IDs
+                // scoped to this URL and refresh the connectors list.
+                let api_url = auth.matrix_url().to_string();
+                hub_config.write().ensure_instance_ids(&api_url);
+                let refreshed = hub_config.read().to_connectors(&api_url);
+                connectors.set(refreshed);
+
+                let instance = hub_config
+                    .read()
+                    .instance_ids
+                    .get(&sh_core::url_slug(&api_url))
+                    .cloned()
+                    .unwrap_or_default();
                 tracing::info!("INSTANCE_ID={:?}", instance);
 
                 // Propagate tenant to child connectors via process env so
@@ -1290,7 +1355,11 @@ pub fn App() -> Element {
         .map(|a| a.matrix_url().to_string())
         .unwrap_or_default();
     let account_tenant_id = std::env::var("TENANT_ID").unwrap_or_default();
-    let account_instance_id = hub_config.read().instance_id.clone().unwrap_or_default();
+    let account_instance_id = {
+        let cfg = hub_config.read();
+        let slug = sh_core::url_slug(&account_server_url);
+        cfg.instance_ids.get(&slug).cloned().unwrap_or_default()
+    };
     let account_user_name = auth_manager
         .read()
         .as_ref()
