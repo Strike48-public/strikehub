@@ -125,6 +125,40 @@ pub fn has_saved_credentials(strikehub_id: &str, instance_id: &str) -> bool {
     false
 }
 
+/// Delete all saved credentials and keys whose filename contains the given
+/// URL slug.  This covers both `.strike48` and `.matrix` directories and
+/// removes credentials for every connector scoped to that Studio URL.
+///
+/// Returns a list of deleted file paths.
+pub fn clear_credentials_for_url(studio_url: &str) -> Vec<String> {
+    let slug = crate::url_slug(studio_url);
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return vec![],
+    };
+
+    let mut deleted = Vec::new();
+    for base in &[".strike48", ".matrix"] {
+        for subdir in &["credentials", "keys"] {
+            let dir = home.join(base).join(subdir);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().contains(&slug) {
+                    let path = entry.path();
+                    if std::fs::remove_file(&path).is_ok() {
+                        tracing::info!("Deleted credential: {}", path.display());
+                        deleted.push(path.display().to_string());
+                    }
+                }
+            }
+        }
+    }
+    deleted
+}
+
 /// Check whether a credential JSON file contains a `kid` (key ID) field.
 ///
 /// The `kid` is required for Keycloak to locate the public key during

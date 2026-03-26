@@ -543,6 +543,25 @@ pub fn app_css() -> &'static str {
             text-decoration: underline;
         }
 
+        .login-clear-cache-link {
+            margin-top: 12px;
+            font-size: 12px;
+            color: var(--muted-foreground);
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .login-clear-cache-link:hover {
+            text-decoration: underline;
+            color: var(--foreground);
+        }
+
+        .login-cache-msg {
+            font-size: 12px;
+            color: #4ade80;
+            margin: 4px 0 0 0;
+        }
+
         /* ── TOS overlay ── */
         .tos-overlay {
             flex: 1;
