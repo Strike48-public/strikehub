@@ -10,8 +10,8 @@ use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, ConnectorConfig, ConnectorProxy, ConnectorRuntime,
     ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner, MatrixWsClient, WsRelay,
-    builtin_manifests, detect_transport, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
-    run_preflight_full, start_oauth_flow_with,
+    builtin_manifests, create_connector_ott, detect_transport, fetch_connector_apps,
+    fetch_tenant_id, run_preflight_all, run_preflight_full, start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -76,6 +76,16 @@ fn matrix_env_vars() -> Vec<(String, String)> {
     }
 
     vars
+}
+
+/// Map a StrikeHub connector ID to the gateway connector_type used for
+/// registration with the Strike48 platform.
+fn connector_gateway_type(connector_id: &str) -> &str {
+    match connector_id {
+        "kubestudio" => "app-kube-studio",
+        "pick" => "pentest-connector",
+        _ => connector_id,
+    }
 }
 
 /// Normalize and validate a Studio URL. Returns `Some(url)` if valid
@@ -471,6 +481,37 @@ pub fn App() -> Element {
                 }
             }
 
+            // Create pre-approved OTT tokens so connectors can register
+            // without admin approval. We need the real API URL (not the
+            // proxy override) so the SDK posts to the correct server.
+            let tenant_id = std::env::var("TENANT_ID").unwrap_or_default();
+
+            let mut ott_tokens: HashMap<String, String> = HashMap::new();
+            if let Some(ref auth) = *auth_manager.peek() {
+                let real_api_url = auth.matrix_url().to_string();
+                let ws = ws_client_signal.peek();
+                let ws_ref = ws.as_ref().map(|c| c.as_ref());
+                for conn in &current {
+                    if conn.id.starts_with("ipc-") {
+                        continue;
+                    }
+                    let gateway_type = connector_gateway_type(&conn.id);
+                    if let Some(ott) = create_connector_ott(auth, gateway_type, ws_ref).await {
+                        // Build JSON OttData with the real API URL so the SDK
+                        // registers at the correct server, not the local proxy.
+                        let ott_json = serde_json::json!({
+                            "token": ott.token,
+                            "matrix_url": real_api_url,
+                            "keycloak_url": ott.keycloak_url,
+                            "connector_type": gateway_type,
+                            "tenant_id": ott.tenant_id.unwrap_or_else(|| tenant_id.clone()),
+                        })
+                        .to_string();
+                        ott_tokens.insert(conn.id.clone(), ott_json);
+                    }
+                }
+            }
+
             for conn in &current {
                 // Custom IPC connectors are externally managed — just register
                 // their socket in bridge state so the protocol handler can reach them.
@@ -525,11 +566,23 @@ pub fn App() -> Element {
                 // Per-connector instance ID (persisted in config).
                 let mut conn_env = env_vars.clone();
                 conn_env.push(("INSTANCE_ID".into(), conn.instance_id.clone()));
-                tracing::info!(
-                    "Starting connector '{}' with INSTANCE_ID={}",
-                    conn.id,
-                    conn.instance_id
-                );
+
+                // Pass pre-approved OTT so the connector can register
+                // without admin approval on first launch.
+                if let Some(ott_json) = ott_tokens.get(&conn.id) {
+                    conn_env.push(("STRIKE48_REGISTRATION_TOKEN".into(), ott_json.clone()));
+                    tracing::info!(
+                        "Starting connector '{}' with pre-approved OTT and INSTANCE_ID={}",
+                        conn.id,
+                        conn.instance_id
+                    );
+                } else {
+                    tracing::info!(
+                        "Starting connector '{}' with INSTANCE_ID={} (no pre-approved OTT, will need admin approval)",
+                        conn.id,
+                        conn.instance_id
+                    );
+                }
                 match IpcConnectorRunner::start(&conn.id, &binary_path, &conn_env).await {
                     Ok(runner) => {
                         tracing::info!(

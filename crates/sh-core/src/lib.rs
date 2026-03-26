@@ -13,7 +13,10 @@ pub mod registry;
 pub mod transport;
 pub mod ws_relay;
 
-pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant_id};
+pub use auth::{
+    AuthManager, ConnectorAppInfo, PreApprovedOtt, create_connector_ott, fetch_connector_apps,
+    fetch_tenant_id,
+};
 pub use bridge::{BridgeState, SharedBridgeState, new_bridge_state};
 pub use config::{
     ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport, HubConfig,

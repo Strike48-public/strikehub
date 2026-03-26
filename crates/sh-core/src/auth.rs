@@ -691,3 +691,110 @@ fn parse_tenant_id(raw: &str) -> Option<String> {
     };
     details.pointer("/domain/id")?.as_str().map(String::from)
 }
+
+/// Pre-approved OTT token returned by `create_connector_ott`.
+#[derive(Debug, Clone)]
+pub struct PreApprovedOtt {
+    /// The one-time token string.
+    pub token: String,
+    /// Keycloak URL for token exchange.
+    pub keycloak_url: Option<String>,
+    /// Tenant ID.
+    pub tenant_id: Option<String>,
+}
+
+/// Create a pre-approved OTT for a connector via the `createPreApprovedToken`
+/// GraphQL mutation.  Returns `None` on any failure (caller should fall back
+/// to the post-approval flow).
+pub async fn create_connector_ott(
+    auth: &AuthManager,
+    connector_type: &str,
+    matrix_ws: Option<&crate::matrix_ws::MatrixWsClient>,
+) -> Option<PreApprovedOtt> {
+    let token = auth.token();
+    if token.is_empty() {
+        return None;
+    }
+
+    let query_json = serde_json::json!({
+        "query": "mutation CreatePreApprovedToken($connectorType: String) { createPreApprovedToken(connectorType: $connectorType) { token connectorType tenantId keycloakUrl } }",
+        "variables": { "connectorType": connector_type }
+    });
+
+    // Try WebSocket path first (accepts PKCE JWTs)
+    if let Some(ws) = matrix_ws {
+        let body = serde_json::to_vec(&query_json).unwrap_or_default();
+        match ws.query(&body).await {
+            Ok(resp_str) => {
+                if let Some(ott) = parse_pre_approved_token(&resp_str) {
+                    tracing::info!(
+                        "create_connector_ott: created OTT for '{}' via WS",
+                        connector_type
+                    );
+                    return Some(ott);
+                }
+                tracing::debug!("create_connector_ott: WS response had no token, trying HTTP");
+            }
+            Err(e) => {
+                tracing::debug!("create_connector_ott: WS query failed: {}, trying HTTP", e);
+            }
+        }
+    }
+
+    // HTTP fallback
+    let base = auth.matrix_url().trim_end_matches('/');
+    let url = format!("{}/api/v1alpha/graphql", base);
+
+    let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(tls_insecure)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&query_json)
+        .send()
+        .await
+        .ok()?;
+
+    let body = resp.text().await.ok()?;
+    let ott = parse_pre_approved_token(&body);
+    if ott.is_some() {
+        tracing::info!(
+            "create_connector_ott: created OTT for '{}' via HTTP",
+            connector_type
+        );
+    } else {
+        tracing::warn!(
+            "create_connector_ott: failed to create OTT for '{}': {}",
+            connector_type,
+            &body[..body.len().min(200)]
+        );
+    }
+    ott
+}
+
+fn parse_pre_approved_token(raw: &str) -> Option<PreApprovedOtt> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let data = v.pointer("/data/createPreApprovedToken")?;
+    let token = data.get("token")?.as_str()?.to_string();
+    let keycloak_url = data
+        .get("keycloakUrl")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let tenant_id = data
+        .get("tenantId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    Some(PreApprovedOtt {
+        token,
+        keycloak_url,
+        tenant_id,
+    })
+}
