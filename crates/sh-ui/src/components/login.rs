@@ -28,6 +28,7 @@ pub fn LoginOverlay(
             .unwrap_or_else(|| AuthManager::DEFAULT_API_URL.to_string())
     });
     let mut show_custom_url = use_signal(|| false);
+    let mut cache_msg = use_signal(|| Option::<String>::None);
 
     let btn_class = if signing_in {
         "login-btn disabled"
@@ -93,6 +94,25 @@ pub fn LoginOverlay(
                     },
                     "Custom URL sign in\u{2026}"
                 }
+            }
+
+            a {
+                class: "login-clear-cache-link",
+                href: "#",
+                onclick: move |e| {
+                    e.prevent_default();
+                    let url = custom_url.read().clone();
+                    let deleted = sh_core::ott::clear_credentials_for_url(&url);
+                    if deleted.is_empty() {
+                        cache_msg.set(Some(format!("No cached credentials for {}.", url)));
+                    } else {
+                        cache_msg.set(Some(format!("Cleared for {}.", url)));
+                    }
+                },
+                "Clear cached credentials"
+            }
+            if let Some(msg) = &*cache_msg.read() {
+                p { class: "login-cache-msg", "{msg}" }
             }
         }
     }
