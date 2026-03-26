@@ -453,20 +453,25 @@ async fn fetch_oidc_config(
 // HTML helpers
 // ---------------------------------------------------------------------------
 
-fn success_page(_matrix_base_url: &str) -> String {
-    r#"<!DOCTYPE html><html><head><meta charset="utf-8">
+fn success_page(matrix_base_url: &str) -> String {
+    let studio_url = format!("{}/studio/", matrix_base_url.trim_end_matches('/'));
+    format!(
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>StrikeHub - Signed In</title>
+<meta http-equiv="refresh" content="0;url={studio_url}">
 <style>
-  body { font-family: system-ui, sans-serif; display: flex; align-items: center;
+  body {{ font-family: system-ui, sans-serif; display: flex; align-items: center;
          justify-content: center; min-height: 100vh; margin: 0;
-         background: #1a1a1a; color: #e0e0e0; }
-  .container { text-align: center; max-width: 400px; padding: 2rem; }
-  h2 { margin-bottom: 1rem; font-weight: 600; color: #4ade80; }
-  .status { color: #888; font-size: 14px; }
+         background: #1a1a1a; color: #e0e0e0; }}
+  .container {{ text-align: center; max-width: 400px; padding: 2rem; }}
+  h2 {{ margin-bottom: 1rem; font-weight: 600; color: #4ade80; }}
+  .status {{ color: #888; font-size: 14px; }}
+  a {{ color: #4ade80; }}
 </style></head><body>
-<div class="container"><h2>Signed in!</h2><p class="status">You can close this tab and return to StrikeHub.</p></div>
+<script>window.location.replace('{studio_url}');</script>
+<div class="container"><h2>Signed in!</h2><p class="status">Redirecting to <a href="{studio_url}">Studio</a>…</p></div>
 </body></html>"#
-        .to_string()
+    )
 }
 
 /// Escape a string for safe embedding inside a JavaScript single-quoted

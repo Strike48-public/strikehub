@@ -75,6 +75,15 @@ pub fn PreflightOverlay(
         }
     });
 
+    // Auto-continue when all registration checks pass.
+    let mut auto_continued = use_signal(|| false);
+    if *step.read() == WizardStep::Registration && reg_all_passed && !*auto_continued.peek() {
+        auto_continued.set(true);
+        spawn(async move {
+            on_continue.call(());
+        });
+    }
+
     // Step indicator
     let step_num: u8 = if is_device_step { 1 } else { 2 };
 
