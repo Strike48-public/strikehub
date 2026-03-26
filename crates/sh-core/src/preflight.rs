@@ -267,14 +267,12 @@ pub async fn run_preflight(connector_id: &str) -> PreflightResult {
 }
 
 /// Run preflight checks for all given connector IDs (local prerequisites only).
+///
+/// Checks run in parallel across connectors.
 pub async fn run_preflight_all(connector_ids: &[String]) -> AggregatePreflightResult {
-    let mut results = Vec::new();
-    for id in connector_ids {
-        let result = run_preflight(id).await;
-        if !result.checks.is_empty() {
-            results.push(result);
-        }
-    }
+    let futures: Vec<_> = connector_ids.iter().map(|id| run_preflight(id)).collect();
+    let all = futures::future::join_all(futures).await;
+    let results = all.into_iter().filter(|r| !r.checks.is_empty()).collect();
     AggregatePreflightResult { results }
 }
 

@@ -1052,7 +1052,11 @@ pub fn App() -> Element {
     // checking their Matrix registration status.
     use_effect(move || {
         let signed_in = *is_signed_in.read();
-        if signed_in && !*preflight_dismissed.peek() && preflight_result.peek().is_none() {
+        if signed_in
+            && !*preflight_dismissed.peek()
+            && preflight_result.peek().is_none()
+            && !*preflight_checking.peek()
+        {
             let connector_ids: Vec<String> = {
                 let ids: Vec<String> = connectors
                     .read()
@@ -1081,8 +1085,33 @@ pub fn App() -> Element {
             );
             preflight_checking.set(true);
             spawn(async move {
-                // Give connectors time to start and register with Matrix.
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                // Poll every 1s (up to 10s) until all connectors are Online,
+                // then run preflight checks immediately.
+                let max_wait = std::time::Duration::from_secs(10);
+                let poll_interval = std::time::Duration::from_secs(1);
+                let start = std::time::Instant::now();
+                loop {
+                    let all_online = connectors
+                        .read()
+                        .iter()
+                        .filter(|c| !c.id.starts_with("ipc-"))
+                        .all(|c| c.status == sh_core::ConnectorStatus::Online);
+                    if all_online {
+                        tracing::info!(
+                            "[preflight] all connectors online after {:.1}s",
+                            start.elapsed().as_secs_f64()
+                        );
+                        break;
+                    }
+                    if start.elapsed() >= max_wait {
+                        tracing::warn!(
+                            "[preflight] timed out after {:.1}s waiting for connectors",
+                            start.elapsed().as_secs_f64()
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(poll_interval).await;
+                }
 
                 // Build runtime info from current connector state.
                 let runtimes: Vec<ConnectorRuntime> = connectors
