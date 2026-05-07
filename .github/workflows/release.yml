@@ -132,7 +132,7 @@ jobs:
         run: |
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 -D > $RUNNER_TEMP/certificate.p12
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
@@ -159,11 +159,24 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           ditto -c -k dist $RUNNER_TEMP/strikehub-binaries.zip
-          xcrun notarytool submit $RUNNER_TEMP/strikehub-binaries.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
+          for attempt in 1 2 3; do
+            echo "Notarization attempt $attempt..."
+            if xcrun notarytool submit $RUNNER_TEMP/strikehub-binaries.zip \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 30m; then
+              echo "Notarization succeeded."
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Notarization failed, retrying in 30s..."
+              sleep 30
+            else
+              echo "Notarization failed after $attempt attempts."
+              exit 1
+            fi
+          done
 
       - name: Package archive
         shell: bash
@@ -434,7 +447,7 @@ jobs:
         run: |
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 -D > $RUNNER_TEMP/certificate.p12
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
@@ -460,11 +473,24 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          xcrun notarytool submit StrikeHub-*.dmg \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
+          for attempt in 1 2 3; do
+            echo "Notarization attempt $attempt..."
+            if xcrun notarytool submit StrikeHub-*.dmg \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 30m; then
+              echo "Notarization succeeded."
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Notarization failed, retrying in 30s..."
+              sleep 30
+            else
+              echo "Notarization failed after $attempt attempts."
+              exit 1
+            fi
+          done
           xcrun stapler staple StrikeHub-*.dmg
 
       - name: Verify DMG
