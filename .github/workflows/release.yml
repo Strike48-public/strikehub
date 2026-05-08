@@ -159,23 +159,49 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           ditto -c -k dist $RUNNER_TEMP/strikehub-binaries.zip
+
+          # Submit once and capture the submission ID
+          SUBMIT_OUT=$(xcrun notarytool submit $RUNNER_TEMP/strikehub-binaries.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --output-format json)
+          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Submission ID: $SUBMISSION_ID"
+
+          # Poll the same submission — don't re-upload on timeout
           for attempt in 1 2 3; do
-            echo "Notarization attempt $attempt..."
-            if xcrun notarytool submit $RUNNER_TEMP/strikehub-binaries.zip \
+            echo "Waiting for notarization (attempt $attempt/3, 30m timeout)..."
+            if xcrun notarytool wait "$SUBMISSION_ID" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_APP_PASSWORD" \
               --team-id "$APPLE_TEAM_ID" \
-              --wait --timeout 30m; then
-              echo "Notarization succeeded."
-              break
+              --timeout 30m; then
+
+              STATUS=$(xcrun notarytool info "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_APP_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --output-format json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+
+              if [ "$STATUS" = "Accepted" ]; then
+                echo "Notarization succeeded."
+                break
+              else
+                echo "Notarization finished with status: $STATUS"
+                xcrun notarytool log "$SUBMISSION_ID" \
+                  --apple-id "$APPLE_ID" \
+                  --password "$APPLE_APP_PASSWORD" \
+                  --team-id "$APPLE_TEAM_ID" || true
+                exit 1
+              fi
             fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "Notarization failed, retrying in 30s..."
-              sleep 30
-            else
-              echo "Notarization failed after $attempt attempts."
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "Notarization still in progress after 3 wait cycles (90m total)."
               exit 1
             fi
+            echo "Timeout reached, continuing to wait..."
           done
 
       - name: Package archive
@@ -473,25 +499,53 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          DMG_FILE=$(ls StrikeHub-*.dmg)
+
+          # Submit once and capture the submission ID
+          SUBMIT_OUT=$(xcrun notarytool submit "$DMG_FILE" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --output-format json)
+          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Submission ID: $SUBMISSION_ID"
+
+          # Poll the same submission — don't re-upload on timeout
           for attempt in 1 2 3; do
-            echo "Notarization attempt $attempt..."
-            if xcrun notarytool submit StrikeHub-*.dmg \
+            echo "Waiting for notarization (attempt $attempt/3, 30m timeout)..."
+            if xcrun notarytool wait "$SUBMISSION_ID" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_APP_PASSWORD" \
               --team-id "$APPLE_TEAM_ID" \
-              --wait --timeout 30m; then
-              echo "Notarization succeeded."
-              break
+              --timeout 30m; then
+
+              STATUS=$(xcrun notarytool info "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_APP_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --output-format json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+
+              if [ "$STATUS" = "Accepted" ]; then
+                echo "Notarization succeeded."
+                break
+              else
+                echo "Notarization finished with status: $STATUS"
+                xcrun notarytool log "$SUBMISSION_ID" \
+                  --apple-id "$APPLE_ID" \
+                  --password "$APPLE_APP_PASSWORD" \
+                  --team-id "$APPLE_TEAM_ID" || true
+                exit 1
+              fi
             fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "Notarization failed, retrying in 30s..."
-              sleep 30
-            else
-              echo "Notarization failed after $attempt attempts."
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "Notarization still in progress after 3 wait cycles (90m total)."
               exit 1
             fi
+            echo "Timeout reached, continuing to wait..."
           done
-          xcrun stapler staple StrikeHub-*.dmg
+
+          xcrun stapler staple "$DMG_FILE"
 
       - name: Verify DMG
         run: |
