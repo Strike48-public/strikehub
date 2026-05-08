@@ -18,6 +18,7 @@ run-name: "Release ${{ github.ref_name }} (org-only)"
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -123,6 +124,59 @@ jobs:
           git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
           cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
           cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector dist/
+
+      - name: Import Apple certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
+
+      - name: Sign macOS binaries
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for bin in dist/*; do
+            codesign --force --options runtime \
+              --entitlements entitlements.plist \
+              --sign "Developer ID Application: Devo Inc. ($APPLE_TEAM_ID)" \
+              "$bin"
+          done
+
+      - name: Notarize macOS binaries
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k dist $RUNNER_TEMP/strikehub-binaries.zip
+          for attempt in 1 2 3; do
+            echo "Notarization attempt $attempt..."
+            if xcrun notarytool submit $RUNNER_TEMP/strikehub-binaries.zip \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 30m; then
+              echo "Notarization succeeded."
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Notarization failed, retrying in 30s..."
+              sleep 30
+            else
+              echo "Notarization failed after $attempt attempts."
+              exit 1
+            fi
+          done
 
       - name: Package archive
         shell: bash
@@ -260,6 +314,22 @@ jobs:
             *.AppImage.sha256
 
       # ── MSI steps ──
+      - name: Sign Windows binaries
+        if: matrix.installer == 'msi'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       - name: Build Windows MSI
         if: matrix.installer == 'msi'
         shell: pwsh
@@ -267,6 +337,22 @@ jobs:
           $Version = "${{ github.ref_name }}".TrimStart("v")
           .\scripts\build-msi.ps1 -Version $Version -Arch ${{ matrix.arch }}
           Move-Item "StrikeHub-$Version-${{ matrix.arch }}.msi" "dist\${{ matrix.artifact }}.msi"
+
+      - name: Sign MSI
+        if: matrix.installer == 'msi'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: dist
+          files-folder-filter: msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Clean dist for MSI
         if: matrix.installer == 'msi'
@@ -303,7 +389,7 @@ jobs:
             arch: x86_64
             target: x86_64-apple-darwin
             connector_suffix: darwin-x86_64
-          - os: macos-14
+          - os: macos-15
             arch: aarch64
             target: aarch64-apple-darwin
             connector_suffix: darwin-aarch64
@@ -354,14 +440,58 @@ jobs:
           cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target ${{ matrix.target }}
           cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector dist/
 
+      - name: Import Apple certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
+
       - name: Make build script executable
         run: chmod +x scripts/build-dmg.sh
 
       - name: Build DMG
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           TAG_VERSION="${{ github.ref_name }}"
           VERSION="${TAG_VERSION#v}"
           ./scripts/build-dmg.sh "$VERSION" "${{ matrix.arch }}"
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for attempt in 1 2 3; do
+            echo "Notarization attempt $attempt..."
+            if xcrun notarytool submit StrikeHub-*.dmg \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 30m; then
+              echo "Notarization succeeded."
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Notarization failed, retrying in 30s..."
+              sleep 30
+            else
+              echo "Notarization failed after $attempt attempts."
+              exit 1
+            fi
+          done
+          xcrun stapler staple StrikeHub-*.dmg
 
       - name: Verify DMG
         run: |

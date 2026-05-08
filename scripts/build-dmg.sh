@@ -124,9 +124,17 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# Ad-hoc sign the bundle so Gatekeeper sees a consistent signature
-# (the linker-applied signature on the binary doesn't cover bundle resources)
-codesign --force --deep --sign - "$APP_DIR"
+# Sign the bundle with Developer ID if available, otherwise ad-hoc
+if [ -n "$APPLE_TEAM_ID" ]; then
+    echo "Signing with Developer ID..."
+    codesign --force --deep --options runtime \
+        --entitlements entitlements.plist \
+        --sign "Developer ID Application: Devo Inc. ($APPLE_TEAM_ID)" \
+        "$APP_DIR"
+else
+    echo "No APPLE_TEAM_ID set, using ad-hoc signature..."
+    codesign --force --deep --sign - "$APP_DIR"
+fi
 
 # Create DMG staging area with app and Applications symlink
 mkdir -p "$STAGING_DIR"
