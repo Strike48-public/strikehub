@@ -11,8 +11,10 @@ on:
         required: true
         default: true
         type: boolean
+      # TEMPORARY: macOS signing disabled by default during Apple developer account suspension.
+      # TODO: Change default back to true once account is restored.
       macos_signing:
-        description: 'Enable macOS code signing & notarization (requires active Apple developer account)'
+        description: 'Enable macOS code signing & notarization (default: false due to account suspension)'
         required: true
         default: false
         type: boolean
@@ -72,7 +74,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: strikehub-darwin-x86_64
             binary_name: strikehub
@@ -95,6 +97,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Install protobuf
+        run: brew install protobuf
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
 
@@ -105,11 +110,6 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.binary_name }}
 
       # Build connectors from source at pinned git refs
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ github.token }}
-
       - name: Checkout and build pentest-agent
         shell: bash
         env:
@@ -131,7 +131,7 @@ jobs:
           cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector dist/
 
       - name: Import Apple certificate
-        if: inputs.macos_signing == true
+        if: inputs.macos_signing
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -148,7 +148,7 @@ jobs:
           security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
 
       - name: Sign macOS binaries
-        if: inputs.macos_signing == true
+        if: inputs.macos_signing
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
@@ -160,7 +160,7 @@ jobs:
           done
 
       - name: Notarize strikehub binary
-        if: inputs.macos_signing == true
+        if: inputs.macos_signing
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
@@ -418,7 +418,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          - os: macos-15-intel
             arch: x86_64
             target: x86_64-apple-darwin
             connector_suffix: darwin-x86_64
@@ -440,8 +440,8 @@ jobs:
         with:
           key: ${{ matrix.target }}-dmg
 
-      - name: Install rsvg-convert
-        run: brew install librsvg
+      - name: Install rsvg-convert and protobuf
+        run: brew install librsvg protobuf
 
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
@@ -450,11 +450,6 @@ jobs:
         run: mkdir -p dist
 
       # Build connectors from source at pinned git refs
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ github.token }}
-
       - name: Checkout and build pentest-agent
         env:
           GH_TOKEN: ${{ github.token }}
@@ -474,7 +469,7 @@ jobs:
           cp /tmp/kubestudio/target/${{ matrix.target }}/release/ks-connector dist/
 
       - name: Import Apple certificate
-        if: inputs.macos_signing == true
+        if: inputs.macos_signing
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -495,14 +490,14 @@ jobs:
 
       - name: Build DMG
         env:
-          APPLE_TEAM_ID: ${{ inputs.macos_signing == true && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_TEAM_ID: ${{ inputs.macos_signing && secrets.APPLE_TEAM_ID || '' }}
         run: |
           TAG_VERSION="${{ github.ref_name }}"
           VERSION="${TAG_VERSION#v}"
           ./scripts/build-dmg.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Notarize DMG
-        if: inputs.macos_signing == true
+        if: inputs.macos_signing
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
