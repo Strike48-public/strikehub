@@ -7,6 +7,11 @@ use tokio_tungstenite::tungstenite::Message as TsMessage;
 
 use crate::auth::AuthManager;
 
+/// Phoenix v2 join_ref used when joining the Absinthe control channel.
+/// All subsequent messages on that channel must include this same join_ref,
+/// otherwise Phoenix treats them as stale and silently drops them.
+const JOIN_REF: &str = "1";
+
 /// A query request sent from callers to the background WS task.
 struct WsCommand {
     /// The raw JSON body (GraphQL query/mutation).
@@ -116,7 +121,8 @@ impl MatrixWsClient {
         S::Error: std::fmt::Display,
     {
         // Phoenix v2 join: [join_ref, ref, topic, event, payload]
-        let join_msg = serde_json::json!(["1", "1", "__absinthe__:control", "phx_join", {}]);
+        let join_msg =
+            serde_json::json!([JOIN_REF, JOIN_REF, "__absinthe__:control", "phx_join", {}]);
         let join_text = serde_json::to_string(&join_msg)?;
         ws_sink
             .send(TsMessage::Text(join_text))
@@ -215,9 +221,12 @@ impl MatrixWsClient {
                         }
                     };
 
-                    // Build Absinthe doc message: [null, ref, topic, "doc", payload]
+                    // Build Absinthe doc message: [join_ref, ref, topic, "doc", payload]
+                    // join_ref MUST match the ref used during phx_join ("1"),
+                    // otherwise Phoenix v2 treats it as a stale message and
+                    // silently drops it.
                     let doc_msg = serde_json::json!([
-                        serde_json::Value::Null,
+                        JOIN_REF,
                         ref_id,
                         "__absinthe__:control",
                         "doc",
@@ -226,6 +235,7 @@ impl MatrixWsClient {
 
                     match serde_json::to_string(&doc_msg) {
                         Ok(text) => {
+                            tracing::debug!("MatrixWsClient: sending doc ref={}: {}", ref_id, text);
                             if let Err(e) = ws_sink.send(TsMessage::Text(text)).await {
                                 tracing::error!("MatrixWsClient: failed to send doc: {}", e);
                                 let _ = cmd.reply.send(Err(anyhow::anyhow!("WS send failed: {}", e)));
@@ -244,6 +254,7 @@ impl MatrixWsClient {
                 msg = ws_stream.next() => {
                     match msg {
                         Some(Ok(TsMessage::Text(text))) => {
+                            tracing::debug!("MatrixWsClient: raw WS frame: {}", text);
                             if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&text) {
                                 let event = arr.get(3).and_then(|v| v.as_str()).unwrap_or("");
                                 let msg_ref = arr.get(1).and_then(|v| v.as_str()).map(String::from);
