@@ -17,6 +17,22 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+/// Process-level storage for the OAuth callback server handle.
+///
+/// In server (liveview) mode, the Dioxus component is destroyed on browser
+/// refresh, which drops the coroutine's local `prev_oauth_server` variable.
+/// `JoinHandle::drop` detaches rather than cancels the task, so the old
+/// callback server keeps running and holds port 4000 indefinitely.
+///
+/// Storing the handle here ensures we can abort the old server when starting
+/// a new OAuth flow or signing out, regardless of component lifecycle.
+#[cfg(not(feature = "desktop"))]
+fn oauth_server_store() -> &'static tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> {
+    static STORE: std::sync::OnceLock<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+        std::sync::OnceLock::new();
+    STORE.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
 /// Forward environment variables to the connector child process.
 ///
 /// These are read directly from the StrikeHub process env so they're available
@@ -337,8 +353,100 @@ pub fn App() -> Element {
     // Start proxy + WsRelay on mount.
     // Auth is deferred — user clicks "Sign In" to complete the OAuth flow.
     // Precedence for the initial URL: persisted config > env var > compiled default.
+    //
+    // In server (liveview) mode, the Dioxus component is re-created on every
+    // browser refresh.  The bridge state (`OnceLock<SharedBridgeState>`) and
+    // the tokio tasks running the proxy / WsRelay survive across refreshes,
+    // so we check if an authenticated AuthManager already exists there and
+    // restore from it instead of creating a blank one every time.
     use_effect(move || {
         spawn(async move {
+            // ── Server mode: try to restore from bridge state ──────────
+            #[cfg(not(feature = "desktop"))]
+            {
+                if let Some(bridge) = crate::get_bridge_state() {
+                    let guard = bridge.read().await;
+                    if let Some(ref existing_auth) = guard.auth
+                        && existing_auth.is_authenticated()
+                    {
+                        let restored_auth = existing_auth.clone();
+                        let restored_proxy_port = guard.proxy_port;
+                        let restored_ws_port = guard.ws_bridge_port;
+                        drop(guard);
+
+                        tracing::info!(
+                            "[server-restore] Restoring authenticated session from previous browser connection"
+                        );
+
+                        proxy_port.set(restored_proxy_port);
+                        ws_bridge_port.set(restored_ws_port);
+                        auth_manager.set(Some(restored_auth.clone()));
+
+                        // Restore tenant/instance env and sign-in state.
+                        // TENANT_ID was set in process env during the
+                        // original sign-in and persists across refreshes.
+                        let api_url = restored_auth.matrix_url().to_string();
+                        hub_config.write().ensure_instance_ids(&api_url);
+                        let refreshed = hub_config.read().to_connectors(&api_url);
+                        connectors.set(refreshed);
+
+                        // Re-create the WS client for GraphQL queries.
+                        match MatrixWsClient::connect(restored_auth.clone()).await {
+                            Ok(ws) => {
+                                let ws = Arc::new(ws);
+                                tracing::info!("[server-restore] MatrixWsClient reconnected");
+                                ws_client_signal.set(Some(ws));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[server-restore] Failed to reconnect MatrixWsClient: {}",
+                                    e
+                                );
+                            }
+                        }
+
+                        // Mark connectors that are still alive on their
+                        // IPC sockets in the starting_lock so the
+                        // connector-start effect's existing guards skip
+                        // them instead of trying to re-spawn duplicates.
+                        {
+                            let current = connectors.read().clone();
+                            let lock = starting_lock.read().clone();
+                            let mut starting = lock.lock().await;
+                            for conn in &current {
+                                if conn.id.starts_with("ipc-") {
+                                    continue;
+                                }
+                                if check_health_ipc(&conn.ipc_addr()).await {
+                                    tracing::info!(
+                                        "[server-restore] '{}' still healthy, marking as started",
+                                        conn.id
+                                    );
+                                    starting.insert(conn.id.clone());
+                                    // Re-register socket in bridge state
+                                    // (sockets map may have been cleared
+                                    // if auth was recycled).
+                                    if let Some(bridge) = crate::get_bridge_state() {
+                                        bridge
+                                            .write()
+                                            .await
+                                            .sockets
+                                            .insert(conn.id.clone(), conn.ipc_addr());
+                                    }
+                                }
+                            }
+                        }
+
+                        is_signed_in.set(true);
+                        // Skip preflight on restore — it already ran on
+                        // the original sign-in.
+                        preflight_dismissed.set(true);
+                        tracing::info!("[server-restore] Session restored, connectors may resume");
+                        return;
+                    }
+                }
+            }
+
             let auth = {
                 let saved_url = hub_config
                     .read()
@@ -767,17 +875,62 @@ pub fn App() -> Element {
         });
     });
 
-    // Periodic health checks every 3 seconds
+    // Periodic health checks every 3 seconds.
+    //
+    // Also detects connectors that have been deregistered from the Matrix
+    // Gateway (e.g. removed via the gateway UI) and evicts them from the
+    // `runners` map so the connector-start effect can re-register them with
+    // a fresh OTT + rotated instance ID.
     use_effect(move || {
         spawn(async move {
             let mut info_fetched = std::collections::HashSet::<String>::new();
+            /// How many consecutive health-check ticks a managed runner must
+            /// fail before we consider the process dead and evict it.
+            const OFFLINE_EVICT_TICKS: u32 = 3; // 3 × 3 s = 9 s
+            /// How often (in ticks) we query the gateway for the registered
+            /// connector list to catch connectors that are still alive locally
+            /// but have been deregistered server-side.
+            const GATEWAY_CHECK_INTERVAL: u32 = 10; // 10 × 3 s = 30 s
+
+            let mut offline_counts: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
+            let mut tick: u32 = 0;
+
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                tick = tick.wrapping_add(1);
+
                 let current = connectors.read().clone();
                 if current.is_empty() {
                     continue;
                 }
+
+                // Periodically check the gateway for registered connectors so
+                // we can detect server-side removal even when the local process
+                // is still alive (health check passes but connector is useless).
+                let gateway_registered: Option<std::collections::HashSet<String>> =
+                    if tick.is_multiple_of(GATEWAY_CHECK_INTERVAL) {
+                        let ws = ws_client_signal.read().clone();
+                        if let Some(ref auth) = *auth_manager.peek() {
+                            Some(
+                                fetch_connector_apps(auth, ws.as_deref())
+                                    .await
+                                    .into_iter()
+                                    .filter_map(|app| app.connector_type)
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                 let mut updated = current.clone();
+                // Collect IDs of runners to evict after iterating (avoids
+                // borrowing conflicts with the runners signal).
+                let mut evict_ids: Vec<String> = Vec::new();
+
                 for conn in updated.iter_mut() {
                     // Health check over Unix socket — try managed runner first,
                     // fall back to direct socket check for custom connectors.
@@ -795,6 +948,46 @@ pub fn App() -> Element {
                     } else {
                         ConnectorStatus::Offline
                     };
+
+                    // ── Eviction check for managed runners ──────────────
+                    // Skip custom IPC connectors — they are externally managed.
+                    if !conn.id.starts_with("ipc-") && runners.read().contains_key(&conn.id) {
+                        let should_evict = if !healthy {
+                            // Process is dead/unresponsive — evict after
+                            // several consecutive failures to avoid flapping.
+                            let count = offline_counts
+                                .entry(conn.id.clone())
+                                .and_modify(|c| *c += 1)
+                                .or_insert(1);
+                            *count >= OFFLINE_EVICT_TICKS
+                        } else if let Some(ref registered) = gateway_registered {
+                            // Process is alive but check if the gateway still
+                            // knows about this connector type.
+                            let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
+                            !registered.contains(sdk_type)
+                        } else {
+                            false
+                        };
+
+                        if should_evict {
+                            tracing::warn!(
+                                "[health-check] evicting runner for '{}' (healthy={}, registered={:?})",
+                                conn.id,
+                                healthy,
+                                gateway_registered.as_ref().map(|r| {
+                                    let sdk = sh_core::ott::sdk_connector_type(&conn.id);
+                                    r.contains(sdk)
+                                })
+                            );
+                            evict_ids.push(conn.id.clone());
+                            offline_counts.remove(&conn.id);
+                        }
+                    }
+
+                    // Reset offline counter when healthy
+                    if healthy {
+                        offline_counts.remove(&conn.id);
+                    }
 
                     // Only fetch connector info once per connector
                     if conn.status == ConnectorStatus::Online && !info_fetched.contains(&conn.id) {
@@ -821,6 +1014,62 @@ pub fn App() -> Element {
                         info_fetched.remove(&conn.id);
                     }
                 }
+
+                // Stop evicted runners and remove from the map so the
+                // connector-start effect can re-register them.
+                //
+                // IMPORTANT: the runners write-guard must be dropped BEFORE
+                // any `.await` (runner.stop()) or signal mutation that could
+                // re-trigger the connector-start effect.  Holding a signal
+                // write across an await point lets Dioxus schedule the effect
+                // while the borrow is still active, which panics inside
+                // generational-box.
+                if !evict_ids.is_empty() {
+                    let mut removed_runners: Vec<(String, IpcConnectorRunner)> = Vec::new();
+                    {
+                        let mut runners_guard = runners.write();
+                        for id in &evict_ids {
+                            if let Some(runner) = runners_guard.remove(id) {
+                                removed_runners.push((id.clone(), runner));
+                            }
+                        }
+                    } // runners write-guard dropped here
+
+                    // Stop the removed processes (async-safe, guard released).
+                    for (id, mut runner) in removed_runners {
+                        if let Err(e) = runner.stop().await {
+                            tracing::warn!(
+                                "[health-check] failed to stop evicted runner '{}': {}",
+                                id,
+                                e
+                            );
+                        }
+                    }
+
+                    for id in &evict_ids {
+                        // Clear stale credentials so the startup effect creates
+                        // a fresh OTT instead of trying private_key_jwt with a
+                        // credential the server no longer recognises.
+                        if let Some(conn) = updated.iter().find(|c| c.id == *id) {
+                            sh_core::ott::clear_saved_credentials(&conn.id, &conn.instance_id);
+                        }
+                        // Rotate instance ID — the gateway permanently rejects
+                        // removed instance IDs via its DeregisteredStore.
+                        if let Some(ref auth) = *auth_manager.peek() {
+                            let studio = auth.matrix_url().to_string();
+                            hub_config.write().rotate_instance_id(id, &studio);
+                        }
+                    }
+
+                    // Clear the starting lock so the startup effect does
+                    // not skip these connectors.
+                    let lock = starting_lock.read().clone();
+                    let mut starting = lock.lock().await;
+                    for id in &evict_ids {
+                        starting.remove(id);
+                    }
+                }
+
                 connectors.set(updated);
             }
         });
@@ -841,8 +1090,32 @@ pub fn App() -> Element {
     let sign_in_coro = use_coroutine(move |mut rx: dioxus::prelude::UnboundedReceiver<String>| {
         async move {
             use futures_util::StreamExt;
+            // Handle for the OAuth callback HTTP server from a previous
+            // sign-in.  Aborted before starting a new flow so port 4000
+            // can be reused (otherwise the new server falls back to a
+            // random port that Keycloak rejects).
+            //
+            // In server mode, also abort any handle stored in the
+            // process-level static, which survives component destruction
+            // on browser refresh (JoinHandle::drop detaches, not aborts).
+            let mut prev_oauth_server: Option<tokio::task::JoinHandle<()>> = None;
+
             while let Some(raw_url) = rx.next().await {
                 sign_in_error.set(None);
+
+                // Shut down the previous OAuth callback server (if any) so
+                // port 4000 is free for the new sign-in flow.
+                if let Some(handle) = prev_oauth_server.take() {
+                    handle.abort();
+                }
+                #[cfg(not(feature = "desktop"))]
+                {
+                    if let Some(handle) = oauth_server_store().lock().await.take() {
+                        handle.abort();
+                    }
+                    // Give the OS a moment to release the socket.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
 
                 // Empty → normal sign-in using the already-initialised AuthManager.
                 // Non-empty → user provided a custom URL via the login overlay.
@@ -1026,7 +1299,8 @@ pub fn App() -> Element {
                     }
                 }
 
-                let oauth_result = match oauth_handle.await {
+                #[allow(unused_mut)]
+                let mut oauth_result = match oauth_handle.await {
                     Ok(Ok(result)) => result,
                     Ok(Err(e)) => {
                         let msg = format!("Sign-in failed: {}", e);
@@ -1044,6 +1318,19 @@ pub fn App() -> Element {
                     }
                 };
 
+                // Stash the OAuth callback server handle so we can abort it
+                // before the next sign-in attempt (frees port 4000).
+                // In server mode, store in the process-level static so it
+                // survives component destruction on browser refresh.
+                #[cfg(not(feature = "desktop"))]
+                {
+                    *oauth_server_store().lock().await = oauth_result.server_handle.take();
+                }
+                #[cfg(feature = "desktop")]
+                {
+                    prev_oauth_server = oauth_result.server_handle;
+                }
+
                 auth.set_token(
                     oauth_result.access_token,
                     oauth_result.refresh_token,
@@ -1051,6 +1338,13 @@ pub fn App() -> Element {
                     oauth_result.client_id,
                 );
                 auth.spawn_refresh_loop();
+
+                // Re-set bridge state auth so session restore works after
+                // sign-out → sign-in (sign-out sets bridge auth to None).
+                #[cfg(not(feature = "desktop"))]
+                if let Some(bridge) = crate::get_bridge_state() {
+                    bridge.write().await.auth = Some(auth.clone());
+                }
                 // Bring StrikeHub to the foreground so the user doesn't have to
                 // manually switch back from the browser after OAuth.
                 #[cfg(feature = "desktop")]
@@ -1391,9 +1685,19 @@ pub fn App() -> Element {
                 tracing::warn!("Failed to clear webview browsing data: {}", e);
             }
         }
-        // Stop running connectors, clear bridge sockets, and detach the WS
-        // client so the next sign-in starts with a clean slate.
+        // Stop running connectors, clear bridge sockets, abort the OAuth
+        // callback server, and detach the WS client so the next sign-in
+        // starts with a clean slate.
         spawn(async move {
+            // Abort the OAuth callback server so port 4000 is freed for
+            // the next sign-in flow.
+            #[cfg(not(feature = "desktop"))]
+            {
+                if let Some(handle) = oauth_server_store().lock().await.take() {
+                    handle.abort();
+                }
+            }
+
             // Gracefully stop all running connector child processes.
             let mut stopped = runners.write();
             for (id, mut runner) in stopped.drain() {
@@ -1403,14 +1707,24 @@ pub fn App() -> Element {
             }
             drop(stopped);
 
-            // Clear stale IPC socket registrations.
+            // Clear stale IPC socket registrations and mark auth as
+            // unauthenticated in bridge state so a browser refresh after
+            // sign-out doesn't restore the stale session.
             if let Some(bridge) = crate::get_bridge_state() {
-                bridge.write().await.sockets.clear();
+                let mut guard = bridge.write().await;
+                guard.sockets.clear();
+                guard.auth = None;
             }
 
             if let Some(proxy) = proxy_handle.peek().as_ref() {
                 proxy.clear_matrix_ws().await;
             }
+
+            // Clear the starting lock so re-sign-in can start fresh
+            // connectors (adopted entries from the previous session would
+            // otherwise block spawning).
+            let lock = starting_lock.read().clone();
+            lock.lock().await.clear();
         });
         let next = *auth_version.peek() + 1;
         auth_version.set(next);

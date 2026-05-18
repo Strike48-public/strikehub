@@ -14,6 +14,11 @@ pub struct OAuthResult {
     pub token_endpoint: String,
     /// Keycloak client_id (for token refresh).
     pub client_id: String,
+    /// Handle for the OAuth callback HTTP server.  In server mode the server
+    /// is kept alive so the port stays bound (kubectl port-forward drops all
+    /// ports when any forwarded port closes).  The caller should abort this
+    /// handle before starting a new sign-in flow so the port can be reused.
+    pub server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Start the system-browser OAuth flow via Matrix + Keycloak PKCE.
@@ -199,21 +204,30 @@ pub async fn start_oauth_flow_with(
 
     // In server mode, keep the callback server alive so the port stays open
     // (kubectl port-forward drops all ports if any forwarded port closes).
+    // The handle is returned to the caller so it can abort the server before
+    // starting a new sign-in flow (e.g. on page refresh).
     // In desktop mode, shut it down immediately — it's not needed.
     if !is_server_mode {
         server_handle.abort();
     }
 
     match result {
-        Ok(Some(oauth_result)) => {
+        Ok(Some(mut oauth_result)) => {
             tracing::info!("OAuth flow completed successfully");
+            if is_server_mode {
+                oauth_result.server_handle = Some(server_handle);
+            }
             Ok(oauth_result)
         }
         Ok(None) => {
+            server_handle.abort();
             tracing::error!("OAuth callback channel closed unexpectedly");
             anyhow::bail!("OAuth callback channel closed unexpectedly")
         }
-        Err(_) => anyhow::bail!("OAuth flow timed out after 5 minutes"),
+        Err(_) => {
+            server_handle.abort();
+            anyhow::bail!("OAuth flow timed out after 5 minutes")
+        }
     }
 }
 
@@ -343,6 +357,7 @@ async fn handle_oauth_callback(
         refresh_token,
         token_endpoint: state.token_endpoint.clone(),
         client_id: state.client_id.clone(),
+        server_handle: None, // set by the caller after recv
     }) {
         Ok(()) => tracing::info!("OAuth result sent to receiver"),
         Err(mpsc::error::TrySendError::Full(_)) => {
