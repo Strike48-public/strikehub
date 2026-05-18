@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bridge;
 pub mod config;
+pub mod connector_fetch;
 pub mod embedded;
 pub mod error;
 pub mod ipc;
@@ -20,6 +21,7 @@ pub use config::{
     ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport, HubConfig,
     generate_instance_id, slug_from_path, url_slug,
 };
+pub use connector_fetch::{EnsureResult, bin_cache_dir, ensure_all_connector_binaries};
 pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
