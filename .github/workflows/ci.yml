@@ -76,7 +76,7 @@ jobs:
 
   build-dmg:
     name: Build DMG (${{ matrix.arch }})
-    if: github.repository_owner == 'Strike48-public'
+    if: github.repository_owner == 'Strike48-public' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -159,7 +159,7 @@ jobs:
 
   build-installers:
     name: Build ${{ matrix.name }}
-    if: github.repository_owner == 'Strike48-public'
+    if: github.repository_owner == 'Strike48-public' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
