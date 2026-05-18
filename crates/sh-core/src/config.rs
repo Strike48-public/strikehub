@@ -255,6 +255,24 @@ impl HubConfig {
         dirty
     }
 
+    /// Generate a fresh instance ID for a specific connector, replacing the
+    /// old one. This is used when the server has "removed" the connector and
+    /// refuses to accept the old instance ID.  Returns the new instance ID.
+    pub fn rotate_instance_id(&mut self, connector_id: &str, studio_url: &str) -> Option<String> {
+        let slug = url_slug(studio_url);
+        let entry = self.connectors.get_mut(connector_id)?;
+        let new_id = generate_instance_id(connector_id, studio_url);
+        tracing::info!(
+            "[config] rotating instance ID for '{}': {} → {}",
+            connector_id,
+            entry.instance_ids.get(&slug).unwrap_or(&String::new()),
+            new_id
+        );
+        entry.instance_ids.insert(slug, new_id.clone());
+        let _ = self.save();
+        Some(new_id)
+    }
+
     pub fn to_connectors(&self, studio_url: &str) -> Vec<ConnectorConfig> {
         let slug = url_slug(studio_url);
         self.connectors

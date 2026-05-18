@@ -159,6 +159,33 @@ pub fn clear_credentials_for_url(studio_url: &str) -> Vec<String> {
     deleted
 }
 
+/// Delete saved credentials and keys for a specific connector instance.
+///
+/// This removes both credential and key files from `~/.strike48` and `~/.matrix`
+/// directories matching the connector's SDK type and instance ID.
+pub fn clear_saved_credentials(strikehub_id: &str, instance_id: &str) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
+
+    let sdk_type = sdk_connector_type(strikehub_id);
+    let filename = format!("{}_{}.json", sdk_type, instance_id);
+
+    for base in &[".strike48", ".matrix"] {
+        for subdir in &["credentials", "keys"] {
+            let path = home.join(base).join(subdir).join(&filename);
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!("Failed to remove {}: {}", path.display(), e);
+                } else {
+                    tracing::info!("Cleared stale credential: {}", path.display());
+                }
+            }
+        }
+    }
+}
+
 /// Check whether a credential JSON file contains a `kid` (key ID) field.
 ///
 /// The `kid` is required for Keycloak to locate the public key during

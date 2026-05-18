@@ -8,10 +8,10 @@ use dioxus::prelude::*;
 #[cfg(not(feature = "desktop"))]
 use sh_core::js_string_escape;
 use sh_core::{
-    AggregatePreflightResult, AuthManager, ConnectorConfig, ConnectorProxy, ConnectorRuntime,
-    ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner, MatrixWsClient, WsRelay,
-    builtin_manifests, detect_transport, fetch_connector_apps, fetch_tenant_id, run_preflight_all,
-    run_preflight_full, start_oauth_flow_with,
+    AggregatePreflightResult, AuthManager, CheckStatus, ConnectorConfig, ConnectorProxy,
+    ConnectorRuntime, ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner,
+    MatrixWsClient, WsRelay, builtin_manifests, detect_transport, fetch_connector_apps,
+    fetch_tenant_id, run_preflight_all, run_preflight_full, start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -417,6 +417,39 @@ pub fn App() -> Element {
         });
     });
 
+    // Background connector binary update check (desktop only).
+    // Delays 30 seconds after mount, then checks for newer releases.
+    // Downloads are for next restart — never interrupts running connectors.
+    #[cfg(feature = "desktop")]
+    use_effect(move || {
+        spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tracing::info!("[connector-update] background update check starting");
+            let manifests = sh_core::builtin_manifests();
+            let results = sh_core::ensure_all_connector_binaries(&manifests).await;
+            for (id, result) in &results {
+                match result {
+                    sh_core::EnsureResult::AlreadyCurrent(_) => {
+                        tracing::debug!("[connector-update] '{}': up-to-date", id);
+                    }
+                    sh_core::EnsureResult::Downloaded(p) => {
+                        tracing::info!(
+                            "[connector-update] '{}': updated to {} (will use on next restart)",
+                            id,
+                            p.display()
+                        );
+                    }
+                    sh_core::EnsureResult::FallbackStale(_, reason) => {
+                        tracing::debug!("[connector-update] '{}': stale ({})", id, reason);
+                    }
+                    sh_core::EnsureResult::Unavailable(reason) => {
+                        tracing::debug!("[connector-update] '{}': unavailable ({})", id, reason);
+                    }
+                }
+            }
+        });
+    });
+
     // Auto-start builtin connectors that were enabled from a previous session.
     // Register custom IPC connectors in bridge state (they're externally managed).
     // Uses read() so the effect re-runs when connectors are populated (e.g. after
@@ -451,6 +484,55 @@ pub fn App() -> Element {
             );
         }
         spawn(async move {
+            // Fetch connector binaries before starting connectors (desktop
+            // only).  Uses a static OnceCell so the first caller runs the
+            // download and concurrent re-fires of this effect *wait* for it
+            // to finish rather than racing ahead to spawn.
+            #[cfg(feature = "desktop")]
+            {
+                static FETCH_DONE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+                FETCH_DONE
+                    .get_or_init(|| async {
+                        tracing::info!(
+                            "[connector-start] fetching connector binaries before start"
+                        );
+                        let manifests = sh_core::builtin_manifests();
+                        let results = sh_core::ensure_all_connector_binaries(&manifests).await;
+                        for (id, result) in &results {
+                            match result {
+                                sh_core::EnsureResult::Downloaded(p) => {
+                                    tracing::info!(
+                                        "[connector-start] '{}': downloaded to {}",
+                                        id,
+                                        p.display()
+                                    );
+                                }
+                                sh_core::EnsureResult::AlreadyCurrent(_) => {
+                                    tracing::debug!(
+                                        "[connector-start] '{}': already up-to-date",
+                                        id
+                                    );
+                                }
+                                sh_core::EnsureResult::FallbackStale(_, reason) => {
+                                    tracing::warn!(
+                                        "[connector-start] '{}': using stale binary ({})",
+                                        id,
+                                        reason
+                                    );
+                                }
+                                sh_core::EnsureResult::Unavailable(reason) => {
+                                    tracing::warn!(
+                                        "[connector-start] '{}': binary unavailable ({})",
+                                        id,
+                                        reason
+                                    );
+                                }
+                            }
+                        }
+                    })
+                    .await;
+            }
+
             let mut env_vars = matrix_env_vars();
             // Override STRIKE48_API_URL so the connector's chat panel routes
             // API calls through our proxy (which proxies /api/v1alpha
@@ -477,6 +559,10 @@ pub fn App() -> Element {
                     env_vars.push(("MATRIX_AUTH_TOKEN".into(), token));
                 }
             }
+
+            // Lazily fetched set of registered connector types from Matrix.
+            // Only queried once if any connector needs a stale-credential check.
+            let mut registered_types: Option<std::collections::HashSet<String>> = None;
 
             for conn in &current {
                 // Custom IPC connectors are externally managed — just register
@@ -529,9 +615,7 @@ pub fn App() -> Element {
                     continue;
                 };
                 let binary_path = std::path::PathBuf::from(binary);
-                // Per-connector instance ID (persisted in config).
                 let mut conn_env = env_vars.clone();
-                conn_env.push(("INSTANCE_ID".into(), conn.instance_id.clone()));
 
                 // Ensure connectors inherit the TLS-insecure flag even when
                 // it wasn't set as an env var on the StrikeHub process itself.
@@ -542,11 +626,60 @@ pub fn App() -> Element {
                     conn_env.push(("MATRIX_TLS_INSECURE".into(), "true".into()));
                 }
 
+                // If this connector has saved credentials but is NOT
+                // registered on Matrix (e.g. the app was removed/recreated
+                // server-side), delete the stale credentials and rotate the
+                // instance ID so the server treats it as a brand-new connector
+                // (removed instances are permanently rejected by the gateway).
+                // The registered_types set is fetched lazily (once).
+                let mut conn_instance_id = conn.instance_id.clone();
+                if sh_core::ott::has_saved_credentials(&conn.id, &conn_instance_id) {
+                    if registered_types.is_none() {
+                        let ws = ws_client_signal.read().clone();
+                        registered_types = Some(if let Some(ref auth) = *auth_manager.peek() {
+                            fetch_connector_apps(auth, ws.as_deref())
+                                .await
+                                .into_iter()
+                                .filter_map(|app| app.connector_type)
+                                .collect()
+                        } else {
+                            std::collections::HashSet::new()
+                        });
+                    }
+                    let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
+                    if !registered_types.as_ref().unwrap().contains(sdk_type) {
+                        tracing::warn!(
+                            "[connector-start] '{}' has saved credentials but is not registered on Matrix — clearing stale credentials and rotating instance ID",
+                            conn.id
+                        );
+                        sh_core::ott::clear_saved_credentials(&conn.id, &conn_instance_id);
+
+                        // Rotate instance ID so the gateway treats this as a
+                        // new connector (removed instances are blocked).
+                        if let Some(ref auth) = *auth_manager.peek() {
+                            let studio = auth.matrix_url().to_string();
+                            if let Some(new_id) =
+                                hub_config.write().rotate_instance_id(&conn.id, &studio)
+                            {
+                                conn_instance_id = new_id;
+                            }
+                        }
+                    }
+                }
+
+                // Set the (possibly rotated) instance ID for the connector.
+                conn_env.push(("INSTANCE_ID".into(), conn_instance_id.clone()));
+
                 // Create a per-connector OTT when no saved credentials exist.
                 // Each OTT is single-use, so every connector that needs to
                 // register gets its own token.  Connectors with valid saved
                 // credentials will authenticate via private_key_jwt instead.
-                if !sh_core::ott::has_saved_credentials(&conn.id, &conn.instance_id)
+                //
+                // Previously deregistered connectors also get an OTT here
+                // because the instance ID was rotated above — the server
+                // treats the rotated ID as a brand-new connector, so the
+                // DeregisteredStore block on the old ID doesn't apply.
+                if !sh_core::ott::has_saved_credentials(&conn.id, &conn_instance_id)
                     && let Some(ref auth) = *auth_manager.peek()
                 {
                     let jwt = auth.token();
@@ -580,7 +713,7 @@ pub fn App() -> Element {
                 tracing::info!(
                     "Starting connector '{}' with INSTANCE_ID={}",
                     conn.id,
-                    conn.instance_id
+                    conn_instance_id
                 );
                 match IpcConnectorRunner::start(&conn.id, &binary_path, &conn_env).await {
                     Ok(runner) => {
@@ -625,10 +758,9 @@ pub fn App() -> Element {
                     }
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
-
-                        // Remove from starting set on failure
-                        let mut starting = lock.lock().await;
-                        starting.remove(&conn.id);
+                        // Keep the connector in the starting set so subsequent
+                        // re-fires of this effect do not re-attempt the spawn
+                        // (which would create new OTTs on every retry).
                     }
                 }
             }
@@ -1126,11 +1258,55 @@ pub fn App() -> Element {
                     .collect();
 
                 let ws = ws_client_signal.read().clone();
-                let result = if let Some(ref auth) = auth {
+                let mut result = if let Some(ref auth) = auth {
                     run_preflight_full(&connector_ids, auth, ws.as_deref(), &runtimes).await
                 } else {
                     run_preflight_all(&connector_ids).await
                 };
+
+                // If any registration checks failed, retry — connectors may
+                // still be registering via OTT.
+                let max_registration_retries = 5;
+                let registration_poll = std::time::Duration::from_secs(3);
+
+                for attempt in 1..=max_registration_retries {
+                    let any_reg_failed = result.results.iter().any(|r| {
+                        r.connector_id.starts_with("reg-")
+                            && r.checks.iter().any(|c| {
+                                c.name == "Registration" && c.status != CheckStatus::Passed
+                            })
+                    });
+                    if !any_reg_failed {
+                        break;
+                    }
+                    tracing::info!(
+                        "[preflight] registration incomplete, retry {}/{}",
+                        attempt,
+                        max_registration_retries
+                    );
+                    tokio::time::sleep(registration_poll).await;
+
+                    // Refresh runtime info — connectors may have come Online
+                    // since the initial snapshot.
+                    let runtimes: Vec<ConnectorRuntime> = connectors
+                        .read()
+                        .iter()
+                        .filter(|c| !c.id.starts_with("ipc-"))
+                        .map(|c| ConnectorRuntime {
+                            id: c.id.clone(),
+                            name: c.display_name.clone(),
+                            status: c.status,
+                        })
+                        .collect();
+
+                    let ws = ws_client_signal.read().clone();
+                    result = if let Some(ref auth) = auth {
+                        run_preflight_full(&connector_ids, auth, ws.as_deref(), &runtimes).await
+                    } else {
+                        run_preflight_all(&connector_ids).await
+                    };
+                }
+
                 preflight_result.set(Some(result));
                 preflight_checking.set(false);
 

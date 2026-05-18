@@ -14,13 +14,66 @@
 //! - `KUBESTUDIO_AI` — Enable AI features in connectors
 //! - `KUBESTUDIO_MODE` — Permission mode (read/write)
 
-use axum::{Router, response::Redirect, routing::get};
+use axum::{
+    Router,
+    extract::{Path, Query},
+    response::{IntoResponse, Redirect, Response},
+    routing::get,
+};
 use dioxus_liveview::LiveviewRouter as _;
+use http::StatusCode;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::signal;
 
 async fn health() -> &'static str {
     "OK"
+}
+
+/// Proxy connector content through the IPC bridge so the browser can load
+/// connector liveview pages over plain HTTP instead of the desktop-only
+/// `dioxus://` scheme.
+///
+/// Matches `/connector/{*path}` where path is e.g. `kubestudio/liveview`.
+async fn handle_connector(
+    Path(path): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // path = "kubestudio/liveview" or "kubestudio/assets/foo.js" etc.
+    // Preserve query string so bridge tokens (__st, etc.) are forwarded.
+    let uri = if query.is_empty() {
+        format!("connector://{}", path)
+    } else {
+        let qs: String = query
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&");
+        format!("connector://{}?{}", path, qs)
+    };
+
+    let Some(state) = sh_ui::get_bridge_state() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bridge state not initialised",
+        )
+            .into_response();
+    };
+
+    let (status, headers, body) = sh_core::bridge::handle_bridge_request(state, &uri).await;
+
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut resp = Response::builder().status(status);
+    for (k, v) in &headers {
+        resp = resp.header(k.as_str(), v.as_str());
+    }
+    resp.body(body.into()).unwrap_or_else(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to build response",
+        )
+            .into_response()
+    })
 }
 
 #[tokio::main]
@@ -31,6 +84,32 @@ async fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    // Fetch/update connector binaries before starting the server.
+    // This blocks startup to ensure binaries are available for IPC connectors.
+    let manifests = sh_core::builtin_manifests();
+    let fetch_results = sh_core::ensure_all_connector_binaries(&manifests).await;
+    for (id, result) in &fetch_results {
+        match result {
+            sh_core::EnsureResult::AlreadyCurrent(p) => {
+                tracing::info!("connector '{}': binary up-to-date at {}", id, p.display());
+            }
+            sh_core::EnsureResult::Downloaded(p) => {
+                tracing::info!("connector '{}': downloaded to {}", id, p.display());
+            }
+            sh_core::EnsureResult::FallbackStale(p, reason) => {
+                tracing::warn!(
+                    "connector '{}': using stale binary at {} ({})",
+                    id,
+                    p.display(),
+                    reason
+                );
+            }
+            sh_core::EnsureResult::Unavailable(reason) => {
+                tracing::warn!("connector '{}': binary unavailable ({})", id, reason);
+            }
+        }
+    }
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -46,6 +125,7 @@ async fn main() {
     sh_ui::set_bridge_state(bridge_state);
 
     let router = Router::new()
+        .route("/connector/*path", get(handle_connector))
         .with_app("/", sh_ui::App)
         .route("/", get(|| async { Redirect::temporary("/liveview") }))
         .route("/health", get(health));
