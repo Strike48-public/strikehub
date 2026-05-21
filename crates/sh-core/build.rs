@@ -31,4 +31,22 @@ fn main() {
         "cargo:rustc-env=STRIKEHUB_DEFAULT_STUDIO_URL={}",
         default_url
     );
+
+    // Emit default allowed sources for the connector allowlist.
+    // The value is a comma-separated string of org/repo patterns.
+    let allowed_sources: Vec<String> = table
+        .get("connectors")
+        .and_then(|v| v.get("allowed_sources"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    println!(
+        "cargo:rustc-env=STRIKEHUB_DEFAULT_ALLOWED_SOURCES={}",
+        allowed_sources.join(",")
+    );
 }

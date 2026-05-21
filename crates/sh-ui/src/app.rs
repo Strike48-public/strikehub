@@ -10,8 +10,9 @@ use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, CheckStatus, ConnectorConfig, ConnectorProxy,
     ConnectorRuntime, ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner,
-    MatrixWsClient, WsRelay, builtin_manifests, detect_transport, fetch_connector_apps,
-    fetch_tenant_id, run_preflight_all, run_preflight_full, start_oauth_flow_with,
+    MatrixWsClient, WsRelay, all_manifests, detect_transport, fetch_connector_apps,
+    fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full,
+    start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -139,7 +140,7 @@ fn sync_config(
     let enabled: Vec<_> = setup_connectors
         .iter()
         .filter(|c| c.enabled)
-        .map(|c| c.manifest.id)
+        .map(|c| c.manifest.id.as_ref())
         .collect();
     tracing::info!(
         "[sync_config] called: setup_connectors={} (enabled: {:?}), custom_connectors={}, existing_connectors={}",
@@ -166,7 +167,7 @@ fn sync_config(
                 c.manifest.id.to_string(),
                 sh_core::ConnectorEntry {
                     display_name: Some(c.manifest.name.to_string()),
-                    binary: c.manifest.binary_hint.map(|s| s.to_string()),
+                    binary: c.manifest.binary_hint.as_deref().map(|s| s.to_string()),
                     port: c.manifest.default_port,
                     icon: c.manifest.icon.to_string(),
                     auto_start: true,
@@ -227,10 +228,19 @@ pub fn App() -> Element {
             connectors: Default::default(),
             instance_ids: Default::default(),
             studio_url: None,
+            allowlist: Default::default(),
+            dynamic_connectors: Vec::new(),
         });
+        // Initialise the global allowlist from config (or compile-time defaults).
+        let config_sources = if cfg.allowlist.sources.is_empty() {
+            None
+        } else {
+            Some(cfg.allowlist.sources.as_slice())
+        };
+        init_allowlist(config_sources);
         // Merge manifest defaults so that saved configs pick up transport
         // and binary changes when the code is upgraded.
-        cfg.apply_manifest_defaults(&builtin_manifests());
+        cfg.apply_manifest_defaults(&all_manifests(&cfg));
         // Instance IDs are generated lazily after the studio URL is known
         // (in the sign-in effect). Don't call ensure_instance_ids here.
         cfg
@@ -319,13 +329,13 @@ pub fn App() -> Element {
     let starting_lock: Signal<Arc<tokio::sync::Mutex<HashSet<String>>>> =
         use_signal(|| Arc::new(tokio::sync::Mutex::new(HashSet::new())));
 
-    // Setup state: builtin connectors with enable toggles
+    // Setup state: all connectors (builtin + dynamic) with enable toggles
     let setup_connectors: Signal<Vec<SetupConnector>> = use_signal(move || {
         let cfg = hub_config.read();
-        builtin_manifests()
+        all_manifests(&cfg)
             .into_iter()
             .map(|m| {
-                let enabled = cfg.connectors.get(m.id).map(|e| e.enabled).unwrap_or(true);
+                let enabled = cfg.connectors.get(m.id.as_ref()).map(|e| e.enabled).unwrap_or(true);
                 SetupConnector {
                     manifest: m.clone(),
                     enabled,
@@ -533,7 +543,7 @@ pub fn App() -> Element {
         spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             tracing::info!("[connector-update] background update check starting");
-            let manifests = sh_core::builtin_manifests();
+            let manifests = sh_core::all_manifests(&hub_config.read());
             let results = sh_core::ensure_all_connector_binaries(&manifests).await;
             for (id, result) in &results {
                 match result {
@@ -604,7 +614,7 @@ pub fn App() -> Element {
                         tracing::info!(
                             "[connector-start] fetching connector binaries before start"
                         );
-                        let manifests = sh_core::builtin_manifests();
+                        let manifests = sh_core::all_manifests(&hub_config.read());
                         let results = sh_core::ensure_all_connector_binaries(&manifests).await;
                         for (id, result) in &results {
                             match result {
@@ -1492,9 +1502,9 @@ pub fn App() -> Element {
                     .collect();
                 if ids.is_empty() {
                     tracing::info!(
-                        "[preflight] connectors signal is empty, falling back to builtin_manifests"
+                        "[preflight] connectors signal is empty, falling back to all_manifests"
                     );
-                    builtin_manifests()
+                    all_manifests(&hub_config.read())
                         .iter()
                         .map(|m| m.id.to_string())
                         .collect()
@@ -1955,7 +1965,7 @@ pub fn App() -> Element {
                         on_recheck: move |_: ()| {
                             preflight_checking.set(true);
                             let auth = auth_manager.read().clone();
-                            let ids: Vec<String> = builtin_manifests()
+                            let ids: Vec<String> = all_manifests(&hub_config.read())
                                 .iter()
                                 .map(|m| m.id.to_string())
                                 .collect();

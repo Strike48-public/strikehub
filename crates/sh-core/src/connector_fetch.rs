@@ -49,15 +49,29 @@ pub async fn ensure_connector_binary(
     manifest: &ConnectorManifest,
     client: &reqwest::Client,
 ) -> EnsureResult {
-    let Some(repo) = manifest.github_repo else {
+    let Some(ref repo) = manifest.github_repo else {
         return EnsureResult::Unavailable("no github_repo configured".into());
     };
-    let Some(binary_name) = manifest.binary_hint else {
+    let repo = repo.as_ref();
+    let Some(ref binary_hint) = manifest.binary_hint else {
         return EnsureResult::Unavailable("no binary_hint configured".into());
     };
+    let binary_name = binary_hint.as_ref();
     let Some(asset_name) = manifest.asset_name() else {
         return EnsureResult::Unavailable("no asset_pattern configured".into());
     };
+
+    // Defense-in-depth: check the allowlist before any network request for
+    // non-builtin connectors (builtins are compiled in and always trusted).
+    if !manifest.is_builtin {
+        let allowlist = crate::allowlist::get_allowlist();
+        if !allowlist.is_allowed(repo) {
+            return EnsureResult::Unavailable(format!(
+                "repo '{}' is not in the allowlist",
+                repo
+            ));
+        }
+    }
 
     let cache_dir = bin_cache_dir();
     let binary_filename = if cfg!(target_os = "windows") {
@@ -118,14 +132,36 @@ pub async fn ensure_connector_binary(
         }
     };
 
-    // Verify SHA256 if available
-    if let Err(e) = verify_checksum(client, repo, &latest_tag, &asset_name, &asset_bytes).await {
-        let msg = format!("checksum verification failed for {}: {}", asset_name, e);
-        tracing::warn!("{}", msg);
-        if binary_path.exists() {
-            return EnsureResult::FallbackStale(binary_path, msg);
+    // Verify SHA256 checksum
+    match verify_checksum(client, repo, &latest_tag, &asset_name, &asset_bytes).await {
+        ChecksumResult::Verified => {}
+        ChecksumResult::Failed(e) => {
+            let msg = format!("checksum verification failed for {}: {}", asset_name, e);
+            tracing::warn!("{}", msg);
+            if binary_path.exists() {
+                return EnsureResult::FallbackStale(binary_path, msg);
+            }
+            return EnsureResult::Unavailable(msg);
         }
-        return EnsureResult::Unavailable(msg);
+        ChecksumResult::NotFound => {
+            if !manifest.is_builtin {
+                // Dynamic connectors require a checksum for security.
+                let msg = format!(
+                    "no checksum file found for dynamic connector '{}' — refusing to install",
+                    manifest.id
+                );
+                tracing::warn!("{}", msg);
+                if binary_path.exists() {
+                    return EnsureResult::FallbackStale(binary_path, msg);
+                }
+                return EnsureResult::Unavailable(msg);
+            }
+            // Builtins gracefully skip missing checksums.
+            tracing::debug!(
+                "no checksum file found for {}, skipping verification",
+                asset_name
+            );
+        }
     }
 
     // Ensure cache directory exists
@@ -216,7 +252,7 @@ pub async fn ensure_all_connector_binaries(
         .filter(|m| m.github_repo.is_some())
         .map(|manifest| {
             let client = client.clone();
-            let id = manifest.id.to_string();
+            let id = manifest.id.clone().into_owned();
             async move {
                 let result = ensure_connector_binary(manifest, &client).await;
                 (id, result)
@@ -271,20 +307,30 @@ async fn download_asset(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, 
         .map_err(|e| format!("failed to read body: {}", e))
 }
 
+/// Three-state checksum verification result.
+enum ChecksumResult {
+    /// Checksum matched successfully.
+    Verified,
+    /// Checksum file was found but the hash did not match.
+    Failed(String),
+    /// No checksum file was found in the release.
+    NotFound,
+}
+
 /// Verify SHA256 checksum of downloaded asset.
 ///
 /// Attempts two strategies:
 /// 1. `SHA256SUMS.txt` in the same release (pick style)
 /// 2. `{asset_name}.sha256` sidecar file (kubestudio style)
 ///
-/// If neither is available, verification is skipped (returns Ok).
+/// Returns `Verified`, `Failed`, or `NotFound`.
 async fn verify_checksum(
     client: &reqwest::Client,
     repo: &str,
     tag: &str,
     asset_name: &str,
     asset_bytes: &[u8],
-) -> Result<(), String> {
+) -> ChecksumResult {
     let actual_hash = hex_sha256(asset_bytes);
 
     // Strategy 1: SHA256SUMS.txt
@@ -305,9 +351,9 @@ async fn verify_checksum(
                 if filename == asset_name {
                     if actual_hash == expected_hash {
                         tracing::debug!("SHA256 verified via SHA256SUMS.txt");
-                        return Ok(());
+                        return ChecksumResult::Verified;
                     }
-                    return Err(format!(
+                    return ChecksumResult::Failed(format!(
                         "SHA256 mismatch: expected {}, got {}",
                         expected_hash, actual_hash
                     ));
@@ -329,21 +375,16 @@ async fn verify_checksum(
         if !expected_hash.is_empty() {
             if actual_hash == expected_hash {
                 tracing::debug!("SHA256 verified via .sha256 sidecar");
-                return Ok(());
+                return ChecksumResult::Verified;
             }
-            return Err(format!(
+            return ChecksumResult::Failed(format!(
                 "SHA256 mismatch: expected {}, got {}",
                 expected_hash, actual_hash
             ));
         }
     }
 
-    // No checksum file found — skip verification
-    tracing::debug!(
-        "no checksum file found for {}, skipping verification",
-        asset_name
-    );
-    Ok(())
+    ChecksumResult::NotFound
 }
 
 /// Extract a tar.gz archive, looking for a specific binary inside.
@@ -677,17 +718,19 @@ mod tests {
     #[test]
     fn test_asset_name_generation() {
         use crate::registry::{platform_arch, platform_archive_ext, platform_os};
+        use std::borrow::Cow;
 
         let manifest = ConnectorManifest {
-            id: "test",
-            name: "Test",
-            description: "test",
-            icon: "test",
+            id: Cow::Borrowed("test"),
+            name: Cow::Borrowed("Test"),
+            description: Cow::Borrowed("test"),
+            icon: Cow::Borrowed("test"),
             default_port: 3030,
             default_transport: crate::config::ConnectorTransport::Ipc,
-            binary_hint: Some("test-bin"),
-            github_repo: Some("org/repo"),
-            asset_pattern: Some("test-bin-{os}-{arch}.{ext}"),
+            binary_hint: Some(Cow::Borrowed("test-bin")),
+            github_repo: Some(Cow::Borrowed("org/repo")),
+            asset_pattern: Some(Cow::Borrowed("test-bin-{os}-{arch}.{ext}")),
+            is_builtin: true,
         };
 
         let name = manifest.asset_name().unwrap();
@@ -698,16 +741,19 @@ mod tests {
 
     #[test]
     fn test_asset_name_none_without_pattern() {
+        use std::borrow::Cow;
+
         let manifest = ConnectorManifest {
-            id: "test",
-            name: "Test",
-            description: "test",
-            icon: "test",
+            id: Cow::Borrowed("test"),
+            name: Cow::Borrowed("Test"),
+            description: Cow::Borrowed("test"),
+            icon: Cow::Borrowed("test"),
             default_port: 3030,
             default_transport: crate::config::ConnectorTransport::Ipc,
-            binary_hint: Some("test-bin"),
-            github_repo: Some("org/repo"),
+            binary_hint: Some(Cow::Borrowed("test-bin")),
+            github_repo: Some(Cow::Borrowed("org/repo")),
             asset_pattern: None,
+            is_builtin: true,
         };
 
         assert!(manifest.asset_name().is_none());

@@ -26,8 +26,10 @@ A native desktop shell that unifies Strike48 connector applications into a singl
 - Bidirectional frame forwarding over Unix sockets
 
 **Configuration**
-- TOML config at `~/.config/strikehub/connectors.toml`
+- TOML config at the platform config dir (`~/Library/Application Support/strikehub/connectors.toml` on macOS, `~/.config/strikehub/connectors.toml` on Linux, `%APPDATA%\strikehub\connectors.toml` on Windows)
 - Builtin connector manifests with forward-compatible defaults
+- Dynamic connector definitions loaded from config at runtime
+- Allowlist controls which GitHub repos may provide connector binaries
 - Custom connector registration by socket path
 - Per-connector transport and environment overrides
 
@@ -116,21 +118,27 @@ Placing a binary in location 1 or 2 takes precedence over the cached download.
 |----------|---------|----------|
 | `STRIKE48_API_URL` | Strike48 API / Keycloak server URL | For auth features |
 | `MATRIX_TLS_INSECURE` | Skip TLS verification (`true` / `1`) | No |
+| `STRIKEHUB_ALLOWED_SOURCES` | Comma-separated allowlist overriding config and compile-time defaults | No |
 | `RUST_LOG` | Logging level (`info`, `debug`) | No |
 
 ### Connector Config
 
-Connectors are configured at `~/.config/strikehub/connectors.toml` (auto-created on first run):
+Connectors are configured in `connectors.toml` inside the platform config directory (auto-created on first run):
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/Library/Application Support/strikehub/connectors.toml` |
+| Linux | `~/.config/strikehub/connectors.toml` |
+| Windows | `%APPDATA%\strikehub\connectors.toml` |
 
 ```toml
 [connectors.kubestudio]
 display_name = "KubeStudio"
-binary = "/path/to/ks-connector"
+binary = "ks-connector"
 port = 3030
 icon = "hero-server-stack"
-auto_start = false
+auto_start = true
 transport = "ipc"
-socket_path = "/tmp/strikehub-kubestudio.sock"
 
 [connectors.custom-external]
 display_name = "External Service"
@@ -140,13 +148,55 @@ transport = "ipc"
 socket_path = "/tmp/my-app.sock"
 ```
 
+### Dynamic Connectors
+
+Third-party or internal connectors can be added at runtime without recompiling StrikeHub. Define them in the `[[dynamic_connectors]]` array in `connectors.toml`:
+
+```toml
+[[dynamic_connectors]]
+id = "internal-tool"
+name = "Internal Tool"
+description = "Custom internal dashboard"
+icon = "hero-puzzle-piece"
+github_repo = "my-corp/internal-tool"
+binary_hint = "internal-tool-agent"
+asset_pattern = "internal-tool-agent-{os}-{arch}.{ext}"
+```
+
+Dynamic connectors are fetched from GitHub Releases using the same download/cache/checksum pipeline as builtins, with two additional restrictions:
+
+- The `github_repo` must be permitted by the **allowlist** (see below).
+- A SHA256 checksum file (`SHA256SUMS.txt` or `{asset}.sha256`) **must** be present in the release. Dynamic connectors without checksums are refused.
+
+If a dynamic connector's `id` collides with a builtin, the builtin always wins and the dynamic entry is skipped. Dynamic connectors without a `github_repo` (local socket-only) skip the allowlist check.
+
+### Allowlist
+
+The allowlist controls which GitHub `owner/repo` sources are permitted for connector binary downloads. It supports org-level wildcards and exact matches:
+
+```toml
+[allowlist]
+sources = [
+    "Strike48-public/*",
+    "my-corp/internal-tool",
+]
+```
+
+**Precedence (replace semantics):**
+
+1. **Compile-time defaults** from `build-defaults.toml` (baked into the binary via `build.rs`)
+2. **Config file** `[allowlist] sources` in `connectors.toml` — replaces compile-time defaults
+3. **Environment variable** `STRIKEHUB_ALLOWED_SOURCES` (comma-separated) — replaces all
+
+Builtin connectors (compiled into StrikeHub) always bypass the allowlist.
+
 ## Architecture
 
 ```
 strikehub/
 ├── crates/
 │   ├── sh-core/        # Core library: config, IPC, auth, proxy, WebSocket relay,
-│   │                   # connector binary fetch from GitHub Releases
+│   │                   # connector binary fetch, dynamic registry, allowlist
 │   └── sh-ui/          # UI components, desktop app (Wry), and server app (Axum liveview)
 ```
 

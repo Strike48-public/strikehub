@@ -85,9 +85,29 @@ async fn main() {
         )
         .init();
 
+    // Load config and initialise the allowlist before fetching binaries.
+    let cfg = sh_core::HubConfig::load().unwrap_or_else(|e| {
+        tracing::warn!("failed to load config, using defaults: {}", e);
+        sh_core::HubConfig {
+            setup_complete: false,
+            pick_tos_accepted: false,
+            connectors: Default::default(),
+            instance_ids: Default::default(),
+            studio_url: None,
+            allowlist: Default::default(),
+            dynamic_connectors: Vec::new(),
+        }
+    });
+    let config_sources = if cfg.allowlist.sources.is_empty() {
+        None
+    } else {
+        Some(cfg.allowlist.sources.as_slice())
+    };
+    sh_core::init_allowlist(config_sources);
+
     // Fetch/update connector binaries before starting the server.
     // This blocks startup to ensure binaries are available for IPC connectors.
-    let manifests = sh_core::builtin_manifests();
+    let manifests = sh_core::all_manifests(&cfg);
     let fetch_results = sh_core::ensure_all_connector_binaries(&manifests).await;
     for (id, result) in &fetch_results {
         match result {

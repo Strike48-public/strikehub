@@ -13,4 +13,7 @@ pub enum HubError {
 
     #[error("runner error: {0}")]
     Runner(String),
+
+    #[error("allowlist violation: {0}")]
+    AllowlistViolation(String),
 }
