@@ -87,7 +87,11 @@ static ALLOWLIST: OnceLock<RepoAllowlist> = OnceLock::new();
 pub fn load_allowlist(config_sources: Option<&[String]>) -> RepoAllowlist {
     // Layer 3: env var takes highest priority
     if let Ok(val) = std::env::var("STRIKEHUB_ALLOWED_SOURCES") {
-        let patterns: Vec<String> = val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let patterns: Vec<String> = val
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         if !patterns.is_empty() {
             tracing::info!(
                 "[allowlist] using STRIKEHUB_ALLOWED_SOURCES env var: {:?}",
@@ -100,10 +104,7 @@ pub fn load_allowlist(config_sources: Option<&[String]>) -> RepoAllowlist {
     // Layer 2: config file overrides defaults
     if let Some(sources) = config_sources {
         if !sources.is_empty() {
-            tracing::info!(
-                "[allowlist] using config file sources: {:?}",
-                sources
-            );
+            tracing::info!("[allowlist] using config file sources: {:?}", sources);
             return RepoAllowlist::from_patterns(sources.to_vec());
         }
     }
@@ -115,10 +116,7 @@ pub fn load_allowlist(config_sources: Option<&[String]>) -> RepoAllowlist {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    tracing::info!(
-        "[allowlist] using compile-time defaults: {:?}",
-        patterns
-    );
+    tracing::info!("[allowlist] using compile-time defaults: {:?}", patterns);
     RepoAllowlist::from_patterns(patterns)
 }
 
@@ -131,7 +129,9 @@ pub fn init_allowlist(config_sources: Option<&[String]>) {
 
 /// Get the global allowlist. Panics if `init_allowlist()` was not called.
 pub fn get_allowlist() -> &'static RepoAllowlist {
-    ALLOWLIST.get().expect("allowlist not initialised — call init_allowlist() first")
+    ALLOWLIST
+        .get()
+        .expect("allowlist not initialised — call init_allowlist() first")
 }
 
 #[cfg(test)]

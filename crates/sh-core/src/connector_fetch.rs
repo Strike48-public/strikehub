@@ -66,10 +66,7 @@ pub async fn ensure_connector_binary(
     if !manifest.is_builtin {
         let allowlist = crate::allowlist::get_allowlist();
         if !allowlist.is_allowed(repo) {
-            return EnsureResult::Unavailable(format!(
-                "repo '{}' is not in the allowlist",
-                repo
-            ));
+            return EnsureResult::Unavailable(format!("repo '{}' is not in the allowlist", repo));
         }
     }
 

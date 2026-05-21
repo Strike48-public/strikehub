@@ -11,8 +11,7 @@ use sh_core::{
     AggregatePreflightResult, AuthManager, CheckStatus, ConnectorConfig, ConnectorProxy,
     ConnectorRuntime, ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner,
     MatrixWsClient, WsRelay, all_manifests, detect_transport, fetch_connector_apps,
-    fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full,
-    start_oauth_flow_with,
+    fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full, start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -335,7 +334,11 @@ pub fn App() -> Element {
         all_manifests(&cfg)
             .into_iter()
             .map(|m| {
-                let enabled = cfg.connectors.get(m.id.as_ref()).map(|e| e.enabled).unwrap_or(true);
+                let enabled = cfg
+                    .connectors
+                    .get(m.id.as_ref())
+                    .map(|e| e.enabled)
+                    .unwrap_or(true);
                 SetupConnector {
                     manifest: m.clone(),
                     enabled,

@@ -626,18 +626,16 @@ transport = "ipc"
             instance_ids: BTreeMap::new(),
             studio_url: None,
             allowlist: AllowlistConfig::default(),
-            dynamic_connectors: vec![
-                DynamicConnectorDef {
-                    id: "kubestudio".to_string(), // collides with builtin
-                    name: "Fake KubeStudio".to_string(),
-                    description: String::new(),
-                    icon: "hero-puzzle-piece".to_string(),
-                    default_port: 3030,
-                    github_repo: Some("evil/repo".to_string()),
-                    binary_hint: None,
-                    asset_pattern: None,
-                },
-            ],
+            dynamic_connectors: vec![DynamicConnectorDef {
+                id: "kubestudio".to_string(), // collides with builtin
+                name: "Fake KubeStudio".to_string(),
+                description: String::new(),
+                icon: "hero-puzzle-piece".to_string(),
+                default_port: 3030,
+                github_repo: Some("evil/repo".to_string()),
+                binary_hint: None,
+                asset_pattern: None,
+            }],
         };
         let errors = config.validate_dynamic_connectors();
         assert!(errors.len() == 1);
@@ -689,18 +687,16 @@ transport = "ipc"
             instance_ids: BTreeMap::new(),
             studio_url: None,
             allowlist: AllowlistConfig::default(),
-            dynamic_connectors: vec![
-                DynamicConnectorDef {
-                    id: "my-tool".to_string(),
-                    name: "Tool".to_string(),
-                    description: String::new(),
-                    icon: "hero-puzzle-piece".to_string(),
-                    default_port: 3030,
-                    github_repo: Some("invalid-no-slash".to_string()),
-                    binary_hint: None,
-                    asset_pattern: None,
-                },
-            ],
+            dynamic_connectors: vec![DynamicConnectorDef {
+                id: "my-tool".to_string(),
+                name: "Tool".to_string(),
+                description: String::new(),
+                icon: "hero-puzzle-piece".to_string(),
+                default_port: 3030,
+                github_repo: Some("invalid-no-slash".to_string()),
+                binary_hint: None,
+                asset_pattern: None,
+            }],
         };
         let errors = config.validate_dynamic_connectors();
         assert!(errors.iter().any(|e| e.contains("owner/repo")));

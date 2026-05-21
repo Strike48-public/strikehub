@@ -216,8 +216,10 @@ mod tests {
     fn test_merge_skips_builtin_id_collision() {
         let allowlist = RepoAllowlist::from_patterns(vec!["Strike48-public/*".to_string()]);
         // Try to override kubestudio (a builtin ID)
-        let config =
-            make_config(vec![make_dynamic("kubestudio", "Strike48-public/kubestudio")]);
+        let config = make_config(vec![make_dynamic(
+            "kubestudio",
+            "Strike48-public/kubestudio",
+        )]);
 
         let manifests = merge_manifests(&config, &allowlist);
 
