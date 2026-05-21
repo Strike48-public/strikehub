@@ -33,5 +33,10 @@ hyper-util.workspace = true
 http-body-util.workspace = true
 http.workspace = true
 
+# Archive extraction (connector binary fetch)
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

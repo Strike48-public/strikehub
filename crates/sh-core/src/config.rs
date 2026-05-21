@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -14,6 +15,75 @@ pub enum ConnectorTransport {
     Tcp,
     /// New: connector runs as a child process, communicates over a Unix socket.
     Ipc,
+}
+
+/// Allowlist configuration for restricting which GitHub repos may serve
+/// connector binaries. When present, **replaces** the compile-time defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AllowlistConfig {
+    /// Patterns such as `"Strike48-public/*"` or `"my-corp/internal-tool"`.
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+/// A dynamically-defined connector loaded from the config file.
+///
+/// ```toml
+/// [[dynamic_connectors]]
+/// id = "internal-tool"
+/// name = "Internal Tool"
+/// description = "Custom internal dashboard"
+/// github_repo = "my-corp/internal-tool"
+/// binary_hint = "internal-tool-agent"
+/// asset_pattern = "internal-tool-agent-{os}-{arch}.{ext}"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicConnectorDef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_dynamic_icon")]
+    pub icon: String,
+    #[serde(default = "default_dynamic_port")]
+    pub default_port: u16,
+    #[serde(default)]
+    pub github_repo: Option<String>,
+    #[serde(default)]
+    pub binary_hint: Option<String>,
+    #[serde(default)]
+    pub asset_pattern: Option<String>,
+}
+
+fn default_dynamic_icon() -> String {
+    "hero-puzzle-piece".to_string()
+}
+
+fn default_dynamic_port() -> u16 {
+    3030
+}
+
+impl DynamicConnectorDef {
+    /// Convert this config definition into a runtime `ConnectorManifest`.
+    pub fn to_manifest(&self) -> ConnectorManifest {
+        ConnectorManifest {
+            id: Cow::Owned(self.id.clone()),
+            name: Cow::Owned(if self.name.is_empty() {
+                self.id.clone()
+            } else {
+                self.name.clone()
+            }),
+            description: Cow::Owned(self.description.clone()),
+            icon: Cow::Owned(self.icon.clone()),
+            default_port: self.default_port,
+            default_transport: ConnectorTransport::Ipc,
+            binary_hint: self.binary_hint.as_ref().map(|s| Cow::Owned(s.clone())),
+            github_repo: self.github_repo.as_ref().map(|s| Cow::Owned(s.clone())),
+            asset_pattern: self.asset_pattern.as_ref().map(|s| Cow::Owned(s.clone())),
+            is_builtin: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +102,13 @@ pub struct HubConfig {
     /// `STRIKE48_API_URL` env var and the compiled-in default.
     #[serde(default)]
     pub studio_url: Option<String>,
+    /// Allowlist of GitHub org/repo patterns permitted for connector downloads.
+    /// When present, replaces compile-time defaults.
+    #[serde(default)]
+    pub allowlist: AllowlistConfig,
+    /// Dynamically defined connectors loaded from the config file.
+    #[serde(default)]
+    pub dynamic_connectors: Vec<DynamicConnectorDef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +261,8 @@ impl HubConfig {
                 connectors: BTreeMap::new(),
                 instance_ids: BTreeMap::new(),
                 studio_url: None,
+                allowlist: AllowlistConfig::default(),
+                dynamic_connectors: Vec::new(),
             });
         }
         let contents = std::fs::read_to_string(&path)?;
@@ -221,10 +300,10 @@ impl HubConfig {
     /// upgrading the code automatically picks up new defaults.
     pub fn apply_manifest_defaults(&mut self, manifests: &[crate::registry::ConnectorManifest]) {
         for m in manifests {
-            if let Some(entry) = self.connectors.get_mut(m.id) {
+            if let Some(entry) = self.connectors.get_mut(m.id.as_ref()) {
                 entry.transport = m.default_transport;
                 if entry.binary.is_none() {
-                    entry.binary = m.binary_hint.map(|s| s.to_string());
+                    entry.binary = m.binary_hint.as_deref().map(|s| s.to_string());
                 }
             }
         }
@@ -253,6 +332,24 @@ impl HubConfig {
             let _ = self.save();
         }
         dirty
+    }
+
+    /// Generate a fresh instance ID for a specific connector, replacing the
+    /// old one. This is used when the server has "removed" the connector and
+    /// refuses to accept the old instance ID.  Returns the new instance ID.
+    pub fn rotate_instance_id(&mut self, connector_id: &str, studio_url: &str) -> Option<String> {
+        let slug = url_slug(studio_url);
+        let entry = self.connectors.get_mut(connector_id)?;
+        let new_id = generate_instance_id(connector_id, studio_url);
+        tracing::info!(
+            "[config] rotating instance ID for '{}': {} → {}",
+            connector_id,
+            entry.instance_ids.get(&slug).unwrap_or(&String::new()),
+            new_id
+        );
+        entry.instance_ids.insert(slug, new_id.clone());
+        let _ = self.save();
+        Some(new_id)
     }
 
     pub fn to_connectors(&self, studio_url: &str) -> Vec<ConnectorConfig> {
@@ -292,7 +389,7 @@ impl HubConfig {
             manifest.id.to_string(),
             ConnectorEntry {
                 display_name: Some(manifest.name.to_string()),
-                binary: manifest.binary_hint.map(|s| s.to_string()),
+                binary: manifest.binary_hint.as_deref().map(|s| s.to_string()),
                 port: manifest.default_port,
                 icon: manifest.icon.to_string(),
                 auto_start: true,
@@ -325,6 +422,45 @@ impl HubConfig {
 
     pub fn remove(&mut self, id: &str) {
         self.connectors.remove(id);
+    }
+
+    /// Validate dynamic connector definitions.
+    ///
+    /// Returns a list of human-readable errors. An empty list means valid.
+    pub fn validate_dynamic_connectors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        let builtins = crate::registry::builtin_manifests();
+        let builtin_ids: std::collections::HashSet<&str> =
+            builtins.iter().map(|m| m.id.as_ref()).collect();
+
+        for (i, def) in self.dynamic_connectors.iter().enumerate() {
+            if def.id.is_empty() {
+                errors.push(format!("dynamic_connectors[{}]: missing id", i));
+                continue;
+            }
+            if builtin_ids.contains(def.id.as_str()) {
+                errors.push(format!(
+                    "dynamic_connectors[{}]: id '{}' collides with a builtin connector",
+                    i, def.id
+                ));
+            }
+            if !seen_ids.insert(&def.id) {
+                errors.push(format!(
+                    "dynamic_connectors[{}]: duplicate id '{}'",
+                    i, def.id
+                ));
+            }
+            if let Some(ref repo) = def.github_repo
+                && !repo.contains('/')
+            {
+                errors.push(format!(
+                    "dynamic_connectors[{}]: github_repo '{}' must be in 'owner/repo' format",
+                    i, repo
+                ));
+            }
+        }
+        errors
     }
 }
 
@@ -424,5 +560,166 @@ mod tests {
 
         // Same URL produces same slug
         assert_eq!(s1, url_slug("https://studio.strike48.test"));
+    }
+
+    #[test]
+    fn test_config_serde_roundtrip_with_dynamic_connectors() {
+        let toml_str = r#"
+setup_complete = true
+
+[allowlist]
+sources = ["Strike48-public/*", "my-corp/my-tool"]
+
+[[dynamic_connectors]]
+id = "my-tool"
+name = "My Tool"
+description = "A custom tool"
+github_repo = "my-corp/my-tool"
+binary_hint = "my-tool-agent"
+asset_pattern = "my-tool-agent-{os}-{arch}.{ext}"
+"#;
+        let config: HubConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.setup_complete);
+        assert_eq!(config.allowlist.sources.len(), 2);
+        assert_eq!(config.allowlist.sources[0], "Strike48-public/*");
+        assert_eq!(config.allowlist.sources[1], "my-corp/my-tool");
+        assert_eq!(config.dynamic_connectors.len(), 1);
+        let def = &config.dynamic_connectors[0];
+        assert_eq!(def.id, "my-tool");
+        assert_eq!(def.name, "My Tool");
+        assert_eq!(def.github_repo.as_deref(), Some("my-corp/my-tool"));
+        assert_eq!(def.binary_hint.as_deref(), Some("my-tool-agent"));
+
+        // Round-trip: serialize and deserialize again
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let config2: HubConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(config2.dynamic_connectors.len(), 1);
+        assert_eq!(config2.dynamic_connectors[0].id, "my-tool");
+        assert_eq!(config2.allowlist.sources.len(), 2);
+    }
+
+    #[test]
+    fn test_config_backwards_compat_no_new_fields() {
+        // Existing config without allowlist/dynamic_connectors should still parse
+        let toml_str = r#"
+setup_complete = true
+
+[connectors.kubestudio]
+port = 3030
+icon = "hero-server-stack"
+enabled = true
+transport = "ipc"
+"#;
+        let config: HubConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.setup_complete);
+        assert!(config.allowlist.sources.is_empty());
+        assert!(config.dynamic_connectors.is_empty());
+        assert!(config.connectors.contains_key("kubestudio"));
+    }
+
+    #[test]
+    fn test_validate_dynamic_connectors_id_collision() {
+        let config = HubConfig {
+            setup_complete: false,
+            pick_tos_accepted: false,
+            connectors: BTreeMap::new(),
+            instance_ids: BTreeMap::new(),
+            studio_url: None,
+            allowlist: AllowlistConfig::default(),
+            dynamic_connectors: vec![DynamicConnectorDef {
+                id: "kubestudio".to_string(), // collides with builtin
+                name: "Fake KubeStudio".to_string(),
+                description: String::new(),
+                icon: "hero-puzzle-piece".to_string(),
+                default_port: 3030,
+                github_repo: Some("evil/repo".to_string()),
+                binary_hint: None,
+                asset_pattern: None,
+            }],
+        };
+        let errors = config.validate_dynamic_connectors();
+        assert!(errors.len() == 1);
+        assert!(errors[0].contains("collides with a builtin"));
+    }
+
+    #[test]
+    fn test_validate_dynamic_connectors_duplicate_id() {
+        let config = HubConfig {
+            setup_complete: false,
+            pick_tos_accepted: false,
+            connectors: BTreeMap::new(),
+            instance_ids: BTreeMap::new(),
+            studio_url: None,
+            allowlist: AllowlistConfig::default(),
+            dynamic_connectors: vec![
+                DynamicConnectorDef {
+                    id: "my-tool".to_string(),
+                    name: "Tool 1".to_string(),
+                    description: String::new(),
+                    icon: "hero-puzzle-piece".to_string(),
+                    default_port: 3030,
+                    github_repo: Some("my-corp/my-tool".to_string()),
+                    binary_hint: None,
+                    asset_pattern: None,
+                },
+                DynamicConnectorDef {
+                    id: "my-tool".to_string(), // duplicate
+                    name: "Tool 2".to_string(),
+                    description: String::new(),
+                    icon: "hero-puzzle-piece".to_string(),
+                    default_port: 3030,
+                    github_repo: Some("my-corp/my-tool".to_string()),
+                    binary_hint: None,
+                    asset_pattern: None,
+                },
+            ],
+        };
+        let errors = config.validate_dynamic_connectors();
+        assert!(errors.iter().any(|e| e.contains("duplicate id")));
+    }
+
+    #[test]
+    fn test_validate_dynamic_connectors_invalid_repo() {
+        let config = HubConfig {
+            setup_complete: false,
+            pick_tos_accepted: false,
+            connectors: BTreeMap::new(),
+            instance_ids: BTreeMap::new(),
+            studio_url: None,
+            allowlist: AllowlistConfig::default(),
+            dynamic_connectors: vec![DynamicConnectorDef {
+                id: "my-tool".to_string(),
+                name: "Tool".to_string(),
+                description: String::new(),
+                icon: "hero-puzzle-piece".to_string(),
+                default_port: 3030,
+                github_repo: Some("invalid-no-slash".to_string()),
+                binary_hint: None,
+                asset_pattern: None,
+            }],
+        };
+        let errors = config.validate_dynamic_connectors();
+        assert!(errors.iter().any(|e| e.contains("owner/repo")));
+    }
+
+    #[test]
+    fn test_dynamic_connector_to_manifest() {
+        let def = DynamicConnectorDef {
+            id: "my-tool".to_string(),
+            name: "My Tool".to_string(),
+            description: "A tool".to_string(),
+            icon: "hero-puzzle-piece".to_string(),
+            default_port: 4040,
+            github_repo: Some("my-corp/my-tool".to_string()),
+            binary_hint: Some("my-tool-bin".to_string()),
+            asset_pattern: Some("my-tool-bin-{os}-{arch}.{ext}".to_string()),
+        };
+        let manifest = def.to_manifest();
+        assert_eq!(manifest.id.as_ref(), "my-tool");
+        assert_eq!(manifest.name.as_ref(), "My Tool");
+        assert_eq!(manifest.default_port, 4040);
+        assert!(!manifest.is_builtin);
+        assert_eq!(manifest.github_repo.as_deref(), Some("my-corp/my-tool"));
+        assert_eq!(manifest.binary_hint.as_deref(), Some("my-tool-bin"));
     }
 }

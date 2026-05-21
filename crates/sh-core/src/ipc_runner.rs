@@ -177,7 +177,8 @@ impl Drop for IpcConnectorRunner {
 /// 3. Sibling Cargo workspaces' `target/{profile}/` dirs — this covers the
 ///    common dev layout where strikehub and connector repos live side by side
 ///    (e.g. `~/code/strike48/scratch/strikehub/` and `~/code/strike48/studio-kube-desktop/`).
-/// 4. Fall back to the bare name (OS PATH lookup).
+/// 4. Binary cache dir (`~/.strike48/strikehub/bin/`).
+/// 5. Fall back to the bare name (OS PATH lookup).
 fn resolve_binary(binary: &Path) -> PathBuf {
     // On Windows, also check for the path with .exe appended.
     #[cfg(target_os = "windows")]
@@ -294,7 +295,19 @@ fn resolve_binary(binary: &Path) -> PathBuf {
         }
     }
 
-    // Fall back to PATH lookup
+    // 4. Binary cache dir (~/.strike48/strikehub/bin/)
+    let cache_candidate = crate::connector_fetch::bin_cache_dir().join(&binary);
+    if exists(&cache_candidate) {
+        let resolved = with_exe(cache_candidate);
+        tracing::info!(
+            "resolved '{}' → {} (cache dir)",
+            binary.display(),
+            resolved.display()
+        );
+        return resolved;
+    }
+
+    // 5. Fall back to PATH lookup
     binary
 }
 

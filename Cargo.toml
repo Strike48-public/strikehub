@@ -69,3 +69,8 @@ open = "5"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+
+# Archive extraction (connector binary fetch)
+flate2 = "1"
+tar = "0.4"
+zip = "2"

@@ -34,13 +34,22 @@ pub fn ContentArea(
     //   TCP  → http://127.0.0.1:{proxy}/c/{port}/liveview  (auth proxy)
     let url = match active_transport {
         Some(ConnectorTransport::Ipc) => active_id.as_ref().map(|id| {
-            // Windows/WebView2 uses http:// for the dioxus custom protocol,
-            // Linux/macOS piggyback on the dioxus:// scheme so the iframe
-            // stays same-origin (WebKitGTK blocks custom schemes in iframes).
-            if cfg!(target_os = "windows") {
-                format!("http://dioxus.index.html/connector/{}/liveview", id)
-            } else {
-                format!("dioxus://index.html/connector/{}/liveview", id)
+            #[cfg(not(feature = "desktop"))]
+            {
+                // Server / liveview mode — use a plain HTTP path that the
+                // axum router handles.
+                format!("/connector/{}/liveview", id)
+            }
+            #[cfg(feature = "desktop")]
+            {
+                // Windows/WebView2 uses http:// for the dioxus custom protocol,
+                // Linux/macOS piggyback on the dioxus:// scheme so the iframe
+                // stays same-origin (WebKitGTK blocks custom schemes in iframes).
+                if cfg!(target_os = "windows") {
+                    format!("http://dioxus.index.html/connector/{}/liveview", id)
+                } else {
+                    format!("dioxus://index.html/connector/{}/liveview", id)
+                }
             }
         }),
         _ => match (proxy_port, active_port) {

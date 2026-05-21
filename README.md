@@ -26,8 +26,10 @@ A native desktop shell that unifies Strike48 connector applications into a singl
 - Bidirectional frame forwarding over Unix sockets
 
 **Configuration**
-- TOML config at `~/.config/strikehub/connectors.toml`
+- TOML config at the platform config dir (`~/Library/Application Support/strikehub/connectors.toml` on macOS, `~/.config/strikehub/connectors.toml` on Linux, `%APPDATA%\strikehub\connectors.toml` on Windows)
 - Builtin connector manifests with forward-compatible defaults
+- Dynamic connector definitions loaded from config at runtime
+- Allowlist controls which GitHub repos may provide connector binaries
 - Custom connector registration by socket path
 - Per-connector transport and environment overrides
 
@@ -63,7 +65,12 @@ Download the latest `strikehub-windows-x86_64.exe` from releases and double-clic
 ```bash
 git clone https://github.com/Strike48/strikehub.git
 cd strikehub
+
+# Desktop mode (native window with Wry webview)
 cargo run --features desktop
+
+# Server UI mode (web-based liveview, accessible via browser)
+cargo run --bin strikehub-server --features server --no-default-features -p sh-ui
 ```
 
 ### Release Build
@@ -73,24 +80,35 @@ cargo build --release --features desktop
 ./target/release/strikehub
 ```
 
-Note: When running from source, you'll need to install the connectors separately or build them in sibling directories. See the [Connector Setup](#connector-setup) section.
+Connector binaries are downloaded automatically on first launch. See the [Connector Setup](#connector-setup) section for details.
 
 ## Connector Setup
 
-### Automatic (CI/AppImage)
+### Runtime Download (default)
 
-**YES, the CI automatically downloads and bundles the connectors!** When you:
-- Push a tag to trigger a release → CI downloads connectors and includes them
-- Build the AppImage locally with our scripts → It downloads them for you
+On first launch, StrikeHub automatically downloads connector binaries from
+GitHub Releases and caches them in `~/.strike48/strikehub/bin/`. Subsequent
+launches use the cached version and check for updates in the background.
 
-The `build-appimage-with-connectors.sh` script **automatically downloads** the connectors from GitHub releases.
+- SHA256 checksums are verified when available (`SHA256SUMS.txt` or `.sha256` sidecar).
+- On macOS, downloaded binaries are ad-hoc codesigned to satisfy Gatekeeper.
+- If GitHub is unreachable, the last cached version is used as a fallback.
 
-### Manual Installation (if running from source)
+### CI / AppImage Bundling
 
-If you're running the raw binary (not AppImage), you need the connectors in one of these locations:
-1. Same directory as `strikehub` binary
-2. In your PATH
-3. Built in sibling workspace directories (for development)
+When you push a tag to trigger a release, CI downloads connectors and bundles
+them into the release artifact. The `build-appimage-with-connectors.sh` script
+does the same for local AppImage builds.
+
+### Manual Override
+
+StrikeHub resolves connector binaries in this order:
+1. Same directory as the `strikehub` binary
+2. Sibling Cargo workspace `target/` dirs (development)
+3. Cache dir (`~/.strike48/strikehub/bin/`)
+4. System `PATH`
+
+Placing a binary in location 1 or 2 takes precedence over the cached download.
 
 ## Configuration
 
@@ -100,21 +118,27 @@ If you're running the raw binary (not AppImage), you need the connectors in one 
 |----------|---------|----------|
 | `STRIKE48_API_URL` | Strike48 API / Keycloak server URL | For auth features |
 | `MATRIX_TLS_INSECURE` | Skip TLS verification (`true` / `1`) | No |
+| `STRIKEHUB_ALLOWED_SOURCES` | Comma-separated allowlist overriding config and compile-time defaults | No |
 | `RUST_LOG` | Logging level (`info`, `debug`) | No |
 
 ### Connector Config
 
-Connectors are configured at `~/.config/strikehub/connectors.toml` (auto-created on first run):
+Connectors are configured in `connectors.toml` inside the platform config directory (auto-created on first run):
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/Library/Application Support/strikehub/connectors.toml` |
+| Linux | `~/.config/strikehub/connectors.toml` |
+| Windows | `%APPDATA%\strikehub\connectors.toml` |
 
 ```toml
 [connectors.kubestudio]
 display_name = "KubeStudio"
-binary = "/path/to/ks-connector"
+binary = "ks-connector"
 port = 3030
 icon = "hero-server-stack"
-auto_start = false
+auto_start = true
 transport = "ipc"
-socket_path = "/tmp/strikehub-kubestudio.sock"
 
 [connectors.custom-external]
 display_name = "External Service"
@@ -124,13 +148,56 @@ transport = "ipc"
 socket_path = "/tmp/my-app.sock"
 ```
 
+### Dynamic Connectors
+
+Third-party or internal connectors can be added at runtime without recompiling StrikeHub. Define them in the `[[dynamic_connectors]]` array in `connectors.toml`:
+
+```toml
+[[dynamic_connectors]]
+id = "internal-tool"
+name = "Internal Tool"
+description = "Custom internal dashboard"
+icon = "hero-puzzle-piece"
+github_repo = "my-corp/internal-tool"
+binary_hint = "internal-tool-agent"
+asset_pattern = "internal-tool-agent-{os}-{arch}.{ext}"
+```
+
+Dynamic connectors are fetched from GitHub Releases using the same download/cache/checksum pipeline as builtins, with two additional restrictions:
+
+- The `github_repo` must be permitted by the **allowlist** (see below).
+- A SHA256 checksum file (`SHA256SUMS.txt` or `{asset}.sha256`) **must** be present in the release. Dynamic connectors without checksums are refused.
+
+If a dynamic connector's `id` collides with a builtin, the builtin always wins and the dynamic entry is skipped. Dynamic connectors without a `github_repo` (local socket-only) skip the allowlist check.
+
+### Allowlist
+
+The allowlist controls which GitHub `owner/repo` sources are permitted for connector binary downloads. It supports org-level wildcards and exact matches:
+
+```toml
+[allowlist]
+sources = [
+    "Strike48-public/*",
+    "my-corp/internal-tool",
+]
+```
+
+**Precedence (replace semantics):**
+
+1. **Compile-time defaults** from `build-defaults.toml` (baked into the binary via `build.rs`)
+2. **Config file** `[allowlist] sources` in `connectors.toml` — replaces compile-time defaults
+3. **Environment variable** `STRIKEHUB_ALLOWED_SOURCES` (comma-separated) — replaces all
+
+Builtin connectors (compiled into StrikeHub) always bypass the allowlist.
+
 ## Architecture
 
 ```
 strikehub/
 ├── crates/
-│   ├── sh-core/        # Core library: config, IPC, auth, proxy, WebSocket relay
-│   └── sh-ui/          # Dioxus desktop application and UI components
+│   ├── sh-core/        # Core library: config, IPC, auth, proxy, WebSocket relay,
+│   │                   # connector binary fetch, dynamic registry, allowlist
+│   └── sh-ui/          # UI components, desktop app (Wry), and server app (Axum liveview)
 ```
 
 ### Tech Stack

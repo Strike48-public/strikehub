@@ -1,6 +1,8 @@
+pub mod allowlist;
 pub mod auth;
 pub mod bridge;
 pub mod config;
+pub mod connector_fetch;
 pub mod embedded;
 pub mod error;
 pub mod ipc;
@@ -14,12 +16,14 @@ pub mod registry;
 pub mod transport;
 pub mod ws_relay;
 
+pub use allowlist::{RepoAllowlist, get_allowlist, init_allowlist, load_allowlist};
 pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant_id};
 pub use bridge::{BridgeState, SharedBridgeState, new_bridge_state};
 pub use config::{
-    ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport, HubConfig,
-    generate_instance_id, slug_from_path, url_slug,
+    AllowlistConfig, ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport,
+    DynamicConnectorDef, HubConfig, generate_instance_id, slug_from_path, url_slug,
 };
+pub use connector_fetch::{EnsureResult, bin_cache_dir, ensure_all_connector_binaries};
 pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
@@ -31,6 +35,6 @@ pub use preflight::{
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
 };
 pub use proxy::ConnectorProxy;
-pub use registry::{ConnectorManifest, builtin_manifests};
+pub use registry::{ConnectorManifest, all_manifests, builtin_manifests, merge_manifests};
 pub use transport::detect_transport;
 pub use ws_relay::WsRelay;

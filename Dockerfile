@@ -62,6 +62,10 @@ COPY --from=builder /app/target/release/strikehub-server /usr/local/bin/strikehu
 
 RUN mkdir -p /tmp && chown strikehub:strikehub /tmp
 
+# Cache directory for runtime-fetched connector binaries
+RUN mkdir -p /data/strikehub/.strike48/strikehub/bin \
+    && chown -R strikehub:strikehub /data/strikehub/.strike48
+
 USER strikehub
 
 ENV PORT=8080
