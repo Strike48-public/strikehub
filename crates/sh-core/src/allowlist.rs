@@ -102,11 +102,11 @@ pub fn load_allowlist(config_sources: Option<&[String]>) -> RepoAllowlist {
     }
 
     // Layer 2: config file overrides defaults
-    if let Some(sources) = config_sources {
-        if !sources.is_empty() {
-            tracing::info!("[allowlist] using config file sources: {:?}", sources);
-            return RepoAllowlist::from_patterns(sources.to_vec());
-        }
+    if let Some(sources) = config_sources
+        && !sources.is_empty()
+    {
+        tracing::info!("[allowlist] using config file sources: {:?}", sources);
+        return RepoAllowlist::from_patterns(sources.to_vec());
     }
 
     // Layer 1: compile-time defaults

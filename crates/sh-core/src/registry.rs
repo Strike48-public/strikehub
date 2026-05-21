@@ -127,15 +127,15 @@ pub fn merge_manifests(
         }
 
         // Allowlist check for the github repo
-        if let Some(ref repo) = def.github_repo {
-            if !allowlist.is_allowed(repo) {
-                tracing::warn!(
-                    "[registry] dynamic connector '{}' excluded: repo '{}' is not in the allowlist",
-                    def.id,
-                    repo
-                );
-                continue;
-            }
+        if let Some(ref repo) = def.github_repo
+            && !allowlist.is_allowed(repo)
+        {
+            tracing::warn!(
+                "[registry] dynamic connector '{}' excluded: repo '{}' is not in the allowlist",
+                def.id,
+                repo
+            );
+            continue;
         }
 
         result.push(def.to_manifest());

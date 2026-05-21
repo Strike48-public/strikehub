@@ -451,13 +451,13 @@ impl HubConfig {
                     i, def.id
                 ));
             }
-            if let Some(ref repo) = def.github_repo {
-                if !repo.contains('/') {
-                    errors.push(format!(
-                        "dynamic_connectors[{}]: github_repo '{}' must be in 'owner/repo' format",
-                        i, repo
-                    ));
-                }
+            if let Some(ref repo) = def.github_repo
+                && !repo.contains('/')
+            {
+                errors.push(format!(
+                    "dynamic_connectors[{}]: github_repo '{}' must be in 'owner/repo' format",
+                    i, repo
+                ));
             }
         }
         errors
