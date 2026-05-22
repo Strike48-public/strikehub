@@ -12,6 +12,7 @@ use sh_core::{
     ConnectorRuntime, ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner,
     MatrixWsClient, WsRelay, all_manifests, detect_transport, fetch_connector_apps,
     fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full, start_oauth_flow_with,
+    DEFAULT_CONNECTOR_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -454,6 +455,9 @@ pub fn App() -> Element {
                         // Skip preflight on restore — it already ran on
                         // the original sign-in.
                         preflight_dismissed.set(true);
+                        // Auto-select Pick connector by default
+                        active_id.set(Some(DEFAULT_CONNECTOR_ID.to_string()));
+                        show_setup.set(false);
                         tracing::info!("[server-restore] Session restored, connectors may resume");
                         return;
                     }
@@ -1995,6 +1999,9 @@ pub fn App() -> Element {
                         },
                         on_continue: move |_: ()| {
                             preflight_dismissed.set(true);
+                            // Auto-select Pick connector by default
+                            active_id.set(Some(DEFAULT_CONNECTOR_ID.to_string()));
+                            show_setup.set(false);
                         },
                     }
                 } else if is_account {

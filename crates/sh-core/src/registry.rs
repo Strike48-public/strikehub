@@ -3,6 +3,10 @@ use std::borrow::Cow;
 use crate::allowlist::get_allowlist;
 use crate::config::{ConnectorTransport, HubConfig};
 
+/// The connector ID to auto-select after preflight completes.
+/// Change this to switch the default app for different StrikeHub releases.
+pub const DEFAULT_CONNECTOR_ID: &str = "pick";
+
 /// Manifest for a connector (builtin or dynamic).
 ///
 /// Each connector crate pulled into the workspace gets one entry here.

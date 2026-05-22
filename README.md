@@ -222,6 +222,16 @@ strikehub/
 5. Response returned to the webview
 6. WebSocket traffic routed through the WsRelay bridge
 
+## Customization
+
+### Default Connector
+
+After sign-in and preflight checks, StrikeHub auto-selects a default connector instead of showing the tile selection view. To change the default for a release, edit `DEFAULT_CONNECTOR_ID` in `crates/sh-core/src/registry.rs`:
+
+```rust
+pub const DEFAULT_CONNECTOR_ID: &str = "pick";  // Change to "kubestudio" etc.
+```
+
 ## Development
 
 ```bash
