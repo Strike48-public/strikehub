@@ -35,6 +35,8 @@ pub use preflight::{
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
 };
 pub use proxy::ConnectorProxy;
-pub use registry::{ConnectorManifest, DEFAULT_CONNECTOR_ID, all_manifests, builtin_manifests, merge_manifests};
+pub use registry::{
+    ConnectorManifest, DEFAULT_CONNECTOR_ID, all_manifests, builtin_manifests, merge_manifests,
+};
 pub use transport::detect_transport;
 pub use ws_relay::WsRelay;
