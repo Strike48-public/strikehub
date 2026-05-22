@@ -1,47 +1,117 @@
-/// StrikeHub uses a single neutral-gray chrome that blends with both
-/// light and dark connector apps rendered inside iframes.
-/// No light/dark toggle — the hub shell is always the same mid-gray.
+/// StrikeHub uses the Strike48 design system — a dark ops-console aesthetic
+/// with cool-blue undertones, IBM Plex typography, and dense spacing.
 pub fn theme_css() -> &'static str {
     r#"
         :root {
-            /* Neutral mid-gray palette — works next to light or dark apps */
-            --chrome:            oklch(0.25 0 0);
-            --chrome-foreground: oklch(0.88 0 0);
-            --chrome-muted:      oklch(0.55 0 0);
-            --chrome-border:     oklch(0.32 0 0);
-            --chrome-hover:      oklch(0.30 0 0);
-            --chrome-active:     oklch(0.35 0 0);
-            --chrome-active-fg:  oklch(0.96 0 0);
-            --chrome-input-bg:   oklch(0.20 0 0);
-            --chrome-card:       oklch(0.22 0 0);
-            --chrome-card-border:oklch(0.32 0 0);
+            /* Strike48 Ink Scale — cool-blue undertone neutrals */
+            --ink-900: #07090d;
+            --ink-850: #0b0e14;
+            --ink-800: #0f1320;
+            --ink-750: #141a28;
+            --ink-700: #1a2233;
+            --ink-650: #222b40;
+            --ink-600: #2c3753;
+            --ink-500: #4a5578;
+            --ink-400: #6e7a9a;
+            --ink-300: #9ba4be;
+            --ink-200: #cdd2e2;
+            --ink-100: #eef0f7;
 
-            --accent:            oklch(0.62 0.20 250);
-            --accent-foreground:  oklch(0.98 0 0);
+            /* Semantic mappings */
+            --chrome:            var(--ink-850);
+            --chrome-foreground: var(--ink-200);
+            --chrome-muted:      var(--ink-400);
+            --chrome-border:     var(--ink-700);
+            --chrome-hover:      var(--ink-650);
+            --chrome-active:     var(--ink-600);
+            --chrome-active-fg:  var(--ink-100);
+            --chrome-input-bg:   var(--ink-900);
+            --chrome-card:       var(--ink-800);
+            --chrome-card-border:var(--ink-700);
 
-            --success:  oklch(0.72 0.18 145);
-            --warning:  oklch(0.80 0.13 85);
-            --destructive: oklch(0.55 0.22 28);
+            /* Strike48 Brand */
+            --brand-300: #7aa9ff;
+            --brand-500: #3978D5;
+            --brand-600: #2563eb;
+            --brand-700: #1d4ed8;
 
-            --radius: 0.5rem;
-            --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
-            --font-mono: "Cascadia Code", "Fira Code", monospace;
+            --accent:            var(--brand-500);
+            --accent-hover:      var(--brand-600);
+            --accent-foreground: #ffffff;
+
+            /* Strike48 Status Colors */
+            --status-critical:    #ef4444;
+            --status-high:        #f97316;
+            --status-medium:      #3b82f6;
+            --status-low:         #64748b;
+            --status-open:        #3b82f6;
+            --status-in-progress: #eab308;
+            --status-waiting:     #a855f7;
+            --status-resolved:    #10b981;
+            --status-closed:      #475569;
+
+            --success:     var(--status-resolved);
+            --warning:     var(--status-in-progress);
+            --destructive: var(--status-critical);
+
+            /* Typography — IBM Plex */
+            --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+            --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
             --font-size: 13px;
 
-            --rail-width: 56px;
+            /* Radius — dense console style */
+            --radius-xs: 2px;
+            --radius-sm: 4px;
+            --radius-md: 6px;
+            --radius: var(--radius-sm);
+
+            /* Shadows */
+            --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.3);
+            --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+            --rail-width: 48px;
+
+            color-scheme: dark;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        *::-webkit-scrollbar { display: none; }
-        * { scrollbar-width: none; }
+
+        /* Strike48 scrollbars — visible, styled */
+        *::-webkit-scrollbar { width: 8px; height: 8px; }
+        *::-webkit-scrollbar-track { background: var(--ink-850); }
+        *::-webkit-scrollbar-thumb { background: var(--ink-650); border-radius: 2px; }
+        *::-webkit-scrollbar-thumb:hover { background: var(--ink-600); }
+
+        /* Selection */
+        ::selection { background: rgba(37, 99, 235, 0.33); color: var(--ink-100); }
+
+        /* Focus — border-color only, no rings */
+        *:focus { outline: none; }
+        *:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; border-radius: 2px; }
+        input:focus-visible, textarea:focus-visible, select:focus-visible {
+            outline: none;
+            border-color: var(--brand-500);
+        }
+
+        html, body { height: 100%; }
 
         body {
             font-family: var(--font-sans);
             font-size: var(--font-size);
+            font-feature-settings: 'cv11', 'ss01', 'ss03';
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
             background: var(--chrome);
             color: var(--chrome-foreground);
             line-height: 1.5;
         }
+
+        /* Live indicator animations */
+        @keyframes pulseDot {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.45; transform: scale(0.85); }
+        }
+        .live-dot { animation: pulseDot 1.4s ease-in-out infinite; }
     "#
 }
 
@@ -66,27 +136,28 @@ pub fn app_css() -> &'static str {
             outline: none;
         }
 
-        /* ── Sidebar Icon Rail ── */
+        /* ── Sidebar Icon Rail (Strike48: 48px, left-border active indicator) ── */
         .sidebar-rail {
             display: flex;
             flex-direction: column;
             align-items: center;
             width: var(--rail-width);
             flex-shrink: 0;
-            background: oklch(0.18 0 0);
-            padding: 10px 0;
+            background: var(--ink-900);
+            padding: 8px 0;
             user-select: none;
             overflow: hidden;
+            border-right: 1px solid var(--ink-700);
         }
 
         .rail-logo {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 36px;
-            height: 36px;
-            border-radius: 10px;
-            background: oklch(0.25 0 0);
+            width: 32px;
+            height: 32px;
+            border-radius: var(--radius-sm);
+            background: var(--ink-800);
             margin-bottom: 4px;
             flex-shrink: 0;
             cursor: pointer;
@@ -95,7 +166,7 @@ pub fn app_css() -> &'static str {
         .rail-separator {
             width: 24px;
             height: 1px;
-            background: var(--chrome-border);
+            background: var(--ink-700);
             margin: 6px 0;
             flex-shrink: 0;
         }
@@ -116,26 +187,24 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 40px;
-            height: 40px;
-            border-radius: 12px;
+            width: 36px;
+            height: 36px;
+            border-radius: var(--radius-sm);
             cursor: pointer;
-            transition: background 0.15s, border-radius 0.15s;
+            transition: background 0.15s;
         }
 
         .rail-item:hover,
         .rail-item.hovered {
-            background: var(--chrome-hover);
-            border-radius: 10px;
+            background: var(--ink-750);
         }
 
         .rail-item.active {
-            background: var(--accent);
-            border-radius: 10px;
+            background: var(--ink-700);
         }
 
         .rail-item.active .rail-icon .connector-icon {
-            color: var(--accent-foreground);
+            color: var(--ink-100);
         }
 
         .rail-icon-wrapper {
@@ -149,17 +218,17 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             justify-content: center;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             transition: color 0.15s;
         }
 
         .rail-item:hover .rail-icon,
         .rail-item.hovered .rail-icon {
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
         }
 
         .rail-item.active .rail-icon {
-            color: var(--accent-foreground);
+            color: var(--ink-100);
         }
 
         .rail-status-dot {
@@ -169,12 +238,13 @@ pub fn app_css() -> &'static str {
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            border: 2px solid oklch(0.18 0 0);
+            border: 2px solid var(--ink-900);
         }
 
-        .rail-status-dot.online  { background: var(--success); }
-        .rail-status-dot.offline { background: var(--chrome-muted); opacity: 0.3; }
-        .rail-status-dot.checking { background: var(--warning); }
+        .rail-status-dot.online  { background: var(--status-resolved); }
+        .rail-status-dot.online.live-dot { animation: pulseDot 1.4s ease-in-out infinite; }
+        .rail-status-dot.offline { background: var(--ink-500); opacity: 0.5; }
+        .rail-status-dot.checking { background: var(--status-in-progress); }
 
 
         /* ── Rail footer actions ── */
@@ -184,7 +254,7 @@ pub fn app_css() -> &'static str {
             align-items: center;
             gap: 2px;
             padding-top: 6px;
-            border-top: 1px solid var(--chrome-border);
+            border-top: 1px solid var(--ink-700);
             margin-top: auto;
             width: 100%;
         }
@@ -193,25 +263,25 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 40px;
-            height: 40px;
-            border-radius: 12px;
+            width: 36px;
+            height: 36px;
+            border-radius: var(--radius-sm);
             cursor: pointer;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             transition: background 0.15s, color 0.15s;
         }
 
         .rail-action:hover {
-            background: var(--chrome-hover);
-            color: var(--chrome-foreground);
+            background: var(--ink-750);
+            color: var(--ink-200);
         }
 
         .rail-action.signed-in {
-            color: var(--success);
+            color: var(--status-resolved);
         }
 
         .rail-action.signed-in:hover {
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
         }
 
         .rail-action.signing-in {
@@ -220,13 +290,12 @@ pub fn app_css() -> &'static str {
         }
 
         .rail-settings {
-            color: var(--chrome-muted);
+            color: var(--ink-400);
         }
 
         .rail-settings.active {
-            background: var(--accent);
-            border-radius: 10px;
-            color: var(--accent-foreground);
+            background: var(--ink-700);
+            color: var(--ink-100);
         }
 
         /* ── Content area ── */
@@ -235,7 +304,7 @@ pub fn app_css() -> &'static str {
             display: flex;
             flex-direction: column;
             min-height: 0;
-            background: var(--chrome);
+            background: var(--ink-900);
             overflow: hidden;
         }
 
@@ -260,51 +329,51 @@ pub fn app_css() -> &'static str {
             align-items: center;
             justify-content: center;
             gap: 16px;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
         }
 
         .content-empty h2, .setup-view h2, .content-offline h3 {
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-100);
         }
 
         .content-empty h2, .setup-view h2 { font-size: 18px; margin-bottom: 8px; }
-        .content-offline h3 { font-size: 15px; }
+        .content-offline h3 { font-size: 14px; }
 
         .content-offline p {
             font-size: 13px;
             max-width: 360px;
             text-align: center;
+            color: var(--ink-400);
         }
 
         .connector-cards {
             display: flex;
             flex-wrap: wrap;
-            gap: 16px;
+            gap: 12px;
             justify-content: center;
             max-width: 720px;
         }
 
         .connector-card {
             width: 200px;
-            padding: 24px 16px 20px;
-            border: 1px solid var(--chrome-card-border);
-            border-radius: var(--radius);
-            background: var(--chrome-card);
+            padding: 20px 16px 16px;
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-800);
             cursor: pointer;
             text-align: center;
             display: flex;
             flex-direction: column;
             align-items: center;
             position: relative;
-            transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+            transition: border-color 0.15s, background 0.15s;
         }
 
         .connector-card:hover,
         .connector-card.hovered {
-            border-color: var(--chrome-hover);
-            background: var(--chrome-hover);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-color: var(--ink-600);
+            background: var(--ink-750);
         }
 
         .connector-card.add-card {
@@ -315,60 +384,61 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 48px;
-            height: 48px;
-            border-radius: 12px;
-            background: oklch(0.28 0 0);
+            width: 44px;
+            height: 44px;
+            border-radius: var(--radius-sm);
+            background: var(--ink-700);
             margin-bottom: 12px;
         }
 
         .connector-card:hover .card-icon-wrapper,
         .connector-card.hovered .card-icon-wrapper {
-            background: oklch(0.32 0 0);
+            background: var(--ink-650);
         }
 
         .card-icon {
-            color: var(--chrome-muted);
+            color: var(--ink-400);
         }
 
         .connector-card:hover .card-icon,
         .connector-card.hovered .card-icon {
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
         }
 
         .card-name {
             font-size: 13px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-100);
             margin-bottom: 4px;
         }
 
         .card-description {
             font-size: 11px;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             line-height: 1.4;
         }
 
         .card-socket-path {
             font-family: var(--font-mono);
-            font-size: 11px;
+            font-size: 10.5px;
             word-break: break-all;
+            color: var(--ink-400);
         }
 
         .custom-socket-input {
             flex: 1;
             min-width: 0;
-            padding: 4px 8px;
+            padding: 6px 10px;
             font-size: 12px;
             font-family: var(--font-mono);
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
-            background: var(--chrome-input-bg);
-            color: var(--chrome-foreground);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-900);
+            color: var(--ink-200);
             outline: none;
         }
 
-        .custom-socket-input:focus { border-color: var(--accent); }
+        .custom-socket-input:focus { border-color: var(--brand-500); }
 
         /* ── Custom connector card ── */
         .custom-card-form {
@@ -380,30 +450,32 @@ pub fn app_css() -> &'static str {
         .custom-name-input {
             flex: 1;
             min-width: 0;
-            padding: 4px 8px;
+            padding: 6px 10px;
             font-size: 12px;
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
-            background: var(--chrome-input-bg);
-            color: var(--chrome-foreground);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-900);
+            color: var(--ink-200);
             outline: none;
         }
 
-        .custom-name-input:focus { border-color: var(--accent); }
+        .custom-name-input:focus { border-color: var(--brand-500); }
 
         .custom-add-btn {
-            padding: 4px 10px;
-            font-size: 11px;
-            font-weight: 500;
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
-            background: var(--chrome-hover);
-            color: var(--chrome-foreground);
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-750);
+            color: var(--ink-200);
             cursor: pointer;
+            transition: all 0.15s;
         }
 
         .custom-add-btn:hover {
-            border-color: var(--accent);
+            border-color: var(--brand-500);
+            background: var(--ink-700);
         }
 
         .card-remove-btn {
@@ -417,8 +489,8 @@ pub fn app_css() -> &'static str {
             height: 22px;
             background: none;
             border: 1px solid transparent;
-            border-radius: var(--radius);
-            color: var(--chrome-muted);
+            border-radius: var(--radius-sm);
+            color: var(--ink-500);
             cursor: pointer;
             font-size: 14px;
             line-height: 1;
@@ -427,15 +499,19 @@ pub fn app_css() -> &'static str {
         }
 
         .card-remove-btn:hover {
-            color: var(--destructive);
-            border-color: var(--destructive);
-            background: oklch(0.55 0.22 28 / 0.15);
+            color: var(--status-critical);
+            border-color: var(--status-critical);
+            background: rgba(239, 68, 68, 0.12);
         }
 
         /* ── Auth status (kept for setup view compatibility) ── */
         .auth-status {
-            color: var(--success);
-            font-weight: 500;
+            color: var(--status-resolved);
+            font-weight: 600;
+            font-size: 12px;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
         /* ── Login overlay ── */
@@ -446,7 +522,7 @@ pub fn app_css() -> &'static str {
             align-items: center;
             justify-content: center;
             gap: 16px;
-            background: var(--chrome);
+            background: var(--ink-900);
             min-height: 0;
         }
 
@@ -455,9 +531,9 @@ pub fn app_css() -> &'static str {
         }
 
         .login-title {
-            font-size: 22px;
+            font-size: 18px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-100);
             margin-top: 4px;
         }
 
@@ -471,9 +547,12 @@ pub fn app_css() -> &'static str {
         }
 
         .login-url-label {
-            font-size: 12px;
-            font-weight: 500;
-            color: var(--chrome-muted);
+            font-size: 11px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--ink-400);
             text-align: left;
         }
 
@@ -481,16 +560,16 @@ pub fn app_css() -> &'static str {
             padding: 8px 12px;
             font-size: 13px;
             font-family: inherit;
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
-            background: var(--chrome-input-bg);
-            color: var(--chrome-foreground);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-850);
+            color: var(--ink-200);
             outline: none;
             transition: border-color 0.15s;
         }
 
         .login-url-input:focus {
-            border-color: var(--accent);
+            border-color: var(--brand-500);
         }
 
         .login-url-input:disabled {
@@ -500,18 +579,18 @@ pub fn app_css() -> &'static str {
 
         .login-btn {
             margin-top: 8px;
-            padding: 10px 36px;
-            font-size: 14px;
-            font-weight: 500;
+            padding: 8px 28px;
+            font-size: 13px;
+            font-weight: 600;
             border: none;
-            border-radius: var(--radius);
-            background: var(--accent);
+            border-radius: var(--radius-sm);
+            background: var(--brand-500);
             color: var(--accent-foreground);
             cursor: pointer;
-            transition: opacity 0.15s;
+            transition: background 0.15s;
         }
 
-        .login-btn:hover { opacity: 0.9; }
+        .login-btn:hover { background: var(--brand-600); }
 
         .login-btn.disabled,
         .login-btn:disabled {
@@ -523,10 +602,10 @@ pub fn app_css() -> &'static str {
             margin-bottom: 8px;
             padding: 8px 14px;
             font-size: 13px;
-            color: var(--destructive);
-            background: color-mix(in oklch, var(--destructive) 10%, transparent);
-            border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
-            border-radius: var(--radius);
+            color: var(--status-critical);
+            background: rgba(239, 68, 68, 0.12);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            border-radius: var(--radius-sm);
             max-width: 320px;
             text-align: center;
         }
@@ -534,7 +613,7 @@ pub fn app_css() -> &'static str {
         .login-custom-url-link {
             margin-top: 4px;
             font-size: 13px;
-            color: var(--accent);
+            color: var(--brand-500);
             text-decoration: none;
             cursor: pointer;
         }
@@ -546,19 +625,19 @@ pub fn app_css() -> &'static str {
         .login-clear-cache-link {
             margin-top: 12px;
             font-size: 12px;
-            color: var(--muted-foreground);
+            color: var(--ink-500);
             text-decoration: none;
             cursor: pointer;
         }
 
         .login-clear-cache-link:hover {
             text-decoration: underline;
-            color: var(--foreground);
+            color: var(--ink-300);
         }
 
         .login-cache-msg {
             font-size: 12px;
-            color: #4ade80;
+            color: var(--status-resolved);
             margin: 4px 0 0 0;
         }
 
@@ -570,18 +649,18 @@ pub fn app_css() -> &'static str {
             align-items: center;
             justify-content: center;
             gap: 16px;
-            background: var(--chrome);
+            background: var(--ink-900);
             min-height: 0;
         }
 
         .tos-icon {
-            color: var(--warning);
+            color: var(--status-in-progress);
         }
 
         .tos-heading {
-            font-size: 20px;
+            font-size: 18px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-100);
         }
 
         .tos-body {
@@ -589,74 +668,74 @@ pub fn app_css() -> &'static str {
             max-height: 300px;
             overflow-y: auto;
             padding: 16px 20px;
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
-            background: var(--chrome-card);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-800);
         }
 
         .tos-text {
             font-size: 12px;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             line-height: 1.7;
         }
 
         .tos-text strong {
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
         }
 
         .tos-buttons {
             display: flex;
-            gap: 12px;
+            gap: 10px;
             margin-top: 4px;
         }
 
         .tos-btn-accept {
-            padding: 10px 36px;
-            font-size: 14px;
-            font-weight: 500;
+            padding: 8px 28px;
+            font-size: 13px;
+            font-weight: 600;
             border: none;
-            border-radius: var(--radius);
-            background: var(--accent);
+            border-radius: var(--radius-sm);
+            background: var(--brand-500);
             color: var(--accent-foreground);
             cursor: pointer;
-            transition: opacity 0.15s;
+            transition: background 0.15s;
         }
 
-        .tos-btn-accept:hover { opacity: 0.9; }
+        .tos-btn-accept:hover { background: var(--brand-600); }
 
         .tos-btn-decline {
-            padding: 10px 36px;
-            font-size: 14px;
-            font-weight: 500;
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
+            padding: 8px 28px;
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
             background: transparent;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             cursor: pointer;
             transition: background 0.15s, color 0.15s;
         }
 
         .tos-btn-decline:hover {
-            background: var(--chrome-hover);
-            color: var(--chrome-foreground);
+            background: var(--ink-750);
+            color: var(--ink-200);
         }
 
         .tos-link {
-            color: var(--accent);
+            color: var(--brand-500);
             text-decoration: underline;
             text-underline-offset: 2px;
         }
 
         .tos-link:hover {
-            opacity: 0.8;
+            color: var(--brand-300);
         }
 
-        /* ── Preflight wizard ── */
+        /* ── Preflight wizard (Strike48 progress stepper pattern) ── */
         .preflight-overlay {
             flex: 1;
             display: flex;
             flex-direction: column;
-            background: var(--chrome);
+            background: var(--ink-900);
             min-height: 0;
         }
 
@@ -664,29 +743,32 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             gap: 14px;
-            padding: 20px 32px 16px;
-            border-bottom: 1px solid var(--chrome-border);
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--ink-700);
             flex-shrink: 0;
         }
 
-        .preflight-icon { color: var(--accent); flex-shrink: 0; }
+        .preflight-icon { color: var(--brand-500); flex-shrink: 0; }
 
         .preflight-header-text { flex: 1; min-width: 0; }
 
         .preflight-heading {
             font-size: 18px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-100);
             margin: 0;
         }
 
         .preflight-step-label {
-            font-size: 12px;
-            color: var(--chrome-muted);
+            font-size: 11px;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--ink-400);
             margin: 2px 0 0;
         }
 
-        /* Step pills */
+        /* Step pills (Strike48 progress stepper) */
         .preflight-steps {
             display: flex;
             align-items: center;
@@ -695,13 +777,13 @@ pub fn app_css() -> &'static str {
         }
 
         .step-pill {
-            width: 28px;
-            height: 28px;
+            width: 26px;
+            height: 26px;
             border-radius: 50%;
-            border: 2px solid var(--chrome-border);
+            border: 2px solid var(--ink-700);
             background: transparent;
-            color: var(--chrome-muted);
-            font-size: 12px;
+            color: var(--ink-500);
+            font-size: 11px;
             font-weight: 600;
             cursor: pointer;
             display: flex;
@@ -710,34 +792,34 @@ pub fn app_css() -> &'static str {
             transition: all 0.15s;
         }
         .step-pill.active {
-            border-color: var(--accent);
-            background: var(--accent);
-            color: var(--accent-foreground);
+            border-color: var(--brand-500);
+            background: var(--brand-500);
+            color: #ffffff;
         }
         .step-pill.done {
-            border-color: var(--success);
-            color: var(--success);
+            border-color: var(--status-resolved);
+            color: var(--status-resolved);
         }
 
         .step-connector {
-            width: 24px;
+            width: 20px;
             height: 2px;
-            background: var(--chrome-border);
+            background: var(--ink-700);
         }
 
         /* Scrollable content */
         .preflight-scroll {
             flex: 1;
             overflow-y: auto;
-            padding: 24px 32px;
+            padding: 20px 24px;
             display: flex;
             flex-direction: column;
             align-items: center;
         }
 
         .preflight-checking-msg {
-            font-size: 14px;
-            color: var(--chrome-muted);
+            font-size: 13px;
+            color: var(--ink-400);
             text-align: center;
             padding: 40px 0;
         }
@@ -747,7 +829,7 @@ pub fn app_css() -> &'static str {
             align-items: center;
             gap: 10px;
             font-size: 13px;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             padding: 8px 0;
         }
 
@@ -756,20 +838,20 @@ pub fn app_css() -> &'static str {
             width: 100%;
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 12px;
         }
 
         .preflight-intro {
             font-size: 13px;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             margin: 0 0 4px;
         }
 
         /* Collapsible groups */
         .preflight-group {
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
-            background: var(--chrome-card);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-800);
             overflow: hidden;
         }
 
@@ -782,11 +864,11 @@ pub fn app_css() -> &'static str {
             user-select: none;
             transition: background 0.1s;
         }
-        .preflight-group-header:hover { background: var(--chrome-hover); }
+        .preflight-group-header:hover { background: var(--ink-750); }
 
         .preflight-group-chevron {
             font-size: 10px;
-            color: var(--chrome-muted);
+            color: var(--ink-500);
             width: 14px;
             text-align: center;
             flex-shrink: 0;
@@ -795,24 +877,27 @@ pub fn app_css() -> &'static str {
         .preflight-group-name {
             font-size: 13px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
             margin: 0;
             flex: 1;
         }
 
         .group-summary {
-            font-size: 11px;
-            color: var(--chrome-muted);
+            font-size: 10.5px;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--ink-500);
             flex-shrink: 0;
         }
-        .group-summary.passed { color: var(--success); }
+        .group-summary.passed { color: var(--status-resolved); }
 
         .preflight-group-body {
             padding: 4px 14px 12px;
             display: flex;
             flex-direction: column;
             gap: 8px;
-            border-top: 1px solid var(--chrome-border);
+            border-top: 1px solid var(--ink-700);
         }
 
         .preflight-check-item {
@@ -830,31 +915,31 @@ pub fn app_css() -> &'static str {
             text-align: center;
         }
 
-        .preflight-check-item.passed .preflight-check-status { color: var(--success); }
-        .preflight-check-item.failed .preflight-check-status { color: var(--destructive); }
-        .preflight-check-item.checking .preflight-check-status { color: var(--warning); }
+        .preflight-check-item.passed .preflight-check-status { color: var(--status-resolved); }
+        .preflight-check-item.failed .preflight-check-status { color: var(--status-critical); }
+        .preflight-check-item.checking .preflight-check-status { color: var(--status-in-progress); }
 
         .preflight-check-content { flex: 1; min-width: 0; }
 
         .preflight-check-name {
             font-size: 13px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
         }
 
         .preflight-check-desc {
             font-size: 12px;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             margin-top: 2px;
         }
 
         .preflight-install-hint {
-            font-size: 11px;
+            font-size: 10.5px;
             font-family: var(--font-mono);
-            color: var(--chrome-muted);
-            background: var(--chrome-input-bg);
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
+            color: var(--ink-300);
+            background: var(--ink-900);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
             padding: 10px 12px;
             margin-top: 8px;
             white-space: pre-wrap;
@@ -868,17 +953,17 @@ pub fn app_css() -> &'static str {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 6px 18px;
+            padding: 6px 16px;
             font-size: 12px;
-            font-weight: 500;
+            font-weight: 600;
             border: none;
-            border-radius: var(--radius);
-            background: var(--accent);
-            color: var(--accent-foreground);
+            border-radius: var(--radius-sm);
+            background: var(--brand-500);
+            color: #ffffff;
             cursor: pointer;
-            transition: opacity 0.15s;
+            transition: background 0.15s;
         }
-        .preflight-btn-install:hover { opacity: 0.9; }
+        .preflight-btn-install:hover { background: var(--brand-600); }
         .preflight-btn-install:disabled {
             opacity: 0.6;
             cursor: default;
@@ -888,12 +973,12 @@ pub fn app_css() -> &'static str {
             height: 12px;
         }
         .preflight-install-output {
-            font-size: 11px;
+            font-size: 10.5px;
             font-family: var(--font-mono);
-            color: var(--chrome-foreground);
-            background: var(--chrome-input-bg);
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
+            color: var(--ink-200);
+            background: var(--ink-900);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
             padding: 10px 12px;
             margin-top: 8px;
             white-space: pre-wrap;
@@ -905,26 +990,26 @@ pub fn app_css() -> &'static str {
 
         /* Hint box (step 2 instructions) */
         .preflight-hint-box {
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
-            background: var(--chrome-card);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-800);
             padding: 14px 16px;
         }
         .preflight-hint-title {
             font-size: 13px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
             margin: 0 0 8px;
         }
         .preflight-hint-steps {
             font-size: 12px;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             margin: 0;
             padding-left: 20px;
             line-height: 1.8;
         }
         .preflight-hint-steps strong {
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
         }
 
         /* Fixed footer */
@@ -932,9 +1017,9 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             justify-content: flex-end;
-            gap: 12px;
-            padding: 12px 32px;
-            border-top: 1px solid var(--chrome-border);
+            gap: 10px;
+            padding: 12px 24px;
+            border-top: 1px solid var(--ink-700);
             flex-shrink: 0;
         }
 
@@ -942,8 +1027,9 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             gap: 8px;
-            font-size: 12px;
-            color: var(--chrome-muted);
+            font-size: 11px;
+            font-family: var(--font-mono);
+            color: var(--ink-500);
             margin-right: auto;
         }
 
@@ -953,60 +1039,60 @@ pub fn app_css() -> &'static str {
         .preflight-spinner {
             width: 14px;
             height: 14px;
-            border: 2px solid var(--chrome-border);
-            border-top-color: var(--accent);
+            border: 2px solid var(--ink-700);
+            border-top-color: var(--brand-500);
             border-radius: 50%;
             animation: preflight-spin 0.8s linear infinite;
         }
 
         .preflight-buttons {
             display: flex;
-            gap: 10px;
+            gap: 8px;
         }
 
         .preflight-btn-continue {
-            padding: 8px 28px;
+            padding: 8px 24px;
             font-size: 13px;
-            font-weight: 500;
+            font-weight: 600;
             border: none;
-            border-radius: var(--radius);
-            background: var(--accent);
-            color: var(--accent-foreground);
+            border-radius: var(--radius-sm);
+            background: var(--brand-500);
+            color: #ffffff;
             cursor: pointer;
-            transition: opacity 0.15s;
+            transition: background 0.15s;
         }
-        .preflight-btn-continue:hover { opacity: 0.9; }
+        .preflight-btn-continue:hover { background: var(--brand-600); }
 
         .preflight-btn-skip {
-            padding: 8px 28px;
+            padding: 8px 24px;
             font-size: 13px;
-            font-weight: 500;
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
+            font-weight: 600;
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
             background: transparent;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             cursor: pointer;
             transition: background 0.15s, color 0.15s;
         }
         .preflight-btn-skip:hover {
-            background: var(--chrome-hover);
-            color: var(--chrome-foreground);
+            background: var(--ink-750);
+            color: var(--ink-200);
         }
 
         .preflight-btn-recheck {
-            padding: 8px 28px;
+            padding: 8px 24px;
             font-size: 13px;
-            font-weight: 500;
-            border: 1px solid var(--chrome-border);
-            border-radius: var(--radius);
+            font-weight: 600;
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
             background: transparent;
-            color: var(--chrome-muted);
+            color: var(--ink-400);
             cursor: pointer;
             transition: background 0.15s, color 0.15s;
         }
         .preflight-btn-recheck:hover {
-            background: var(--chrome-hover);
-            color: var(--chrome-foreground);
+            background: var(--ink-750);
+            color: var(--ink-200);
         }
         .preflight-btn-recheck:disabled {
             opacity: 0.5;
@@ -1020,7 +1106,7 @@ pub fn app_css() -> &'static str {
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            background: var(--chrome);
+            background: var(--ink-900);
             min-height: 0;
         }
 
@@ -1029,10 +1115,10 @@ pub fn app_css() -> &'static str {
             flex-direction: column;
             align-items: center;
             gap: 4px;
-            padding: 32px 40px;
-            border: 1px solid var(--chrome-card-border);
-            border-radius: var(--radius);
-            background: var(--chrome-card);
+            padding: 28px 36px;
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-sm);
+            background: var(--ink-800);
             min-width: 300px;
         }
 
@@ -1040,25 +1126,31 @@ pub fn app_css() -> &'static str {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 56px;
-            height: 56px;
+            width: 48px;
+            height: 48px;
             border-radius: 50%;
-            background: oklch(0.28 0 0);
-            color: var(--success);
+            background: var(--ink-700);
+            color: var(--status-resolved);
             margin-bottom: 8px;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 600;
         }
 
         .account-heading {
             font-size: 18px;
             font-weight: 600;
-            color: var(--chrome-foreground);
+            color: var(--ink-100);
             margin: 0;
         }
 
         .account-status {
-            font-size: 13px;
-            color: var(--success);
-            font-weight: 500;
+            font-size: 12px;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--status-resolved);
+            font-weight: 600;
             margin: 0 0 12px;
         }
 
@@ -1068,8 +1160,8 @@ pub fn app_css() -> &'static str {
             flex-direction: column;
             gap: 8px;
             padding: 12px 0;
-            border-top: 1px solid var(--chrome-border);
-            border-bottom: 1px solid var(--chrome-border);
+            border-top: 1px solid var(--ink-700);
+            border-bottom: 1px solid var(--ink-700);
             margin-bottom: 16px;
         }
 
@@ -1081,15 +1173,18 @@ pub fn app_css() -> &'static str {
         }
 
         .account-detail-label {
-            font-size: 12px;
-            color: var(--chrome-muted);
+            font-size: 11px;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--ink-500);
             flex-shrink: 0;
         }
 
         .account-detail-value {
             font-size: 12px;
             font-family: var(--font-mono);
-            color: var(--chrome-foreground);
+            color: var(--ink-200);
             text-align: right;
             word-break: break-all;
             min-width: 0;
@@ -1097,26 +1192,25 @@ pub fn app_css() -> &'static str {
 
         .account-sign-out-btn {
             width: 100%;
-            padding: 8px 28px;
+            padding: 8px 24px;
             font-size: 13px;
-            font-weight: 500;
-            border: 1px solid var(--destructive);
-            border-radius: var(--radius);
+            font-weight: 600;
+            border: 1px solid var(--status-critical);
+            border-radius: var(--radius-sm);
             background: transparent;
-            color: var(--destructive);
+            color: var(--status-critical);
             cursor: pointer;
             transition: background 0.15s, color 0.15s;
         }
 
         .account-sign-out-btn:hover {
-            background: var(--destructive);
-            color: var(--accent-foreground);
+            background: var(--status-critical);
+            color: #ffffff;
         }
 
         .rail-action.signed-in.active {
-            background: var(--accent);
-            border-radius: 10px;
-            color: var(--accent-foreground);
+            background: var(--ink-700);
+            color: var(--ink-100);
         }
 
         /* ── Locked sidebar items ── */
@@ -1128,7 +1222,7 @@ pub fn app_css() -> &'static str {
         }
 
         .rail-status-dot.locked {
-            background: var(--chrome-muted);
+            background: var(--ink-600);
             opacity: 0.3;
         }
 
