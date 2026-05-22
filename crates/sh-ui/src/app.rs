@@ -9,9 +9,10 @@ use dioxus::prelude::*;
 use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, CheckStatus, ConnectorConfig, ConnectorProxy,
-    ConnectorRuntime, ConnectorStatus, ConnectorTransport, HubConfig, IpcConnectorRunner,
-    MatrixWsClient, WsRelay, all_manifests, detect_transport, fetch_connector_apps,
-    fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full, start_oauth_flow_with,
+    ConnectorRuntime, ConnectorStatus, ConnectorTransport, DEFAULT_CONNECTOR_ID, HubConfig,
+    IpcConnectorRunner, MatrixWsClient, WsRelay, all_manifests, detect_transport,
+    fetch_connector_apps, fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full,
+    start_oauth_flow_with,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -454,6 +455,21 @@ pub fn App() -> Element {
                         // Skip preflight on restore — it already ran on
                         // the original sign-in.
                         preflight_dismissed.set(true);
+                        // Auto-select default connector if it exists in the registry
+                        let manifests = all_manifests(&hub_config.read());
+                        if manifests.iter().any(|m| m.id == DEFAULT_CONNECTOR_ID) {
+                            active_id.set(Some(DEFAULT_CONNECTOR_ID.to_string()));
+                            show_setup.set(false);
+                            tracing::info!(
+                                "[server-restore] Auto-selected default connector: {}",
+                                DEFAULT_CONNECTOR_ID
+                            );
+                        } else {
+                            tracing::error!(
+                                "[server-restore] DEFAULT_CONNECTOR_ID '{}' not found in registry, showing connector selection",
+                                DEFAULT_CONNECTOR_ID
+                            );
+                        }
                         tracing::info!("[server-restore] Session restored, connectors may resume");
                         return;
                     }
@@ -1995,6 +2011,18 @@ pub fn App() -> Element {
                         },
                         on_continue: move |_: ()| {
                             preflight_dismissed.set(true);
+                            // Auto-select default connector if it exists in the registry
+                            let manifests = all_manifests(&hub_config.read());
+                            if manifests.iter().any(|m| m.id == DEFAULT_CONNECTOR_ID) {
+                                active_id.set(Some(DEFAULT_CONNECTOR_ID.to_string()));
+                                show_setup.set(false);
+                                tracing::info!("Auto-selected default connector: {}", DEFAULT_CONNECTOR_ID);
+                            } else {
+                                tracing::error!(
+                                    "DEFAULT_CONNECTOR_ID '{}' not found in registry, showing connector selection",
+                                    DEFAULT_CONNECTOR_ID
+                                );
+                            }
                         },
                     }
                 } else if is_account {
