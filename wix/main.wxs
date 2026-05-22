@@ -50,7 +50,7 @@
             <Component Id='StrikeHubExe' Guid='B1A34567-89AB-CDEF-0123-456789ABC001' Win64='yes'>
                 <File Id='strikehub.exe'
                     Name='strikehub.exe'
-                    Source='$(var.TargetDir)\strikehub.exe'
+                    Source='dist\strikehub.exe'
                     KeyPath='yes' />
             </Component>
         </DirectoryRef>

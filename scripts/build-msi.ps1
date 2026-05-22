@@ -45,6 +45,13 @@ if (-not (Test-Path $exe)) {
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 
+# Ensure strikehub.exe is in dist/ (CI signs it there; local builds copy it)
+New-Item -ItemType Directory -Path dist -Force | Out-Null
+if (-not (Test-Path "dist\strikehub.exe")) {
+    Write-Host "Copying strikehub.exe to dist/..." -ForegroundColor Yellow
+    Copy-Item $exe "dist\strikehub.exe"
+}
+
 # Download connectors if needed
 if (-not (Test-Path "dist\ks-connector.exe")) {
     Write-Host "Downloading ks-connector..." -ForegroundColor Yellow
@@ -78,7 +85,6 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
 Write-Host "Compiling..." -ForegroundColor Yellow
 & "$wixDir\candle.exe" -nologo `
     -dVersion="$Version" `
-    -dTargetDir="target\$Target\release" `
     -dPlatform="$WixPlatform" `
     -arch $WixArch `
     -out wix\main.wixobj `
