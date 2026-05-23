@@ -45,6 +45,9 @@ fn main() {
 
     tracing::info!("StrikeHub starting — logs at {}", log_dir.display());
 
+    #[cfg(feature = "sentry")]
+    sh_core::sentry_init::incr("app.launches");
+
     // Install a Ctrl+C / SIGTERM handler so the process shuts down cleanly.
     // On Unix this sends SIGTERM to our entire process group, which kills any
     // child connector processes that are still in our group. On all platforms,

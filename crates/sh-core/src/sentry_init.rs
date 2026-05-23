@@ -184,3 +184,20 @@ fn platform_arch() -> &'static str {
         "unknown"
     }
 }
+
+// ── Metrics helpers ────────────────────────────────────────────────────
+
+/// Increment a counter metric by 1.
+pub fn incr(name: &'static str) {
+    sentry::Hub::current().capture_metric(sentry::metrics::counter(name, 1.0));
+}
+
+/// Record a distribution (histogram) value.
+pub fn distribution(name: &'static str, value: f64) {
+    sentry::Hub::current().capture_metric(sentry::metrics::distribution(name, value));
+}
+
+/// Set a gauge value.
+pub fn gauge(name: &'static str, value: f64) {
+    sentry::Hub::current().capture_metric(sentry::metrics::gauge(name, value));
+}

@@ -46,6 +46,11 @@ pub async fn handle_bridge_request(
     state: &SharedBridgeState,
     uri: &str,
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    #[cfg(feature = "sentry")]
+    crate::sentry_init::incr("bridge.requests");
+    #[cfg(feature = "sentry")]
+    let start = std::time::Instant::now();
+
     // Parse: connector://{connector_id}/{path}
     let stripped = uri.strip_prefix("connector://").unwrap_or(uri);
     let (connector_id, path) = match stripped.find('/') {
@@ -73,7 +78,7 @@ pub async fn handle_bridge_request(
     drop(guard);
 
     // Forward request to the connector over IPC
-    match ipc_http_get_full(&socket_path, path).await {
+    let result = match ipc_http_get_full(&socket_path, path).await {
         Ok((status, mut headers, body)) => {
             let is_html = headers
                 .iter()
@@ -106,6 +111,8 @@ pub async fn handle_bridge_request(
                 connector_id,
                 e
             );
+            #[cfg(feature = "sentry")]
+            crate::sentry_init::incr("bridge.errors");
             let body = format!("Bridge error: {}", e).into_bytes();
             (
                 502,
@@ -113,7 +120,15 @@ pub async fn handle_bridge_request(
                 body,
             )
         }
-    }
+    };
+
+    #[cfg(feature = "sentry")]
+    crate::sentry_init::distribution(
+        "bridge.request_duration_ms",
+        start.elapsed().as_millis() as f64,
+    );
+
+    result
 }
 
 /// Rewrite liveview HTML for IPC mode.

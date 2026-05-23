@@ -104,6 +104,9 @@ async fn main() {
         )
         .init();
 
+    #[cfg(feature = "sentry")]
+    sh_core::sentry_init::incr("app.launches");
+
     // Load config and initialise the allowlist before fetching binaries.
     let cfg = sh_core::HubConfig::load().unwrap_or_else(|e| {
         tracing::warn!("failed to load config, using defaults: {}", e);

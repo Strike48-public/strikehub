@@ -231,6 +231,10 @@ pub async fn ensure_connector_binary(
         manifest.id,
         latest_tag
     );
+
+    #[cfg(feature = "sentry")]
+    crate::sentry_init::incr("connector.fetches");
+
     EnsureResult::Downloaded(binary_path)
 }
 

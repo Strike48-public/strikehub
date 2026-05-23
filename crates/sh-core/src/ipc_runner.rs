@@ -19,6 +19,9 @@ impl IpcConnectorRunner {
         binary: &Path,
         env_vars: &[(String, String)],
     ) -> Result<Self, HubError> {
+        #[cfg(feature = "sentry")]
+        crate::sentry_init::incr("connector.starts");
+
         let ipc_addr = IpcAddr::for_connector(id);
 
         // Remove stale socket from a previous run (no-op on Windows)
@@ -78,6 +81,8 @@ impl IpcConnectorRunner {
         }
 
         let child = cmd.spawn().map_err(|e| {
+            #[cfg(feature = "sentry")]
+            crate::sentry_init::incr("connector.start_failures");
             HubError::Runner(format!("failed to spawn {}: {}", binary.display(), e))
         })?;
 

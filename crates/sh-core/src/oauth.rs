@@ -68,6 +68,9 @@ pub async fn start_oauth_flow_with(
     browser_matrix_url: Option<String>,
     login_url_tx: Option<tokio::sync::oneshot::Sender<String>>,
 ) -> anyhow::Result<OAuthResult> {
+    #[cfg(feature = "sentry")]
+    crate::sentry_init::incr("oauth.flow_starts");
+
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(tls_insecure)
         .timeout(std::time::Duration::from_secs(15))
@@ -215,6 +218,8 @@ pub async fn start_oauth_flow_with(
     match result {
         Ok(Some(mut oauth_result)) => {
             tracing::info!("OAuth flow completed successfully");
+            #[cfg(feature = "sentry")]
+            crate::sentry_init::incr("oauth.flow_completions");
             if is_server_mode {
                 oauth_result.server_handle = Some(server_handle);
             }
@@ -223,10 +228,14 @@ pub async fn start_oauth_flow_with(
         Ok(None) => {
             server_handle.abort();
             tracing::error!("OAuth callback channel closed unexpectedly");
+            #[cfg(feature = "sentry")]
+            crate::sentry_init::incr("oauth.flow_failures");
             anyhow::bail!("OAuth callback channel closed unexpectedly")
         }
         Err(_) => {
             server_handle.abort();
+            #[cfg(feature = "sentry")]
+            crate::sentry_init::incr("oauth.flow_failures");
             anyhow::bail!("OAuth flow timed out after 5 minutes")
         }
     }
