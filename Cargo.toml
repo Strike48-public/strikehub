@@ -76,8 +76,8 @@ tar = "0.4"
 zip = "2"
 
 # Sentry observability
-sentry = { version = "0.34", default-features = false, features = [
-    "backtrace", "contexts", "panic", "debug-images", "reqwest", "rustls"
+sentry = { version = "0.48", default-features = false, features = [
+    "backtrace", "contexts", "panic", "debug-images", "reqwest", "rustls", "metrics"
 ] }
-sentry-tracing = "0.34"
-sentry-anyhow = "0.34"
+sentry-tracing = "0.48"
+sentry-anyhow = "0.48"
