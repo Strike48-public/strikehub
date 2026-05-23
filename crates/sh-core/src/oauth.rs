@@ -60,6 +60,7 @@ pub async fn start_oauth_flow(matrix_url: &str, tls_insecure: bool) -> anyhow::R
 /// - `login_url_tx` — when provided, the login URL is sent over this channel
 ///   instead of calling `open::that()`. Allows the caller to open the URL
 ///   client-side (e.g. via Dioxus `eval` / `window.open()`).
+#[tracing::instrument(name = "oauth.flow", skip_all, fields(matrix_url = %matrix_url))]
 pub async fn start_oauth_flow_with(
     matrix_url: &str,
     tls_insecure: bool,

@@ -3,6 +3,10 @@
 
 #[cfg(feature = "desktop")]
 fn main() {
+    // Initialize Sentry before tracing so panics are captured.
+    #[cfg(feature = "sentry")]
+    let _sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Desktop);
+
     // Set up file logging so diagnostics are available even when there is no
     // console (Windows GUI).  Logs are written to:
     //   Windows: %LOCALAPPDATA%\StrikeHub\logs\
@@ -16,14 +20,28 @@ fn main() {
     let file_appender = tracing_appender::rolling::daily(&log_dir, "strikehub.log");
 
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
-    tracing_subscriber::registry()
+
+    // Build the tracing registry with optional Sentry layer
+    #[cfg(feature = "sentry")]
+    let registry = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with(fmt::layer().with_writer(file_appender))
         .with(fmt::layer().with_writer(std::io::stderr))
-        .init();
+        .with(sentry_tracing::layer());
+
+    #[cfg(not(feature = "sentry"))]
+    let registry = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with(fmt::layer().with_writer(file_appender))
+        .with(fmt::layer().with_writer(std::io::stderr));
+
+    registry.init();
 
     tracing::info!("StrikeHub starting — logs at {}", log_dir.display());
 

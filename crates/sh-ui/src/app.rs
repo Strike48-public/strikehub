@@ -1496,6 +1496,19 @@ pub fn App() -> Element {
                 is_signed_in.set(true);
                 tracing::info!("Sign-in completed, connectors may now start");
 
+                // Set Sentry user context for error attribution
+                #[cfg(feature = "sentry")]
+                {
+                    let am = auth_manager.read();
+                    if let Some(ref auth) = *am {
+                        sh_core::sentry_init::set_user_context(
+                            None,
+                            auth.user_email().as_deref(),
+                            auth.user_display_name().as_deref(),
+                        );
+                    }
+                }
+
                 signing_in.set(false);
                 tracing::info!("signing_in reset to false");
             }
@@ -1663,6 +1676,10 @@ pub fn App() -> Element {
         if let Some(auth) = auth_manager.read().as_ref() {
             auth.clear_auth();
         }
+        // Clear Sentry user context
+        #[cfg(feature = "sentry")]
+        sh_core::sentry_init::clear_user_context();
+
         is_signed_in.set(false);
         signing_in.set(false);
         matrix_app_address.set(None);

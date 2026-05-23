@@ -13,6 +13,7 @@ pub struct IpcConnectorRunner {
 impl IpcConnectorRunner {
     /// Spawn a connector binary with `STRIKEHUB_SOCKET` set, then poll until
     /// the IPC endpoint is ready (or timeout).
+    #[tracing::instrument(name = "connector.start", skip(env_vars), fields(connector_id = %id))]
     pub async fn start(
         id: &str,
         binary: &Path,

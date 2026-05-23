@@ -41,6 +41,7 @@ pub fn new_bridge_state() -> SharedBridgeState {
 /// The `uri` is the full string from the custom protocol request, e.g.
 /// `connector://kubestudio/liveview` or on macOS/WebKit
 /// `connector://kubestudio/liveview` (host = connector_id).
+#[tracing::instrument(name = "bridge.request", skip(state), fields(uri = %uri))]
 pub async fn handle_bridge_request(
     state: &SharedBridgeState,
     uri: &str,

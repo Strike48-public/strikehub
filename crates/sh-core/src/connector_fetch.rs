@@ -45,6 +45,7 @@ pub fn bin_cache_dir() -> PathBuf {
 ///
 /// Checks the latest GitHub release, compares with the cached version, downloads
 /// if needed, and verifies the SHA256 checksum.
+#[tracing::instrument(name = "connector.fetch", skip(client), fields(connector_id = %manifest.id))]
 pub async fn ensure_connector_binary(
     manifest: &ConnectorManifest,
     client: &reqwest::Client,

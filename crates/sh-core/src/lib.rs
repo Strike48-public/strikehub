@@ -13,6 +13,8 @@ pub mod ott;
 pub mod preflight;
 pub mod proxy;
 pub mod registry;
+#[cfg(feature = "sentry")]
+pub mod sentry_init;
 pub mod transport;
 pub mod ws_relay;
 
