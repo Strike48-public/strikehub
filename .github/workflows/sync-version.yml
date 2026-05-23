@@ -28,12 +28,16 @@ jobs:
 
       - name: Extract version from tag
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           # Get the tag that triggered this (either from workflow_run or direct push)
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            TAG="${{ github.event.workflow_run.head_branch }}"
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            TAG="$WORKFLOW_RUN_HEAD_BRANCH"
           else
-            TAG="${{ github.ref_name }}"
+            TAG="$REF_NAME"
           fi
           # Strip 'v' prefix
           VERSION="${TAG#v}"
