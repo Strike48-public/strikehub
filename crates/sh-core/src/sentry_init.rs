@@ -206,3 +206,27 @@ pub fn distribution(name: &'static str, value: f64) {
 pub fn gauge(name: &'static str, value: f64) {
     sentry::Hub::current().capture_metric(sentry::metrics::gauge(name, value));
 }
+
+// ── User interaction tracking ──────────────────────────────────────────
+
+/// Track a user action or navigation event.
+///
+/// Use this to record what parts of the product users interact with.
+/// The action name should be a descriptive identifier, e.g.:
+/// - `"nav.connector.kubestudio"` — user navigated to KubeStudio
+/// - `"nav.settings"` — user opened settings
+/// - `"action.sign_out"` — user signed out
+/// - `"action.connector.add"` — user added a custom connector
+///
+/// Actions are recorded as Sentry breadcrumbs for session context,
+/// making them visible in error reports to understand user journeys.
+pub fn track_action(action: &str) {
+    sentry::add_breadcrumb(sentry::Breadcrumb {
+        ty: "user".into(),
+        category: Some("ui.action".into()),
+        message: Some(action.to_string()),
+        level: sentry::Level::Info,
+        ..Default::default()
+    });
+    tracing::debug!("Tracked user action: {}", action);
+}

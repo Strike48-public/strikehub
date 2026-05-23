@@ -1496,9 +1496,10 @@ pub fn App() -> Element {
                 is_signed_in.set(true);
                 tracing::info!("Sign-in completed, connectors may now start");
 
-                // Set Sentry user context for error attribution
+                // Set Sentry user context for error attribution and track sign-in
                 #[cfg(feature = "sentry")]
                 {
+                    sh_core::sentry_init::track_action("action.sign_in");
                     let am = auth_manager.read();
                     if let Some(ref auth) = *am {
                         sh_core::sentry_init::set_user_context(
@@ -1673,6 +1674,10 @@ pub fn App() -> Element {
     };
 
     let on_sign_out = move |_: ()| {
+        // Track sign-out action
+        #[cfg(feature = "sentry")]
+        sh_core::sentry_init::track_action("action.sign_out");
+
         if let Some(auth) = auth_manager.read().as_ref() {
             auth.clear_auth();
         }
@@ -1778,6 +1783,10 @@ pub fn App() -> Element {
     };
 
     let on_select = move |id: String| {
+        // Track connector navigation
+        #[cfg(feature = "sentry")]
+        sh_core::sentry_init::track_action(&format!("nav.connector.{}", id));
+
         // If setup hasn't been completed yet, sync config first to populate
         // the connectors signal from the manifest defaults.
         if !hub_config.read().setup_complete {
@@ -1800,6 +1809,9 @@ pub fn App() -> Element {
 
     // Add custom IPC connector: appears in sidebar immediately
     let on_add_custom = move |(name, socket_path): (String, String)| {
+        #[cfg(feature = "sentry")]
+        sh_core::sentry_init::track_action("action.connector.add_custom");
+
         {
             let mut cc = custom_connectors.write();
             if cc.iter().any(|c| c.socket_path == socket_path) {
@@ -1840,6 +1852,9 @@ pub fn App() -> Element {
 
     // Remove custom connector: disappears from sidebar immediately
     let on_remove_custom = move |socket_path: String| {
+        #[cfg(feature = "sentry")]
+        sh_core::sentry_init::track_action("action.connector.remove_custom");
+
         let id = format!("ipc-{}", sh_core::slug_from_path(&socket_path));
         {
             let mut cc = custom_connectors.write();
@@ -1868,6 +1883,9 @@ pub fn App() -> Element {
     };
 
     let on_settings = move |_: ()| {
+        #[cfg(feature = "sentry")]
+        sh_core::sentry_init::track_action("nav.settings");
+
         active_id.set(None);
         hovered_id.set(None);
         show_setup.set(true);
@@ -1875,6 +1893,9 @@ pub fn App() -> Element {
     };
 
     let on_account = move |_: ()| {
+        #[cfg(feature = "sentry")]
+        sh_core::sentry_init::track_action("nav.account");
+
         active_id.set(None);
         hovered_id.set(None);
         show_setup.set(false);

@@ -516,6 +516,7 @@ pub fn app_css() -> &'static str {
 
         /* ── Login overlay ── */
         .login-overlay {
+            position: relative;
             flex: 1;
             display: flex;
             flex-direction: column;
@@ -639,6 +640,19 @@ pub fn app_css() -> &'static str {
             font-size: 12px;
             color: var(--status-resolved);
             margin: 4px 0 0 0;
+        }
+
+        .login-telemetry-notice {
+            position: absolute;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 10px;
+            color: var(--ink-600);
+            text-align: center;
+            max-width: 320px;
+            line-height: 1.4;
+            margin: 0;
         }
 
         /* ── TOS overlay ── */
