@@ -57,7 +57,9 @@ fn main() {
         {
             println!("cargo:rustc-env=STRIKEHUB_SENTRY_DSN={}", dsn);
         }
-        if let Some(env) = sentry.get("environment").and_then(|v| v.as_str()) {
+        if let Some(env) = sentry.get("environment").and_then(|v| v.as_str())
+            && !env.is_empty()
+        {
             println!("cargo:rustc-env=STRIKEHUB_SENTRY_ENVIRONMENT={}", env);
         }
         if let Some(rate) = sentry.get("traces_sample_rate").and_then(|v| v.as_str()) {

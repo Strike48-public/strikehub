@@ -12,8 +12,13 @@ pub fn sentry_dsn() -> &'static str {
 }
 
 /// Compile-time Sentry environment from build-defaults.toml.
+/// Defaults to "development" for debug builds, "production" for release builds.
 pub fn sentry_environment() -> &'static str {
-    option_env!("STRIKEHUB_SENTRY_ENVIRONMENT").unwrap_or("development")
+    option_env!("STRIKEHUB_SENTRY_ENVIRONMENT").unwrap_or(if cfg!(debug_assertions) {
+        "development"
+    } else {
+        "production"
+    })
 }
 
 /// Compile-time traces sample rate from build-defaults.toml.
