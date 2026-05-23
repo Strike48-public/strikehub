@@ -47,11 +47,13 @@ jobs:
 
       - name: Check if update needed
         id: check
+        env:
+          TARGET_VERSION: ${{ steps.version.outputs.version }}
         run: |
           CURRENT=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "Current version: $CURRENT"
-          echo "Target version: ${{ steps.version.outputs.version }}"
-          if [ "$CURRENT" = "${{ steps.version.outputs.version }}" ]; then
+          echo "Target version: $TARGET_VERSION"
+          if [ "$CURRENT" = "$TARGET_VERSION" ]; then
             echo "needs_update=false" >> "$GITHUB_OUTPUT"
           else
             echo "needs_update=true" >> "$GITHUB_OUTPUT"
@@ -59,16 +61,20 @@ jobs:
 
       - name: Update Cargo.toml
         if: steps.check.outputs.needs_update == 'true'
+        env:
+          TARGET_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
-          echo "Updated Cargo.toml to version ${{ steps.version.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"$TARGET_VERSION\"/" Cargo.toml
+          echo "Updated Cargo.toml to version $TARGET_VERSION"
           grep -m1 '^version = ' Cargo.toml
 
       - name: Commit and push
         if: steps.check.outputs.needs_update == 'true'
+        env:
+          SYNC_TAG: ${{ steps.version.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml
-          git commit -m "chore: sync version to ${{ steps.version.outputs.tag }}"
+          git commit -m "chore: sync version to $SYNC_TAG"
           git push origin main
