@@ -45,8 +45,30 @@ pub fn bin_cache_dir() -> PathBuf {
 ///
 /// Checks the latest GitHub release, compares with the cached version, downloads
 /// if needed, and verifies the SHA256 checksum.
-#[tracing::instrument(name = "connector.fetch", skip(client), fields(connector_id = %manifest.id))]
+#[tracing::instrument(
+    name = "connector.fetch",
+    skip(client),
+    fields(
+        connector.id = %manifest.id,
+        outcome = tracing::field::Empty,
+    )
+)]
 pub async fn ensure_connector_binary(
+    manifest: &ConnectorManifest,
+    client: &reqwest::Client,
+) -> EnsureResult {
+    let result = ensure_connector_binary_inner(manifest, client).await;
+    let outcome = match &result {
+        EnsureResult::Downloaded(_) => "downloaded",
+        EnsureResult::AlreadyCurrent(_) => "cached",
+        EnsureResult::FallbackStale(_, _) => "fallback_stale",
+        EnsureResult::Unavailable(_) => "unavailable",
+    };
+    tracing::Span::current().record("outcome", outcome);
+    result
+}
+
+async fn ensure_connector_binary_inner(
     manifest: &ConnectorManifest,
     client: &reqwest::Client,
 ) -> EnsureResult {
@@ -231,9 +253,6 @@ pub async fn ensure_connector_binary(
         manifest.id,
         latest_tag
     );
-
-    #[cfg(feature = "sentry")]
-    crate::sentry_init::incr("connector.fetches");
 
     EnsureResult::Downloaded(binary_path)
 }

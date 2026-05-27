@@ -77,7 +77,7 @@ zip = "2"
 
 # Sentry observability
 sentry = { version = "0.48", default-features = false, features = [
-    "backtrace", "contexts", "panic", "debug-images", "reqwest", "rustls", "metrics"
+    "backtrace", "contexts", "panic", "debug-images", "reqwest", "rustls"
 ] }
 sentry-tracing = "0.48"
 sentry-anyhow = "0.48"

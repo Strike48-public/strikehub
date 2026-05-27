@@ -92,7 +92,9 @@ async fn main() {
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
             )
             .with(tracing_subscriber::fmt::layer())
-            .with(sentry_tracing::layer())
+            .with(
+                sentry_tracing::layer().span_filter(sh_core::sentry_init::instrumented_spans_only),
+            )
             .init();
     }
 
@@ -103,9 +105,6 @@ async fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-
-    #[cfg(feature = "sentry")]
-    sh_core::sentry_init::incr("app.launches");
 
     // Load config and initialise the allowlist before fetching binaries.
     let cfg = sh_core::HubConfig::load().unwrap_or_else(|e| {

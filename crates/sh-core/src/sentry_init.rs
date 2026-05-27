@@ -3,7 +3,7 @@
 //! Provides error reporting, tracing, and context enrichment via Sentry.
 //! DSN and other config are set at compile time via `build-defaults.toml`.
 
-use sentry::ClientInitGuard;
+use sentry::{ClientInitGuard, SessionMode, TransactionContext};
 
 /// Compile-time Sentry DSN from build-defaults.toml.
 /// Returns empty string if not set.
@@ -21,11 +21,23 @@ pub fn sentry_environment() -> &'static str {
     })
 }
 
-/// Compile-time traces sample rate from build-defaults.toml.
-fn sentry_traces_sample_rate() -> f32 {
+/// Baseline trace sample rate for high-volume spans (currently `bridge.request`).
+/// Business-event spans (oauth.flow, connector.start, connector.fetch) override this to 1.0
+/// via [`traces_sampler`] so they're never sampled away.
+fn bridge_sample_rate() -> f32 {
     option_env!("STRIKEHUB_SENTRY_TRACES_SAMPLE_RATE")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.2)
+}
+
+/// Sampler: keep 100% of low-volume business-event spans, sample bridge requests at the
+/// configured rate. Runs once per root transaction at start.
+fn traces_sampler(ctx: &TransactionContext) -> f32 {
+    match ctx.name() {
+        "oauth.flow" | "connector.start" | "connector.fetch" => 1.0,
+        "bridge.request" => bridge_sample_rate(),
+        _ => bridge_sample_rate(),
+    }
 }
 
 /// Application mode for context tagging.
@@ -56,7 +68,6 @@ pub fn init_sentry(mode: AppMode) -> Option<ClientInitGuard> {
         return None;
     }
 
-    let traces_sample_rate = sentry_traces_sample_rate();
     let environment = sentry_environment();
 
     let guard = sentry::init((
@@ -64,7 +75,12 @@ pub fn init_sentry(mode: AppMode) -> Option<ClientInitGuard> {
         sentry::ClientOptions {
             release: sentry::release_name!(),
             environment: Some(environment.into()),
-            traces_sample_rate,
+            traces_sampler: Some(std::sync::Arc::new(traces_sampler)),
+            // Release Health: emit a session per app run so Sentry can compute
+            // DAU/WAU, crash-free session rate, and adoption per release without
+            // any custom instrumentation.
+            auto_session_tracking: true,
+            session_mode: SessionMode::Application,
             before_send: Some(std::sync::Arc::new(before_send)),
             attach_stacktrace: true,
             ..Default::default()
@@ -79,10 +95,10 @@ pub fn init_sentry(mode: AppMode) -> Option<ClientInitGuard> {
     });
 
     tracing::info!(
-        "Sentry initialized: env={}, mode={}, sample_rate={}",
+        "Sentry initialized: env={}, mode={}, bridge_sample_rate={}",
         environment,
         mode,
-        traces_sample_rate
+        bridge_sample_rate()
     );
 
     Some(guard)
@@ -190,21 +206,20 @@ fn platform_arch() -> &'static str {
     }
 }
 
-// ── Metrics helpers ────────────────────────────────────────────────────
+/// The set of span names we explicitly instrument and forward to Sentry.
+/// Anything else (Dioxus runtime spans, library spans, etc.) is dropped at the
+/// tracing layer so it doesn't pollute traces or dashboards.
+const INSTRUMENTED_SPANS: &[&str] = &[
+    "oauth.flow",
+    "connector.start",
+    "connector.fetch",
+    "bridge.request",
+];
 
-/// Increment a counter metric by 1.
-pub fn incr(name: &'static str) {
-    sentry::Hub::current().capture_metric(sentry::metrics::counter(name, 1.0));
-}
-
-/// Record a distribution (histogram) value.
-pub fn distribution(name: &'static str, value: f64) {
-    sentry::Hub::current().capture_metric(sentry::metrics::distribution(name, value));
-}
-
-/// Set a gauge value.
-pub fn gauge(name: &'static str, value: f64) {
-    sentry::Hub::current().capture_metric(sentry::metrics::gauge(name, value));
+/// Span filter for `sentry_tracing::layer()`. Returns `true` only for spans we
+/// explicitly instrument; this keeps Dioxus + library spans out of Sentry.
+pub fn instrumented_spans_only(metadata: &tracing::Metadata<'_>) -> bool {
+    INSTRUMENTED_SPANS.contains(&metadata.name())
 }
 
 // ── User interaction tracking ──────────────────────────────────────────

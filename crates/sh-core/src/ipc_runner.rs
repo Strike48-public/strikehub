@@ -13,14 +13,22 @@ pub struct IpcConnectorRunner {
 impl IpcConnectorRunner {
     /// Spawn a connector binary with `STRIKEHUB_SOCKET` set, then poll until
     /// the IPC endpoint is ready (or timeout).
-    #[tracing::instrument(name = "connector.start", skip(env_vars), fields(connector_id = %id))]
+    #[tracing::instrument(
+        name = "connector.start",
+        skip(env_vars),
+        fields(
+            connector.id = %id,
+            outcome = tracing::field::Empty,
+            startup_ms = tracing::field::Empty,
+        )
+    )]
     pub async fn start(
         id: &str,
         binary: &Path,
         env_vars: &[(String, String)],
     ) -> Result<Self, HubError> {
-        #[cfg(feature = "sentry")]
-        crate::sentry_init::incr("connector.starts");
+        let span = tracing::Span::current();
+        let start = std::time::Instant::now();
 
         let ipc_addr = IpcAddr::for_connector(id);
 
@@ -81,8 +89,8 @@ impl IpcConnectorRunner {
         }
 
         let child = cmd.spawn().map_err(|e| {
-            #[cfg(feature = "sentry")]
-            crate::sentry_init::incr("connector.start_failures");
+            span.record("outcome", "spawn_failed");
+            span.record("startup_ms", start.elapsed().as_millis() as u64);
             HubError::Runner(format!("failed to spawn {}: {}", binary.display(), e))
         })?;
 
@@ -102,11 +110,13 @@ impl IpcConnectorRunner {
 
         // Wait for the IPC endpoint to become ready (up to 15 s)
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut became_ready = false;
         loop {
             // Try a health check — on Unix this also implies the socket file exists,
             // on Windows the named pipe will accept connections once the child is ready.
             if runner.health_check().await {
                 tracing::info!("connector '{}' is healthy", id);
+                became_ready = true;
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -115,6 +125,16 @@ impl IpcConnectorRunner {
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
+
+        span.record(
+            "outcome",
+            if became_ready {
+                "ready"
+            } else {
+                "ready_timeout"
+            },
+        );
+        span.record("startup_ms", start.elapsed().as_millis() as u64);
 
         Ok(runner)
     }

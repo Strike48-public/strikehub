@@ -1783,9 +1783,25 @@ pub fn App() -> Element {
     };
 
     let on_select = move |id: String| {
-        // Track connector navigation
+        // Track connector navigation + scope tag so any error after this point
+        // is attributed to the active connector.
         #[cfg(feature = "sentry")]
-        sh_core::sentry_init::track_action(&format!("nav.connector.{}", id));
+        {
+            sh_core::sentry_init::track_action(&format!("nav.connector.{}", id));
+            let name = setup_connectors
+                .read()
+                .iter()
+                .find(|c| c.manifest.id.as_ref() == id)
+                .map(|c| c.manifest.name.to_string())
+                .or_else(|| {
+                    custom_connectors
+                        .read()
+                        .iter()
+                        .find(|c| format!("ipc-{}", sh_core::slug_from_path(&c.socket_path)) == id)
+                        .map(|c| c.name.clone())
+                });
+            sh_core::sentry_init::set_connector_context(&id, name.as_deref());
+        }
 
         // If setup hasn't been completed yet, sync config first to populate
         // the connectors signal from the manifest defaults.

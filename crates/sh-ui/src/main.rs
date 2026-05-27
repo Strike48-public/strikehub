@@ -30,7 +30,7 @@ fn main() {
         )
         .with(fmt::layer().with_writer(file_appender))
         .with(fmt::layer().with_writer(std::io::stderr))
-        .with(sentry_tracing::layer());
+        .with(sentry_tracing::layer().span_filter(sh_core::sentry_init::instrumented_spans_only));
 
     #[cfg(not(feature = "sentry"))]
     let registry = tracing_subscriber::registry()
@@ -44,9 +44,6 @@ fn main() {
     registry.init();
 
     tracing::info!("StrikeHub starting — logs at {}", log_dir.display());
-
-    #[cfg(feature = "sentry")]
-    sh_core::sentry_init::incr("app.launches");
 
     // Install a Ctrl+C / SIGTERM handler so the process shuts down cleanly.
     // On Unix this sends SIGTERM to our entire process group, which kills any

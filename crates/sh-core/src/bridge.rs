@@ -41,14 +41,22 @@ pub fn new_bridge_state() -> SharedBridgeState {
 /// The `uri` is the full string from the custom protocol request, e.g.
 /// `connector://kubestudio/liveview` or on macOS/WebKit
 /// `connector://kubestudio/liveview` (host = connector_id).
-#[tracing::instrument(name = "bridge.request", skip(state), fields(uri = %uri))]
+#[tracing::instrument(
+    name = "bridge.request",
+    skip(state),
+    fields(
+        uri = %uri,
+        connector.id = tracing::field::Empty,
+        http.status_code = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+    )
+)]
 pub async fn handle_bridge_request(
     state: &SharedBridgeState,
     uri: &str,
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
-    #[cfg(feature = "sentry")]
-    crate::sentry_init::incr("bridge.requests");
-    #[cfg(feature = "sentry")]
+    let span = tracing::Span::current();
     let start = std::time::Instant::now();
 
     // Parse: connector://{connector_id}/{path}
@@ -57,12 +65,16 @@ pub async fn handle_bridge_request(
         Some(idx) => (&stripped[..idx], &stripped[idx..]),
         None => (stripped, "/"),
     };
+    span.record("connector.id", connector_id);
 
     let guard = state.read().await;
     let socket_path = match guard.sockets.get(connector_id) {
         Some(p) => p.clone(),
         None => {
             tracing::warn!("bridge: unknown connector '{}'", connector_id);
+            span.record("http.status_code", 404);
+            span.record("outcome", "unknown_connector");
+            span.record("duration_ms", start.elapsed().as_millis() as u64);
             let body = format!("Unknown connector: {}", connector_id).into_bytes();
             return (
                 404,
@@ -84,7 +96,7 @@ pub async fn handle_bridge_request(
                 .iter()
                 .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.contains("text/html"));
 
-            if is_html {
+            let body = if is_html {
                 let html = String::from_utf8_lossy(&body);
                 let rewritten = rewrite_html_for_ipc(
                     &html,
@@ -93,17 +105,23 @@ pub async fn handle_bridge_request(
                     ws_bridge_port,
                     proxy_port,
                 );
-                // Update content-length to match rewritten body
                 headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-length"));
                 let rewritten_bytes = rewritten.into_bytes();
                 headers.push((
                     "content-length".to_string(),
                     rewritten_bytes.len().to_string(),
                 ));
-                (status, headers, rewritten_bytes)
+                rewritten_bytes
             } else {
-                (status, headers, body)
-            }
+                body
+            };
+
+            span.record("http.status_code", status);
+            span.record(
+                "outcome",
+                if status < 400 { "ok" } else { "upstream_error" },
+            );
+            (status, headers, body)
         }
         Err(e) => {
             tracing::error!(
@@ -111,8 +129,8 @@ pub async fn handle_bridge_request(
                 connector_id,
                 e
             );
-            #[cfg(feature = "sentry")]
-            crate::sentry_init::incr("bridge.errors");
+            span.record("http.status_code", 502);
+            span.record("outcome", "ipc_error");
             let body = format!("Bridge error: {}", e).into_bytes();
             (
                 502,
@@ -122,12 +140,7 @@ pub async fn handle_bridge_request(
         }
     };
 
-    #[cfg(feature = "sentry")]
-    crate::sentry_init::distribution(
-        "bridge.request_duration_ms",
-        start.elapsed().as_millis() as f64,
-    );
-
+    span.record("duration_ms", start.elapsed().as_millis() as u64);
     result
 }
 
