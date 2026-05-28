@@ -60,6 +60,16 @@ pub async fn start_oauth_flow(matrix_url: &str, tls_insecure: bool) -> anyhow::R
 /// - `login_url_tx` — when provided, the login URL is sent over this channel
 ///   instead of calling `open::that()`. Allows the caller to open the URL
 ///   client-side (e.g. via Dioxus `eval` / `window.open()`).
+#[tracing::instrument(
+    name = "oauth.flow",
+    skip_all,
+    fields(
+        matrix_url = %matrix_url,
+        outcome = tracing::field::Empty,
+        mode = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+    )
+)]
 pub async fn start_oauth_flow_with(
     matrix_url: &str,
     tls_insecure: bool,
@@ -67,6 +77,9 @@ pub async fn start_oauth_flow_with(
     browser_matrix_url: Option<String>,
     login_url_tx: Option<tokio::sync::oneshot::Sender<String>>,
 ) -> anyhow::Result<OAuthResult> {
+    let span = tracing::Span::current();
+    let started = std::time::Instant::now();
+
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(tls_insecure)
         .timeout(std::time::Duration::from_secs(15))
@@ -184,6 +197,7 @@ pub async fn start_oauth_flow_with(
     );
 
     let is_server_mode = login_url_tx.is_some();
+    span.record("mode", if is_server_mode { "server" } else { "desktop" });
     tracing::info!("Opening browser for Matrix login (two-hop: Matrix session + PKCE)");
     if let Some(tx) = login_url_tx {
         // Server mode: send URL back to the caller for client-side opening
@@ -211,8 +225,11 @@ pub async fn start_oauth_flow_with(
         server_handle.abort();
     }
 
+    span.record("duration_ms", started.elapsed().as_millis() as u64);
+
     match result {
         Ok(Some(mut oauth_result)) => {
+            span.record("outcome", "success");
             tracing::info!("OAuth flow completed successfully");
             if is_server_mode {
                 oauth_result.server_handle = Some(server_handle);
@@ -220,11 +237,13 @@ pub async fn start_oauth_flow_with(
             Ok(oauth_result)
         }
         Ok(None) => {
+            span.record("outcome", "channel_closed");
             server_handle.abort();
             tracing::error!("OAuth callback channel closed unexpectedly");
             anyhow::bail!("OAuth callback channel closed unexpectedly")
         }
         Err(_) => {
+            span.record("outcome", "timeout");
             server_handle.abort();
             anyhow::bail!("OAuth flow timed out after 5 minutes")
         }

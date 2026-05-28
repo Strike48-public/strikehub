@@ -78,6 +78,27 @@ async fn handle_connector(
 
 #[tokio::main]
 async fn main() {
+    // Initialize Sentry before tracing so panics are captured.
+    #[cfg(feature = "sentry")]
+    let _sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Server);
+
+    // Build the tracing subscriber with optional Sentry layer
+    #[cfg(feature = "sentry")]
+    {
+        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .with(
+                sentry_tracing::layer().span_filter(sh_core::sentry_init::instrumented_spans_only),
+            )
+            .init();
+    }
+
+    #[cfg(not(feature = "sentry"))]
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

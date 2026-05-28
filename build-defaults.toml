@@ -8,3 +8,8 @@ default_url = "https://studio.strike48.com"
 
 [connectors]
 allowed_sources = ["Strike48-public/*"]
+
+[sentry]
+dsn = "https://5def928b6fcb9c4b152a12d61f17f887@o4509646470119424.ingest.us.sentry.io/4511436354355200"
+# environment: auto-detected (development for debug builds, production for release)
+traces_sample_rate = "0.2"

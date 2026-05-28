@@ -38,5 +38,12 @@ flate2.workspace = true
 tar.workspace = true
 zip.workspace = true
 
+# Sentry observability (optional)
+sentry = { workspace = true, optional = true }
+sentry-anyhow = { workspace = true, optional = true }
+
+[features]
+sentry = ["dep:sentry", "dep:sentry-anyhow"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

@@ -114,6 +114,11 @@ pub fn LoginOverlay(
             if let Some(msg) = &*cache_msg.read() {
                 p { class: "login-cache-msg", "{msg}" }
             }
+
+            p {
+                class: "login-telemetry-notice",
+                "By signing in, you agree to the collection of anonymous usage data to help improve this product."
+            }
         }
     }
 }

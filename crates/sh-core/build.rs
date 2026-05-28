@@ -49,4 +49,24 @@ fn main() {
         "cargo:rustc-env=STRIKEHUB_DEFAULT_ALLOWED_SOURCES={}",
         allowed_sources.join(",")
     );
+
+    // Sentry configuration (optional)
+    if let Some(sentry) = table.get("sentry") {
+        if let Some(dsn) = sentry.get("dsn").and_then(|v| v.as_str())
+            && !dsn.is_empty()
+        {
+            println!("cargo:rustc-env=STRIKEHUB_SENTRY_DSN={}", dsn);
+        }
+        if let Some(env) = sentry.get("environment").and_then(|v| v.as_str())
+            && !env.is_empty()
+        {
+            println!("cargo:rustc-env=STRIKEHUB_SENTRY_ENVIRONMENT={}", env);
+        }
+        if let Some(rate) = sentry.get("traces_sample_rate").and_then(|v| v.as_str()) {
+            println!(
+                "cargo:rustc-env=STRIKEHUB_SENTRY_TRACES_SAMPLE_RATE={}",
+                rate
+            );
+        }
+    }
 }
