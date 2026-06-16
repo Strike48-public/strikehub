@@ -694,7 +694,10 @@ jobs:
 
   sync-cargo-version:
     name: Sync Cargo.toml version to main
-    if: github.repository_owner == 'Strike48-public' && github.ref_type == 'tag' && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
+    # Note: dry-run guard lives on the mutating step below, not here.
+    # Referencing `inputs.dry_run` in a job-level `if:` triggers
+    # workflow startup_failure when the trigger isn't workflow_dispatch.
+    if: github.repository_owner == 'Strike48-public' && github.ref_type == 'tag'
     needs: [release]
     runs-on: ubuntu-latest
     permissions:
@@ -723,7 +726,7 @@ jobs:
           fi
 
       - name: Open sync PR
-        if: steps.check.outputs.needs_update == 'true'
+        if: steps.check.outputs.needs_update == 'true' && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
         env:
           TAG: ${{ github.ref_name }}
           TARGET: ${{ steps.check.outputs.target }}
