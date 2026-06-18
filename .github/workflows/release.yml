@@ -32,6 +32,10 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# Versioning: Cargo.toml is bumped in the same PR that ships the change.
+# Each job below re-stamps Cargo.toml from the tag at build time, so
+# shipped artifacts always carry the tag's version regardless of what
+# main currently reads.
 jobs:
   docker:
     name: Docker Image
@@ -692,61 +696,3 @@ jobs:
 
             See individual `.sha256` files for checksums.
 
-  sync-cargo-version:
-    name: Sync Cargo.toml version to main
-    # Note: dry-run guard lives on the mutating step below, not here.
-    # Referencing `inputs.dry_run` in a job-level `if:` triggers
-    # workflow startup_failure when the trigger isn't workflow_dispatch.
-    if: github.repository_owner == 'Strike48-public' && github.ref_type == 'tag'
-    needs: [release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check if main needs sync
-        id: check
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          TARGET="${TAG#v}"
-          CURRENT=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          if [ "$CURRENT" = "$TARGET" ]; then
-            echo "Main already at $TARGET; nothing to do."
-            echo "needs_update=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Main at $CURRENT; needs sync to $TARGET."
-            echo "needs_update=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Open sync PR
-        if: steps.check.outputs.needs_update == 'true' && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
-        env:
-          TAG: ${{ github.ref_name }}
-          TARGET: ${{ steps.check.outputs.target }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BRANCH="chore/sync-version-$TAG"
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            echo "Branch $BRANCH already exists; assuming a sync PR is open. Skipping."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          sed -i.bak "s/^version = \".*\"/version = \"$TARGET\"/" Cargo.toml
-          rm Cargo.toml.bak
-          git add Cargo.toml
-          git commit -m "chore: sync version to $TAG"
-          git push origin "$BRANCH"
-          gh pr create \
-            --title "chore: sync version to $TAG" \
-            --body "Automatic sync of \`Cargo.toml\` to match released tag \`$TAG\`. Opened by the Release workflow after a successful publish." \
-            --base main \
-            --head "$BRANCH"
