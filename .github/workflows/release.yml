@@ -413,7 +413,11 @@ jobs:
         if: matrix.installer == 'msi'
         shell: pwsh
         run: |
-          $Version = "${{ github.ref_name }}".TrimStart("v")
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $Version = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $Version = "0.0.0"
+          }
           .\scripts\build-msi.ps1 -Version $Version -Arch ${{ matrix.arch }}
           Move-Item "StrikeHub-$Version-${{ matrix.arch }}.msi" "dist\${{ matrix.artifact }}.msi"
 
