@@ -6,7 +6,8 @@ Status: Approved for planning
 
 ## Summary
 
-Two independent workstreams, shipped as two separate PRs:
+Two workstreams, shipped together in a single PR (A and B are independent in
+code but delivered as one change):
 
 - **A. Sage restyle (global).** Re-skin StrikeHub's UI from its current dark
   *blue* "ops console" to the approved **Strike48 Operator "Sage" DS · Option
@@ -219,12 +220,18 @@ the custom-URL/Keycloak path.
 
 ---
 
-## Sequencing
+## Sequencing (single PR)
 
-1. **PR 1 — Sage restyle (A).** Lower risk, visually verifiable, essentially one
-   file plus logo SVGs. Land first so the new look is in place.
-2. **PR 2 — Easy-mode PLG auth (B).** Builds on A's styling for its overlay;
-   focused auth/config change.
+Both workstreams land in one PR. Implementation order within the branch:
+
+1. **A — Sage restyle first.** Lower risk, visually verifiable, essentially one
+   file (`theme.rs`) plus logo SVGs. Establishes the look the easy-mode overlay
+   will inherit.
+2. **B — Easy-mode PLG auth.** Builds on A's styling for its simplified sign-in
+   overlay; the auth/config change.
+
+Committing A before B on the branch keeps the diff reviewable (presentation
+commit, then auth commit), even though they ship together.
 
 ## Risks / notes
 
