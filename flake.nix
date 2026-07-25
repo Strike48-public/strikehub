@@ -31,9 +31,10 @@
       desktopLibs = with pkgs; [
         gtk3 webkitgtk_4_1 libsoup_3 glib gdk-pixbuf cairo pango atk
         openssl xdotool
-        # xz provides liblzma.so.5, dlopened transitively at runtime by the
-        # WebKit/GTK stack; without it the desktop binary fails to start.
-        xz
+        # xz (liblzma.so.5) and bzip2 (libbz2.so.1) are dlopened transitively
+        # at runtime by the WebKit/GTK stack; without them the desktop binary
+        # (and test binaries linking it) fail to load their shared libraries.
+        xz bzip2
       ];
 
       # ----- macOS dev shell (toolchain + build tools only) -----
