@@ -27,9 +27,10 @@
       pkgs = import nixpkgs { system = linuxSystem; };
 
       # Native libs for the wry/tao WebView (desktop feature) on Linux.
+      # xdotool provides libxdo, which tao links for X11 input handling.
       desktopLibs = with pkgs; [
         gtk3 webkitgtk_4_1 libsoup_3 glib gdk-pixbuf cairo pango atk
-        openssl
+        openssl xdotool
       ];
 
       # ----- macOS dev shell (toolchain + build tools only) -----
