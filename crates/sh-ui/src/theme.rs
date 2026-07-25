@@ -303,17 +303,73 @@ pub fn app_css() -> &'static str {
             color: var(--ink-100);
         }
 
-        /* Easy-mode / Advanced toggle. "on" = easy mode active → sage accent
-           fill with dark ink, so the state is obvious at a glance. Off (advanced)
-           falls back to the neutral rail-action look. */
-        .rail-easy-toggle.on {
-            background: var(--accent);
-            color: var(--accent-foreground);
+        /* ── Settings row + easy-mode toggle switch ── */
+        .settings-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            width: 100%;
+            max-width: 480px;
+            padding: 16px 18px;
+            margin-bottom: 8px;
+            background: var(--chrome-card);
+            border: 1px solid var(--chrome-card-border);
+            border-radius: var(--radius-lg);
         }
-        .rail-easy-toggle.on:hover {
-            background: var(--accent-hover);
-            color: var(--accent-foreground);
+        .settings-row-text {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            text-align: left;
         }
+        .settings-row-label {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--ink-100);
+        }
+        .settings-row-desc {
+            font-size: 12px;
+            color: var(--ink-400);
+        }
+
+        /* iOS-style toggle switch (a <button>, not a checkbox — the liveview
+           form-data path panics on checkbox onchange). `.easy-toggle-on` = on. */
+        .easy-toggle {
+            position: relative;
+            display: inline-block;
+            width: 46px;
+            height: 28px;
+            flex-shrink: 0;
+            padding: 0;
+            border: none;
+            background: none;
+            cursor: pointer;
+        }
+        .easy-toggle-track {
+            position: absolute;
+            inset: 0;
+            background: var(--ink-600);
+            border-radius: 999px;
+            transition: background 0.2s ease;
+        }
+        .easy-toggle-track::before {
+            content: "";
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 22px;
+            height: 22px;
+            background: #fff;
+            border-radius: 50%;
+            transition: transform 0.2s ease;
+        }
+        .easy-toggle.easy-toggle-on .easy-toggle-track { background: var(--accent); }
+        .easy-toggle.easy-toggle-on .easy-toggle-track::before {
+            transform: translateX(18px);
+            background: var(--accent-foreground);
+        }
+        .easy-toggle:hover { background: none; }
 
         /* ── Content area ── */
         .content-area {

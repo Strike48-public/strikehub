@@ -26,6 +26,8 @@ pub fn ContentArea(
     #[props(default)] hovered_id: Option<String>,
     #[props(default = 0)] auth_version: u32,
     #[props(default = false)] dev_mode: bool,
+    #[props(default = false)] easy_mode: bool,
+    #[props(default)] on_toggle_easy_mode: Option<EventHandler<()>>,
 ) -> Element {
     // Choose the content URL based on transport mode:
     //   IPC  → connector://{id}/liveview  (custom protocol handler via bridge)
@@ -86,6 +88,8 @@ pub fn ContentArea(
                     on_hover: on_hover,
                     hovered_id: hovered_id.clone(),
                     dev_mode: dev_mode,
+                    easy_mode: easy_mode,
+                    on_toggle_easy_mode: on_toggle_easy_mode,
                 }
             } else {
                 match (&active_name, &url, &active_status) {

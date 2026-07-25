@@ -1993,7 +1993,14 @@ pub fn App() -> Element {
     let active_matrix_addr = active.as_ref().and_then(|c| c.matrix_app_address.clone());
     let current_proxy_port = *proxy_port.read();
 
-    let setup_list = setup_connectors.read().clone();
+    // In easy mode, drop KubeStudio from the connector cards (Settings + landing
+    // page) too, matching the sidebar rail filter.
+    let setup_list: Vec<SetupConnector> = setup_connectors
+        .read()
+        .iter()
+        .filter(|c| !easy_on || c.manifest.id != "kubestudio")
+        .cloned()
+        .collect();
     let custom_list = custom_connectors.read().clone();
     let is_setup = *show_setup.read();
     let is_account = *show_account.read();
@@ -2058,8 +2065,6 @@ pub fn App() -> Element {
                         show_account: is_account,
                         on_sign_out: on_sign_out,
                         on_account: on_account,
-                        easy_mode: easy_on,
-                        on_toggle_easy_mode: on_toggle_easy_mode,
                     }
                 }
                 if !*is_signed_in.read() && has_matrix_url {
@@ -2158,6 +2163,8 @@ pub fn App() -> Element {
                         hovered_id: hovered_id.read().clone(),
                         auth_version: *auth_version.read(),
                         dev_mode: *dev_mode.read(),
+                        easy_mode: easy_on,
+                        on_toggle_easy_mode: on_toggle_easy_mode,
                     }
                 }
             }

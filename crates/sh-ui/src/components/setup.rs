@@ -384,11 +384,37 @@ pub fn SetupView(
     #[props(default)] on_hover: Option<EventHandler<Option<String>>>,
     #[props(default)] hovered_id: Option<String>,
     #[props(default = false)] dev_mode: bool,
+    /// Whether easy mode is active (gates advanced connectors like KubeStudio).
+    #[props(default = false)]
+    easy_mode: bool,
+    /// Toggle easy mode on/off. When `None`, the setting row is hidden.
+    #[props(default)]
+    on_toggle_easy_mode: Option<EventHandler<()>>,
 ) -> Element {
     rsx! {
         div { class: "setup-view",
             Strike48Logo { width: "180px" }
             h2 { "StrikeHub" }
+
+            if let Some(toggle) = on_toggle_easy_mode {
+                div { class: "settings-row",
+                    div { class: "settings-row-text",
+                        span { class: "settings-row-label", "Easy mode" }
+                        span { class: "settings-row-desc",
+                            "Show only the essentials. Turn off to reveal advanced connectors."
+                        }
+                    }
+                    button {
+                        r#type: "button",
+                        class: if easy_mode { "easy-toggle easy-toggle-on" } else { "easy-toggle" },
+                        role: "switch",
+                        "aria-checked": if easy_mode { "true" } else { "false" },
+                        title: if easy_mode { "Easy mode on" } else { "Easy mode off" },
+                        onclick: move |_| toggle.call(()),
+                        span { class: "easy-toggle-track" }
+                    }
+                }
+            }
 
             ConnectorCards {
                 connectors: connectors,
