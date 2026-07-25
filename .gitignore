@@ -27,3 +27,4 @@ sfx-*.7z
 7zSD.sfx
 
 .strike48
+.direnv/
