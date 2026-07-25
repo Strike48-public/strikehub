@@ -3,19 +3,22 @@
 pub fn theme_css() -> &'static str {
     r#"
         :root {
-            /* Strike48 Ink Scale — cool-blue undertone neutrals */
-            --ink-900: #07090d;
-            --ink-850: #0b0e14;
-            --ink-800: #0f1320;
-            --ink-750: #141a28;
-            --ink-700: #1a2233;
-            --ink-650: #222b40;
-            --ink-600: #2c3753;
-            --ink-500: #4a5578;
-            --ink-400: #6e7a9a;
-            --ink-300: #9ba4be;
-            --ink-200: #cdd2e2;
-            --ink-100: #eef0f7;
+            /* Strike48 "Sage" DS — muted sage-green pastel on near-black,
+               Material-3 shapes. Dark ink on all sage-filled controls. */
+
+            /* Neutral scale — sage-tinted dark neutrals (darkest → lightest) */
+            --ink-900: #0b0f0d;   /* deepest — rail + content bg */
+            --ink-850: #0f1512;   /* body chrome bg */
+            --ink-800: #171d1a;   /* card / elevated */
+            --ink-750: #1c231f;   /* hover surface */
+            --ink-700: #242b27;   /* card border / active surface (Sage --em-surface) */
+            --ink-650: #2c3430;   /* stronger hover */
+            --ink-600: #3a433d;   /* active */
+            --ink-500: #55605a;   /* muted / offline */
+            --ink-400: #7c877f;   /* secondary text */
+            --ink-300: #9aa69f;   /* tertiary text */
+            --ink-200: #cfd6d1;   /* body text */
+            --ink-100: #e9eeeb;   /* headings / emphasis (Sage --em-text) */
 
             /* Semantic mappings */
             --chrome:            var(--ink-850);
@@ -29,44 +32,46 @@ pub fn theme_css() -> &'static str {
             --chrome-card:       var(--ink-800);
             --chrome-card-border:var(--ink-700);
 
-            /* Strike48 Brand */
-            --brand-300: #7aa9ff;
-            --brand-500: #3978D5;
-            --brand-600: #2563eb;
-            --brand-700: #1d4ed8;
+            /* Sage brand — light pastel; text ON it must be dark ink. */
+            --brand-300: #b9d4c6;   /* light sage */
+            --brand-500: #9cbfae;   /* primary · sage (Sage --em-brand) */
+            --brand-600: #7fa894;   /* deeper sage / hover (Sage --em-brand-strong) */
+            --brand-700: #6b9280;   /* deepest */
 
             --accent:            var(--brand-500);
             --accent-hover:      var(--brand-600);
-            --accent-foreground: #ffffff;
+            --accent-foreground: #17201b;   /* dark ink on sage — REQUIRED */
 
-            /* Strike48 Status Colors */
-            --status-critical:    #ef4444;
-            --status-high:        #f97316;
-            --status-medium:      #3b82f6;
-            --status-low:         #64748b;
-            --status-open:        #3b82f6;
-            --status-in-progress: #eab308;
-            --status-waiting:     #a855f7;
-            --status-resolved:    #10b981;
-            --status-closed:      #475569;
+            /* Status colors (Sage palette) */
+            --status-critical:    #d99a9a;   /* muted rose (Sage --em-error) */
+            --status-high:        #d9b07c;   /* warm amber */
+            --status-medium:      #9cbfae;   /* sage */
+            --status-low:         #55605a;   /* muted */
+            --status-open:        #9cbfae;
+            --status-in-progress: #d9b07c;   /* amber */
+            --status-waiting:     #b9a9d4;   /* muted lavender */
+            --status-resolved:    #8fc4ab;   /* mint (Sage --em-toast-fg) */
+            --status-closed:      #3a433d;
 
             --success:     var(--status-resolved);
             --warning:     var(--status-in-progress);
             --destructive: var(--status-critical);
 
-            /* Typography — IBM Plex */
+            /* Typography — IBM Plex (unchanged) */
             --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
             --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
             --font-size: 13px;
 
-            /* Radius — dense console style */
-            --radius-xs: 2px;
-            --radius-sm: 4px;
-            --radius-md: 6px;
+            /* Radius — Sage Material-3 shapes (rounder than the old console) */
+            --radius-xs: 6px;
+            --radius-sm: 10px;    /* default control radius */
+            --radius-md: 12px;    /* Sage --em-radius-control */
+            --radius-lg: 16px;    /* Sage --em-radius-card */
+            --radius-pill: 999px; /* Sage --em-radius-pill — buttons/badges */
             --radius: var(--radius-sm);
 
             /* Shadows */
-            --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.3);
+            --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.35);
             --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.5);
 
             --rail-width: 48px;
@@ -79,15 +84,15 @@ pub fn theme_css() -> &'static str {
         /* Strike48 scrollbars — visible, styled */
         *::-webkit-scrollbar { width: 8px; height: 8px; }
         *::-webkit-scrollbar-track { background: var(--ink-850); }
-        *::-webkit-scrollbar-thumb { background: var(--ink-650); border-radius: 2px; }
+        *::-webkit-scrollbar-thumb { background: var(--ink-650); border-radius: var(--radius-sm); }
         *::-webkit-scrollbar-thumb:hover { background: var(--ink-600); }
 
         /* Selection */
-        ::selection { background: rgba(37, 99, 235, 0.33); color: var(--ink-100); }
+        ::selection { background: rgba(156, 191, 174, 0.30); color: var(--ink-100); }
 
         /* Focus — border-color only, no rings */
         *:focus { outline: none; }
-        *:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; border-radius: 2px; }
+        *:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; border-radius: var(--radius-xs); }
         input:focus-visible, textarea:focus-visible, select:focus-visible {
             outline: none;
             border-color: var(--brand-500);
