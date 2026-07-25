@@ -188,9 +188,9 @@ pub fn Sidebar(
                 if let Some(toggle) = on_toggle_easy_mode {
                     if is_signed_in {
                         div {
-                            class: "rail-action",
+                            class: if easy_mode { "rail-action rail-easy-toggle on" } else { "rail-action rail-easy-toggle" },
                             onclick: move |_| toggle.call(()),
-                            title: if easy_mode { "Advanced (show all connectors)" } else { "Easy mode (hide advanced connectors)" },
+                            title: if easy_mode { "Easy mode on — click for Advanced (show all connectors)" } else { "Advanced mode — click to return to Easy mode" },
                             svg {
                                 width: "20",
                                 height: "20",

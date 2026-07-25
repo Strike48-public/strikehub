@@ -303,6 +303,18 @@ pub fn app_css() -> &'static str {
             color: var(--ink-100);
         }
 
+        /* Easy-mode / Advanced toggle. "on" = easy mode active → sage accent
+           fill with dark ink, so the state is obvious at a glance. Off (advanced)
+           falls back to the neutral rail-action look. */
+        .rail-easy-toggle.on {
+            background: var(--accent);
+            color: var(--accent-foreground);
+        }
+        .rail-easy-toggle.on:hover {
+            background: var(--accent-hover);
+            color: var(--accent-foreground);
+        }
+
         /* ── Content area ── */
         .content-area {
             flex: 1;
