@@ -611,7 +611,7 @@ pub fn app_css() -> &'static str {
             font-size: 13px;
             color: var(--status-critical);
             background: rgba(217, 154, 154, 0.12);
-            border: 1px solid rgba(239, 68, 68, 0.25);
+            border: 1px solid rgba(217, 154, 154, 0.25);
             border-radius: var(--radius-sm);
             max-width: 320px;
             text-align: center;
