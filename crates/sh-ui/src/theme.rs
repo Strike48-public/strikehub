@@ -814,7 +814,7 @@ pub fn app_css() -> &'static str {
         .step-pill.active {
             border-color: var(--brand-500);
             background: var(--brand-500);
-            color: #ffffff;
+            color: var(--accent-foreground);
         }
         .step-pill.done {
             border-color: var(--status-resolved);
@@ -979,7 +979,7 @@ pub fn app_css() -> &'static str {
             border: none;
             border-radius: var(--radius-sm);
             background: var(--brand-500);
-            color: #ffffff;
+            color: var(--accent-foreground);
             cursor: pointer;
             transition: background 0.15s;
         }
@@ -1077,7 +1077,7 @@ pub fn app_css() -> &'static str {
             border: none;
             border-radius: var(--radius-sm);
             background: var(--brand-500);
-            color: #ffffff;
+            color: var(--accent-foreground);
             cursor: pointer;
             transition: background 0.15s;
         }
@@ -1225,7 +1225,7 @@ pub fn app_css() -> &'static str {
 
         .account-sign-out-btn:hover {
             background: var(--status-critical);
-            color: #ffffff;
+            color: var(--accent-foreground);
         }
 
         .rail-action.signed-in.active {
