@@ -161,7 +161,7 @@ pub fn app_css() -> &'static str {
             justify-content: center;
             width: 32px;
             height: 32px;
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-md);
             background: var(--ink-800);
             margin-bottom: 4px;
             flex-shrink: 0;
@@ -194,7 +194,7 @@ pub fn app_css() -> &'static str {
             justify-content: center;
             width: 36px;
             height: 36px;
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-md);
             cursor: pointer;
             transition: background 0.15s;
         }
@@ -364,7 +364,7 @@ pub fn app_css() -> &'static str {
             width: 200px;
             padding: 20px 16px 16px;
             border: 1px solid var(--ink-700);
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-lg);
             background: var(--ink-800);
             cursor: pointer;
             text-align: center;
@@ -391,7 +391,7 @@ pub fn app_css() -> &'static str {
             justify-content: center;
             width: 44px;
             height: 44px;
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-md);
             background: var(--ink-700);
             margin-bottom: 12px;
         }
@@ -506,7 +506,7 @@ pub fn app_css() -> &'static str {
         .card-remove-btn:hover {
             color: var(--status-critical);
             border-color: var(--status-critical);
-            background: rgba(239, 68, 68, 0.12);
+            background: rgba(217, 154, 154, 0.12);
         }
 
         /* ── Auth status (kept for setup view compatibility) ── */
@@ -585,22 +585,23 @@ pub fn app_css() -> &'static str {
 
         .login-btn {
             margin-top: 8px;
-            padding: 8px 28px;
-            font-size: 13px;
+            padding: 12px 28px;
+            font-size: 14px;
             font-weight: 600;
+            font-family: var(--font-sans);
             border: none;
-            border-radius: var(--radius-sm);
-            background: var(--brand-500);
+            border-radius: var(--radius-pill);
+            background: var(--accent);
             color: var(--accent-foreground);
             cursor: pointer;
             transition: background 0.15s;
         }
 
-        .login-btn:hover { background: var(--brand-600); }
+        .login-btn:hover { background: var(--accent-hover); }
 
         .login-btn.disabled,
         .login-btn:disabled {
-            opacity: 0.5;
+            opacity: 0.6;
             cursor: default;
         }
 
