@@ -89,6 +89,13 @@ pub fn Sidebar(
     #[props(default = false)] show_account: bool,
     on_sign_out: EventHandler<()>,
     on_account: EventHandler<()>,
+    /// Whether easy mode is active (KubeStudio hidden). Controls the label of
+    /// the Advanced/Easy toggle in the footer.
+    #[props(default = false)]
+    easy_mode: bool,
+    /// Toggle easy mode on/off. When `None`, the toggle button is not shown.
+    #[props(default)]
+    on_toggle_easy_mode: Option<EventHandler<()>>,
 ) -> Element {
     rsx! {
         div { class: "sidebar-rail",
@@ -176,6 +183,37 @@ pub fn Sidebar(
 
             // Bottom actions
             div { class: "rail-footer",
+                // Advanced / Easy toggle: gates KubeStudio. Shown only when the
+                // host wires a handler (i.e. easy mode is a concept for this build).
+                if let Some(toggle) = on_toggle_easy_mode {
+                    if is_signed_in {
+                        div {
+                            class: "rail-action",
+                            onclick: move |_| toggle.call(()),
+                            title: if easy_mode { "Advanced (show all connectors)" } else { "Easy mode (hide advanced connectors)" },
+                            svg {
+                                width: "20",
+                                height: "20",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                xmlns: "http://www.w3.org/2000/svg",
+                                // sliders / controls glyph
+                                path {
+                                    d: "M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3",
+                                    stroke: "currentColor",
+                                    stroke_width: "1.5",
+                                    stroke_linecap: "round",
+                                }
+                                path {
+                                    d: "M1 14h6 M9 8h6 M17 16h6",
+                                    stroke: "currentColor",
+                                    stroke_width: "1.5",
+                                    stroke_linecap: "round",
+                                }
+                            }
+                        }
+                    }
+                }
                 if has_matrix_url && is_signed_in {
                     div {
                         class: if show_account { "rail-action signed-in active" } else { "rail-action signed-in" },

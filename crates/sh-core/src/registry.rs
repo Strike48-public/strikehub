@@ -162,6 +162,7 @@ mod tests {
             connectors: BTreeMap::new(),
             instance_ids: BTreeMap::new(),
             studio_url: None,
+            easy_mode: None,
             allowlist: AllowlistConfig::default(),
             dynamic_connectors: dynamic,
         }

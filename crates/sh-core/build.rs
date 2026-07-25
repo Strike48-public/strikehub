@@ -32,6 +32,20 @@ fn main() {
         default_url
     );
 
+    // Easy-mode build-time default. When true, only the primary connector is
+    // shown and KubeStudio is gated behind the Advanced toggle. Defaults to
+    // false when the key is absent.
+    let easy_mode_default = table
+        .get("easy_mode")
+        .and_then(|v| v.get("default"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    println!(
+        "cargo:rustc-env=STRIKEHUB_DEFAULT_EASY_MODE={}",
+        easy_mode_default
+    );
+
     // Emit default allowed sources for the connector allowlist.
     // The value is a comma-separated string of org/repo patterns.
     let allowed_sources: Vec<String> = table

@@ -102,6 +102,12 @@ pub struct HubConfig {
     /// `STRIKE48_API_URL` env var and the compiled-in default.
     #[serde(default)]
     pub studio_url: Option<String>,
+    /// User's easy-mode choice. `None` means "use the build-time default"
+    /// ([`resolve_easy_mode`]); `Some(b)` is an explicit choice that overrides
+    /// it and persists across launches. In easy mode only the primary connector
+    /// is shown; turning it off (the Advanced toggle) reveals all connectors.
+    #[serde(default)]
+    pub easy_mode: Option<bool>,
     /// Allowlist of GitHub org/repo patterns permitted for connector downloads.
     /// When present, replaces compile-time defaults.
     #[serde(default)]
@@ -261,6 +267,7 @@ impl HubConfig {
                 connectors: BTreeMap::new(),
                 instance_ids: BTreeMap::new(),
                 studio_url: None,
+                easy_mode: None,
                 allowlist: AllowlistConfig::default(),
                 dynamic_connectors: Vec::new(),
             });
@@ -469,6 +476,21 @@ impl HubConfig {
 /// Format: `strikehub-{connector_id}-{url_slug}-{hex}`
 /// where `url_slug` scopes the ID to a specific Studio URL so switching
 /// between studios produces distinct credential files.
+/// The compiled-in easy-mode default (from `build-defaults.toml` → `build.rs`).
+/// `"true"` → true; anything else (or unset) → false.
+pub fn default_easy_mode() -> bool {
+    matches!(option_env!("STRIKEHUB_DEFAULT_EASY_MODE"), Some("true"))
+}
+
+/// Resolve the effective easy-mode flag: the user's persisted choice wins when
+/// set, otherwise fall back to the build-time [`default_easy_mode`].
+///
+/// In easy mode StrikeHub shows only the primary connector and gates the rest
+/// behind the Advanced toggle; turning easy mode off reveals all connectors.
+pub fn resolve_easy_mode(persisted: Option<bool>) -> bool {
+    persisted.unwrap_or_else(default_easy_mode)
+}
+
 pub fn generate_instance_id(connector_id: &str, studio_url: &str) -> String {
     use rand::RngCore;
     let mut buf = [0u8; 8];
@@ -625,6 +647,7 @@ transport = "ipc"
             connectors: BTreeMap::new(),
             instance_ids: BTreeMap::new(),
             studio_url: None,
+            easy_mode: None,
             allowlist: AllowlistConfig::default(),
             dynamic_connectors: vec![DynamicConnectorDef {
                 id: "kubestudio".to_string(), // collides with builtin
@@ -650,6 +673,7 @@ transport = "ipc"
             connectors: BTreeMap::new(),
             instance_ids: BTreeMap::new(),
             studio_url: None,
+            easy_mode: None,
             allowlist: AllowlistConfig::default(),
             dynamic_connectors: vec![
                 DynamicConnectorDef {
@@ -686,6 +710,7 @@ transport = "ipc"
             connectors: BTreeMap::new(),
             instance_ids: BTreeMap::new(),
             studio_url: None,
+            easy_mode: None,
             allowlist: AllowlistConfig::default(),
             dynamic_connectors: vec![DynamicConnectorDef {
                 id: "my-tool".to_string(),

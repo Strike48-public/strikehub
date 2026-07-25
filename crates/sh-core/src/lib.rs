@@ -23,7 +23,8 @@ pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant
 pub use bridge::{BridgeState, SharedBridgeState, new_bridge_state};
 pub use config::{
     AllowlistConfig, ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport,
-    DynamicConnectorDef, HubConfig, generate_instance_id, slug_from_path, url_slug,
+    DynamicConnectorDef, HubConfig, default_easy_mode, generate_instance_id, resolve_easy_mode,
+    slug_from_path, url_slug,
 };
 pub use connector_fetch::{EnsureResult, bin_cache_dir, ensure_all_connector_binaries};
 pub use error::HubError;

@@ -228,6 +228,7 @@ pub fn App() -> Element {
             connectors: Default::default(),
             instance_ids: Default::default(),
             studio_url: None,
+            easy_mode: None,
             allowlist: Default::default(),
             dynamic_connectors: Vec::new(),
         });
@@ -272,6 +273,12 @@ pub fn App() -> Element {
 
     // Dev mode: show the "Add Connector" form in Settings only when STRIKEHUB_DEV is set.
     let dev_mode = use_signal(|| std::env::var("STRIKEHUB_DEV").is_ok());
+
+    // Easy mode: persisted user choice > build-time default. When on, only the
+    // primary connector is shown and the rest (e.g. KubeStudio) are gated behind
+    // the Advanced toggle. Reactive signal so toggling swaps the sidebar live.
+    let mut easy_mode =
+        use_signal(move || sh_core::resolve_easy_mode(hub_config.peek().easy_mode));
 
     // Persistent WS client for GraphQL queries (shared with preflight).
     let mut ws_client_signal: Signal<Option<Arc<MatrixWsClient>>> = use_signal(|| None);
@@ -1935,10 +1942,34 @@ pub fn App() -> Element {
         show_account.set(true);
     };
 
+    // Advanced toggle: flip easy mode off (reveal all connectors) or back on,
+    // persisting the explicit choice so it survives restarts.
+    let on_toggle_easy_mode = move |_: ()| {
+        let next = !*easy_mode.peek();
+        easy_mode.set(next);
+        // If we're leaving easy mode and the active connector was hidden, no
+        // change needed; if we re-enter easy mode while KubeStudio is active,
+        // fall back to the primary connector so the view isn't stranded.
+        if next && active_id.peek().as_deref() == Some("kubestudio") {
+            active_id.set(Some(DEFAULT_CONNECTOR_ID.to_string()));
+        }
+        let mut cfg = hub_config.peek().clone();
+        cfg.easy_mode = Some(next);
+        if let Err(e) = cfg.save() {
+            tracing::warn!("Failed to persist easy_mode: {}", e);
+        }
+        hub_config.set(cfg);
+    };
+
     let current_connectors = connectors.read();
 
+    // In easy mode, gate KubeStudio: show only the primary connector (Pick) and
+    // any user-added custom IPC connectors. Turning easy mode off (Advanced)
+    // reveals everything.
+    let easy_on = *easy_mode.read();
     let sidebar_items: Vec<ConnectorItem> = current_connectors
         .iter()
+        .filter(|c| !easy_on || c.id != "kubestudio")
         .map(|c| ConnectorItem {
             id: c.id.clone(),
             display_name: c.display_name.clone(),
@@ -2027,6 +2058,8 @@ pub fn App() -> Element {
                         show_account: is_account,
                         on_sign_out: on_sign_out,
                         on_account: on_account,
+                        easy_mode: easy_on,
+                        on_toggle_easy_mode: on_toggle_easy_mode,
                     }
                 }
                 if !*is_signed_in.read() && has_matrix_url {
