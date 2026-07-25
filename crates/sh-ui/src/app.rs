@@ -830,12 +830,29 @@ pub fn App() -> Element {
                         )
                         .await
                         {
-                            Ok(token) => {
+                            Ok(ott) => {
                                 tracing::info!(
-                                    "[connector-start] OTT created for '{}' auto-registration",
-                                    conn.id
+                                    "[connector-start] OTT created for '{}' auto-registration (tenant_id={:?})",
+                                    conn.id,
+                                    ott.tenant_id
                                 );
-                                conn_env.push(("STRIKE48_REGISTRATION_TOKEN".into(), token));
+                                // Prefer the authoritative personal tenant from
+                                // the pre-approve response over the separately
+                                // queried fetch_tenant_id value, so connectors
+                                // register under the correct PLG tenant.
+                                if let Some(tenant) = ott.tenant_id.as_deref() {
+                                    // SAFETY: single-threaded in the Dioxus
+                                    // runtime here; connector children are
+                                    // spawned just below and read these vars.
+                                    unsafe {
+                                        std::env::set_var("STRIKE48_TENANT", tenant);
+                                        std::env::set_var("TENANT_ID", tenant);
+                                    }
+                                    conn_env.retain(|(k, _)| k != "STRIKE48_TENANT" && k != "TENANT_ID");
+                                    conn_env.push(("STRIKE48_TENANT".into(), tenant.to_string()));
+                                    conn_env.push(("TENANT_ID".into(), tenant.to_string()));
+                                }
+                                conn_env.push(("STRIKE48_REGISTRATION_TOKEN".into(), ott.token_json));
                             }
                             Err(e) => {
                                 tracing::warn!(
