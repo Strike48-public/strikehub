@@ -385,6 +385,9 @@ pub fn app_css() -> &'static str {
             flex: 1;
             position: relative;
             overflow: hidden;
+            /* Dark backdrop behind the iframe so the fade-in reveals over the
+               app's own dark theme, not a white gap. */
+            background: var(--ink-900);
         }
 
         .content-webview {
@@ -393,6 +396,14 @@ pub fn app_css() -> &'static str {
             width: 100%;
             height: 100%;
             border: none;
+            /* Hidden until the connector's page has loaded (and had a moment to
+               apply its own CSS), then faded in — a central FOUC guard so each
+               connector doesn't flash its unstyled first frame. */
+            opacity: 0;
+            transition: opacity 0.25s ease;
+        }
+        .content-webview.loaded {
+            opacity: 1;
         }
 
         .content-empty, .content-offline, .setup-view {
