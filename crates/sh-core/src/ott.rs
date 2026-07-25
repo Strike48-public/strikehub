@@ -4,6 +4,45 @@
 //! The returned token is passed to connectors via the `STRIKE48_REGISTRATION_TOKEN`
 //! env var so they can self-register without manual admin approval.
 
+/// Result of a pre-approve exchange. `token_json` is the exact
+/// `{token, matrix_url}` JSON the SDK's `OttProvider.parse_ott()` consumes.
+/// `tenant_id` is the authoritative personal tenant from the response, used
+/// StrikeHub-side to forward the correct tenant to connector children.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreApprovedOtt {
+    pub token_json: String,
+    pub tenant_id: Option<String>,
+}
+
+/// Parse a pre-approve response body into a [`PreApprovedOtt`]. Pure (no I/O)
+/// so it is unit-testable. `matrix_url` is the base the SDK must use for
+/// registration (the local proxy can't serve `/register-with-ott`).
+pub(crate) fn parse_pre_approve_body(
+    body: &serde_json::Value,
+    matrix_url: &str,
+) -> anyhow::Result<PreApprovedOtt> {
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No token in pre-approve response: {}", body))?;
+
+    let tenant_id = body
+        .get("tenant_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    // SDK OttData shape — do NOT add fields here.
+    let token_json = serde_json::json!({
+        "token": token,
+        "matrix_url": matrix_url,
+    })
+    .to_string();
+
+    Ok(PreApprovedOtt { token_json, tenant_id })
+}
+
 /// Create a pre-approved OTT by calling the Matrix pre-approve REST endpoint.
 ///
 /// # Arguments
@@ -22,7 +61,7 @@ pub async fn create_pre_approved_token(
     jwt: &str,
     tls_insecure: bool,
     connector_type: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<PreApprovedOtt> {
     let base = matrix_url.trim_end_matches('/');
     let url = format!("{}/api/connectors/pre-approve", base);
 
@@ -55,27 +94,14 @@ pub async fn create_pre_approved_token(
     }
 
     let body: serde_json::Value = resp.json().await?;
-
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("No token in pre-approve response: {}", body))?;
+    let ott = parse_pre_approve_body(&body, base)?;
 
     tracing::info!(
-        "Pre-approved OTT created: {}...",
-        &token[..token.len().min(12)]
+        "Pre-approved OTT created (tenant_id={:?})",
+        ott.tenant_id
     );
 
-    // Return JSON so the SDK's OttProvider.parse_ott() gets the matrix_url.
-    // STRIKE48_API_URL points to the local proxy which doesn't handle
-    // /api/connectors/register-with-ott, so we must embed the real URL.
-    // The SDK's OttData struct expects "matrix_url" (not "api_url").
-    let ott_json = serde_json::json!({
-        "token": token,
-        "matrix_url": base,
-    });
-    Ok(ott_json.to_string())
+    Ok(ott)
 }
 
 /// Map a StrikeHub connector ID to the SDK connector_type string used in
@@ -200,4 +226,52 @@ fn credentials_have_kid(path: &std::path::Path) -> bool {
     json.get("kid")
         .and_then(|v| v.as_str())
         .is_some_and(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_token_and_tenant_id() {
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{
+                "token": "ott_abc123",
+                "tenant_id": "019f86b4-d2bf-7f56-89cf-30485d8a956b",
+                "keycloak_url": "https://auth.strike48.test/realms/personal-x",
+                "matrix_wss_url": "wss://localhost:4000/socket/connector"
+            }"#,
+        )
+        .unwrap();
+
+        let ott = parse_pre_approve_body(&body, "https://studio.strike48.test").unwrap();
+
+        // token_json keeps the exact SDK shape {token, matrix_url}
+        let parsed: serde_json::Value = serde_json::from_str(&ott.token_json).unwrap();
+        assert_eq!(parsed["token"], "ott_abc123");
+        assert_eq!(parsed["matrix_url"], "https://studio.strike48.test");
+        assert!(parsed.get("tenant_id").is_none(), "tenant_id must NOT leak into SDK JSON");
+
+        assert_eq!(ott.tenant_id.as_deref(), Some("019f86b4-d2bf-7f56-89cf-30485d8a956b"));
+    }
+
+    #[test]
+    fn tenant_id_absent_is_none_and_json_unchanged() {
+        let body: serde_json::Value =
+            serde_json::from_str(r#"{ "token": "ott_only" }"#).unwrap();
+
+        let ott = parse_pre_approve_body(&body, "https://api.test").unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&ott.token_json).unwrap();
+        assert_eq!(parsed["token"], "ott_only");
+        assert_eq!(parsed["matrix_url"], "https://api.test");
+        assert!(ott.tenant_id.is_none());
+    }
+
+    #[test]
+    fn missing_token_is_error() {
+        let body: serde_json::Value =
+            serde_json::from_str(r#"{ "tenant_id": "t" }"#).unwrap();
+        assert!(parse_pre_approve_body(&body, "https://api.test").is_err());
+    }
 }
