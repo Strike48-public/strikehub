@@ -6,8 +6,8 @@ Status: Approved for planning
 
 ## Summary
 
-Two workstreams, shipped together in a single PR (A and B are independent in
-code but delivered as one change):
+Three workstreams, shipped together in a single PR (independent in code but
+delivered as one change):
 
 - **A. Sage restyle (global).** Re-skin StrikeHub's UI from its current dark
   *blue* "ops console" to the approved **Strike48 Operator "Sage" DS · Option
@@ -16,16 +16,31 @@ code but delivered as one change):
   surfaces StrikeHub actually owns (rail, cards, overlays); the screenshot's
   stat-cards/fleet-table are an *aesthetic reference*, not new screens to build.
 
-- **B. Easy mode = simplified PLG auth (default-on).** Add a self-service
-  onboarding auth path modeled on pick's "PLG"/easy mode: browser OAuth → user
-  JWT → `POST /api/connectors/pre-approve` → tenant-scoped one-time token (OTT)
-  under the user's *personal* tenant. Easy mode is the **default** path; the
-  existing Keycloak / custom-Studio-URL flow becomes the opt-in "advanced"
-  path. StrikeHub does **not** auto-provision a connector, but it forwards the
-  PLG tenant + OTT down to whichever connector the user launches so that
-  connector registers under the personal tenant.
+- **B. Easy-mode PLG auth — mostly already implemented; harden tenant
+  forwarding.** Investigation found StrikeHub *already* does the full PLG flow:
+  browser OAuth (`AuthManager` / `start_oauth_flow`), the pre-approve exchange
+  (`ott::create_pre_approved_token` → `POST /api/connectors/pre-approve`), OTT
+  forwarding to connectors (`STRIKE48_REGISTRATION_TOKEN`, `app.rs:838`), and
+  tenant forwarding (`STRIKE48_TENANT`/`TENANT_ID`, `app.rs:1432`). There is a
+  single always-on flow (packaged host + browser sign-in), with a "Custom URL
+  sign in…" link as the only advanced affordance. **Decision: keep one flow, no
+  easy/advanced toggle.** The only substantive gap is that
+  `create_pre_approved_token` *discards* the `tenant_id` the pre-approve
+  response returns (`ott.rs:74` keeps only `{token, matrix_url}`); tenant is
+  instead resolved separately via `fetch_tenant_id`'s `userDetails` query
+  (`app.rs:1406`). In the personal-tenant PLG case these should agree, so B is
+  **belt-and-suspenders**: capture the authoritative personal `tenant_id` from
+  the pre-approve response and prefer it when forwarding to connectors, so the
+  personal-tenant guarantee doesn't depend on a second GraphQL query.
 
-The two are decoupled: A is pure presentation, B is auth/config plumbing.
+- **C. Nix dev shell + direnv.** Add a `flake.nix` (+ `flake.lock`) and an
+  `.envrc` (`use flake`) so `nix develop` — or auto-loading via direnv — gives a
+  reproducible environment with the Rust toolchain and the native build deps the
+  desktop and server builds need. StrikeHub is desktop + server only (no mobile),
+  so this is far simpler than pick's flake.
+
+The three are decoupled: A is pure presentation, B is a small auth-plumbing
+hardening, C is tooling/infra.
 
 ## Context / current state
 
@@ -137,101 +152,153 @@ for aesthetic fidelity.
 
 ---
 
-## Workstream B — Easy mode (PLG auth), default-on
+## Workstream B — Harden PLG tenant forwarding
 
 ### Goal
 
-Add a simplified sign-in that mirrors pick's PLG flow and make it the default,
-while preserving the existing advanced flow behind an opt-in link. Forward the
-resulting personal-tenant identity + OTT to connector children.
+Guarantee that connectors launched by StrikeHub register under the user's
+authoritative personal tenant by capturing the `tenant_id` returned by the
+pre-approve endpoint and preferring it over the separately-queried tenant — a
+single always-on flow, **no easy/advanced mode toggle**.
 
-### Mode model
+### What already exists (do not rebuild)
 
-- New persisted config field on `HubConfig` (in `connectors.toml`), e.g.
-  `auth_mode` (`easy` | `advanced`), plus a resolver mirroring pick's
-  `resolve_easy_mode()`:
-  **persisted Settings choice → default = `easy`.**
-  (Per decision: easy mode is the out-of-box default; no build-time bake
-  required, though a `STRIKEHUB_EASY_MODE` env override may be added for parity
-  with pick's `PICK_EASY_MODE` if cheap.)
-- Host stays the existing default (`studio.strike48.com`) via the current
-  precedence chain. Easy mode does **not** introduce a separate PLG host;
-  advanced users can still point at a custom Studio URL.
+- Browser OAuth / Keycloak PKCE: `AuthManager` (`auth.rs`),
+  `start_oauth_flow` (`oauth.rs`). The sign-in handler lives in `app.rs`
+  (the `on_sign_in` reactive loop, ~lines 1140–1300).
+- Pre-approve exchange: `ott::create_pre_approved_token(matrix_url, jwt,
+  tls_insecure, connector_type)` → `POST /api/connectors/pre-approve`
+  (`ott.rs:20`). Called per-connector at launch (`app.rs:825`).
+- OTT forwarding: `STRIKE48_REGISTRATION_TOKEN` pushed into connector env
+  (`app.rs:838`).
+- Tenant forwarding: `STRIKE48_TENANT` / `TENANT_ID` set in process env
+  (`app.rs:1432`), read by `matrix_env_vars()` (`app.rs:51`) and forwarded to
+  connector children.
+- Tenant resolution today: `fetch_tenant_id()` (`auth.rs:628`) runs a
+  `userDetails { details }` GraphQL query and reads `/domain/id` — i.e. the
+  tenant of the *signed-in user's own session*. For a personal-tenant PLG
+  login this is expected to equal the pre-approve `tenant_id`.
 
-### Easy sign-in flow (port from pick)
+### The gap
 
-Reusing/porting the pick pieces (`crates/core/src/matrix/pre_approval.rs`,
-`connector_registration.rs`, `config.rs`) into `sh-core`:
+`create_pre_approved_token` (`ott.rs:74`) parses only `token` from the
+pre-approve 201 response and returns `{token, matrix_url}` — it **discards the
+`tenant_id`** field the endpoint also returns. So the personal-tenant guarantee
+currently rests entirely on the separate `fetch_tenant_id` query agreeing with
+the pre-approve result. If that query is unavailable, returns a different
+tenant, or the account is later multi-tenant, a connector could register under
+the wrong tenant.
 
-1. On launch, decision logic (port of `plg_connect_decision`): if easy mode and
-   no saved credentials → show simplified sign-in overlay; else silent/normal.
-2. Browser OAuth → user JWT (reuse StrikeHub's existing `oauth.rs` /
-   `AuthManager` — StrikeHub already has the full PKCE flow).
-3. **Pre-approve exchange (new):** `POST {api_base}/api/connectors/pre-approve`
-   with `Authorization: Bearer <jwt>`, body `{"connector_type": "<name>"}`.
-   Parse the 201 response
-   (`{ token, tenant_id, keycloak_url, matrix_wss_url, ... }`) into an
-   `OttData`-equivalent. This yields the **OTT** and the **authoritative
-   personal `tenant_id`**.
-4. Persist/stage: set `config.tenant_id = ott.tenant_id`; stage the OTT so
-   StrikeHub's existing forwarding (`STRIKE48_REGISTRATION_TOKEN(_FILE)`) picks
-   it up.
-5. On failure: friendly retry (do not silently fall back to the advanced flow).
+### Change
 
-### Connector hand-off (the key integration point)
+Make the pre-approve `tenant_id` the authoritative source, with
+`fetch_tenant_id` as fallback (preserving today's behavior when pre-approve
+hasn't run yet):
 
-StrikeHub itself does not run a connector, but when it spawns any connector
-child it must forward the PLG identity so the connector registers under the
-user's personal tenant. Extend the existing `matrix_env_vars()` /
-env-forwarding path (`app.rs`) so that in easy mode:
-- `STRIKE48_TENANT` / `TENANT_ID` = the PLG `tenant_id` from the pre-approve
-  response (not the `default` tenant).
-- `STRIKE48_REGISTRATION_TOKEN(_FILE)` = the staged OTT (mechanism already
-  exists at app.rs line 838; wire the easy-mode OTT into it).
-- `STRIKE48_API_URL` = the resolved studio host (unchanged default).
-
-### Advanced path (preserved)
-
-The current `LoginOverlay` custom-Studio-URL + Keycloak flow remains, reachable
-via an opt-in link/toggle ("Advanced sign-in"). No behavior change to that path.
-
-### UI (B, styled with Sage from A)
-
-- Simplified default sign-in overlay: Strike48 (Sage) logo, a single primary
-  "Sign in" CTA (sage pill, dark ink), a small "Advanced sign-in…" link. Reuse
-  and slim down `crates/sh-ui/src/components/login.rs`.
-- A Settings control to switch easy/advanced (persisted to `auth_mode`).
+1. Change `create_pre_approved_token` to also parse and surface the response
+   `tenant_id`. Return a small struct instead of a bare JSON string:
+   `PreApprovedOtt { token_json: String, tenant_id: Option<String> }`
+   (`token_json` keeps the exact `{token, matrix_url}` shape the SDK's
+   `OttProvider.parse_ott()` already consumes, so the connector side is
+   unchanged).
+2. At the connector-launch call site (`app.rs:825`), when the OTT is created,
+   capture `tenant_id` and — if present — set `STRIKE48_TENANT` / `TENANT_ID`
+   in the process env from it (same mechanism as `app.rs:1432`), overriding the
+   `fetch_tenant_id`-derived value for connector children.
+3. Leave `fetch_tenant_id` and its call at `app.rs:1406` in place as the
+   fallback for the pre-sign-in / no-OTT path.
 
 ### Out of scope for B
 
-- StrikeHub does not auto-select or auto-launch a specific connector; the user
-  still picks one. (The PLG identity is applied at the moment a connector is
-  launched.)
-- No changes to the connector SDK; it already ingests
-  `STRIKE48_REGISTRATION_TOKEN(_FILE)` and persists credentials.
+- No easy/advanced mode toggle, no new config field, no build-time flag.
+- No new sign-in UI (the existing `LoginOverlay` is reused; only its styling
+  changes via workstream A).
+- No changes to the connector SDK or to the pre-approve request shape.
+- StrikeHub does not auto-select or auto-launch a connector.
 
 ### Verification (B)
 
-With easy mode default, launch → simplified sign-in → complete browser OAuth →
-confirm a `pre-approve` request is made and a personal-tenant OTT is obtained;
-launch a connector and confirm it receives the PLG `STRIKE48_TENANT` + OTT and
-registers under the personal tenant. Confirm "Advanced sign-in" still reaches
-the custom-URL/Keycloak path.
+Unit-test the new response parsing: given a pre-approve 201 body containing
+`tenant_id`, `create_pre_approved_token`'s parsing surfaces it; given a body
+without it, `tenant_id` is `None` and `token_json` is unchanged. Manually:
+sign in, launch a connector, confirm the connector receives `STRIKE48_TENANT`
+equal to the pre-approve `tenant_id` (check logs), and that sign-in with no OTT
+still forwards the `fetch_tenant_id` value.
+
+---
+
+## Workstream C — Nix dev shell + direnv
+
+### Goal
+
+`nix develop` (and `direnv` auto-load) drops the developer into a shell that can
+build and run StrikeHub's desktop and server binaries without manually
+installing a toolchain or system libraries.
+
+### Current state
+
+No `flake.nix`, `flake.lock`, `.envrc`, or `shell.nix` exists. Toolchain is
+pinned in `.tool-versions` (`rust 1.91.1`); workspace is edition 2024. The
+`Dockerfile` documents the server build's system deps: `pkg-config`,
+`libssl-dev`, `protobuf-compiler`. The **desktop** feature additionally pulls
+`wry`/`tao`, which on Linux need the GTK3 + WebKitGTK + libsoup stack.
+
+### Dependency surface (verified)
+
+- **Rust:** stable ≥ 1.91 (`.tool-versions` says 1.91.1), edition 2024. nixpkgs
+  `rustc` may lag; use a fenix/oxalica-style toolchain to guarantee the version.
+- **Build tools:** `pkg-config`, `protobuf` (`protoc`, for the gRPC/tonic
+  transport build).
+- **TLS:** `reqwest` uses `rustls-tls` and `sentry` uses `rustls` — so OpenSSL
+  is *not* required to link. (Docker installs `libssl-dev` for the server image,
+  but the Rust deps are rustls; include `openssl` only if a build error proves
+  otherwise.)
+- **Desktop (Linux):** `gtk3`, `webkitgtk_4_1`, `libsoup_3`, `glib`, `gdk-pixbuf`,
+  `cairo`, `pango`, `atk` — the wry/tao WebView stack. `xdotool` per pick for
+  input, if needed.
+- **Runtime loader:** export `LD_LIBRARY_PATH` for any dynamically-linked libs
+  (mirrors pick's shellHook) so test/desktop binaries run under `nix develop`.
+
+### Design
+
+- `flake.nix`: single Linux `x86_64-linux` devShell (mirror pick's structure but
+  drop all Android/iOS/mobile/`dx`/gradle machinery — StrikeHub uses plain
+  `cargo`, not `dx`). Inputs: `nixpkgs` (nixos-unstable) + `fenix` for the Rust
+  toolchain. Include a `darwin` (`aarch64-darwin`) devShell with the desktop
+  deps omitted/adjusted, following pick's pattern, so Mac contributors get at
+  least the toolchain + `protoc` + `pkg-config`.
+- `.envrc`: exactly `use flake` (matches pick).
+- `.gitignore`: ensure `.direnv/` is ignored.
+- Commit `flake.lock` for reproducibility.
+
+### Out of scope for C
+
+- No Android/iOS/mobile targets, no `dioxus-cli`/`dx`, no gradle shims
+  (StrikeHub has none of these).
+- Not converting the build itself to Nix (`packages.default`); this is a
+  devShell only. A Nix package build can come later if wanted.
+
+### Verification (C)
+
+`nix develop -c cargo build --features server --no-default-features -p sh-ui`
+compiles. `nix develop -c cargo build --features desktop -p sh-ui` compiles
+(Linux). With direnv installed, `direnv allow` auto-loads the shell on `cd`.
 
 ---
 
 ## Sequencing (single PR)
 
-Both workstreams land in one PR. Implementation order within the branch:
+All three workstreams land in one PR. Implementation order within the branch:
 
-1. **A — Sage restyle first.** Lower risk, visually verifiable, essentially one
-   file (`theme.rs`) plus logo SVGs. Establishes the look the easy-mode overlay
-   will inherit.
-2. **B — Easy-mode PLG auth.** Builds on A's styling for its simplified sign-in
-   overlay; the auth/config change.
+1. **C — Nix dev shell first.** Establishes a reproducible build/run environment
+   used to verify A and B. Pure additive tooling.
+2. **A — Sage restyle.** Visually verifiable, essentially one file (`theme.rs`)
+   plus logo SVGs.
+3. **B — PLG tenant hardening.** Small, isolated change to `ott.rs` + one call
+   site in `app.rs`.
 
-Committing A before B on the branch keeps the diff reviewable (presentation
-commit, then auth commit), even though they ship together.
+Committing C → A → B on the branch keeps the diff reviewable (tooling, then
+presentation, then auth), even though they ship together.
 
 ## Risks / notes
 
@@ -242,8 +309,9 @@ commit, then auth commit), even though they ship together.
   Sage DS needs a concept the current tokens lack (e.g. distinct pill vs card
   radius).
 - **Pre-approve endpoint contract** must match the deployed Matrix/Studio
-  backend (`/api/connectors/pre-approve`, response fields). Verify against the
-  target environment before finalizing B.
-- **Default flip:** making easy mode the default changes first-run behavior for
-  everyone; ensure existing users with saved credentials/custom URLs are not
-  disrupted (decision logic must treat saved creds as "silent/normal").
+  backend (`/api/connectors/pre-approve`, response fields). The `tenant_id`
+  field is assumed present in the 201 response; B treats it as optional so a
+  missing field degrades gracefully to the existing `fetch_tenant_id` behavior.
+- **Connector SDK compatibility:** B must keep the `{token, matrix_url}` JSON
+  shape the SDK's `OttProvider.parse_ott()` consumes byte-for-byte; the
+  captured `tenant_id` is used only StrikeHub-side for env forwarding.
