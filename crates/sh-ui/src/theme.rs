@@ -6,19 +6,20 @@ pub fn theme_css() -> &'static str {
             /* Strike48 "Sage" DS — muted sage-green pastel on near-black,
                Material-3 shapes. Dark ink on all sage-filled controls. */
 
-            /* Neutral scale — sage-tinted dark neutrals (darkest → lightest) */
-            --ink-900: #0b0f0d;   /* deepest — rail + content bg */
-            --ink-850: #0f1512;   /* body chrome bg */
-            --ink-800: #171d1a;   /* card / elevated */
-            --ink-750: #1c231f;   /* hover surface */
-            --ink-700: #242b27;   /* card border / active surface (Sage --em-surface) */
-            --ink-650: #2c3430;   /* stronger hover */
-            --ink-600: #3a433d;   /* active */
+            /* Neutral scale — aligned to the Sage DS surface ladder
+               (darkest → lightest). DS refs in comments. */
+            --ink-900: #101312;   /* deepest — rail + content + input bg (DS --p3) */
+            --ink-850: #141715;   /* body chrome bg (DS --bg) */
+            --ink-800: #242b27;   /* card / elevated surface (DS --surf) */
+            --ink-750: #2c352f;   /* hover surface (DS --surf2) */
+            --ink-700: #333d37;   /* card border / active surface */
+            --ink-650: #3c4640;   /* stronger hover */
+            --ink-600: #454f48;   /* active */
             --ink-500: #55605a;   /* muted / offline */
-            --ink-400: #7c877f;   /* secondary text */
-            --ink-300: #9aa69f;   /* tertiary text */
+            --ink-400: #78847d;   /* secondary text (DS --dim) */
+            --ink-300: #a7b2ab;   /* tertiary / muted text (DS --mut) */
             --ink-200: #cfd6d1;   /* body text */
-            --ink-100: #e9eeeb;   /* headings / emphasis (Sage --em-text) */
+            --ink-100: #e9eeeb;   /* headings / emphasis (DS --tx) */
 
             /* Semantic mappings */
             --chrome:            var(--ink-850);
@@ -40,22 +41,41 @@ pub fn theme_css() -> &'static str {
 
             --accent:            var(--brand-500);
             --accent-hover:      var(--brand-600);
-            --accent-foreground: #17201b;   /* dark ink on sage — REQUIRED */
+            --accent-foreground: #151a17;   /* dark ink on sage (DS --on-pri) — REQUIRED */
 
-            /* Status colors (Sage palette) */
-            --status-critical:    #d99a9a;   /* muted rose (Sage --em-error) */
+            /* Gold secondary accent (DS --acc / --gold): highlighted numerics,
+               privilege/admin chips. Distinct from the sage primary. */
+            --gold: #c9b27e;
+
+            /* Status colors (Sage DS: --ok --warn --err --info) */
+            --status-critical:    #d99a9a;   /* muted rose (DS --err) */
             --status-high:        #d9b07c;   /* warm amber */
             --status-medium:      #9cbfae;   /* sage */
             --status-low:         #55605a;   /* muted */
             --status-open:        #9cbfae;
-            --status-in-progress: #d9b07c;   /* amber */
+            --status-in-progress: #d9b07c;   /* amber (DS --warn) */
             --status-waiting:     #b9a9d4;   /* muted lavender */
-            --status-resolved:    #8fc4ab;   /* mint (Sage --em-toast-fg) */
+            --status-resolved:    #8fc4ab;   /* mint (DS --ok) */
             --status-closed:      #3a433d;
+            --status-info:        #9cb8bf;   /* muted blue (DS --info) */
 
             --success:     var(--status-resolved);
             --warning:     var(--status-in-progress);
             --destructive: var(--status-critical);
+            --info:        var(--status-info);
+
+            /* Status tint backgrounds (DS --ok-bg etc): low-alpha fills behind
+               pills/badges/notes so tinted surfaces are consistent. */
+            --ok-bg:   rgba(143, 196, 171, 0.14);
+            --warn-bg: rgba(217, 176, 124, 0.14);
+            --err-bg:  rgba(217, 154, 154, 0.14);
+            --info-bg: rgba(156, 184, 191, 0.14);
+            --tint:    rgba(156, 191, 174, 0.16);   /* sage selection/hover wash (DS --tint) */
+
+            /* Glass surfaces (DS --glass-*): frosted panels for cards/overlays. */
+            --glass-bg:   rgba(255, 255, 255, 0.05);
+            --glass-line: rgba(255, 255, 255, 0.09);
+            --glass-sh:   0 14px 34px rgba(6, 12, 9, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 
             /* Typography — IBM Plex (unchanged) */
             --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
@@ -64,10 +84,10 @@ pub fn theme_css() -> &'static str {
 
             /* Radius — Sage Material-3 shapes (rounder than the old console) */
             --radius-xs: 6px;
-            --radius-sm: 10px;    /* default control radius */
-            --radius-md: 12px;    /* Sage --em-radius-control */
-            --radius-lg: 16px;    /* Sage --em-radius-card */
-            --radius-pill: 999px; /* Sage --em-radius-pill — buttons/badges */
+            --radius-sm: 8px;     /* default control radius (DS most-used) */
+            --radius-md: 12px;    /* inputs / notes */
+            --radius-lg: 16px;    /* cards */
+            --radius-pill: 999px; /* buttons / badges / chips */
             --radius: var(--radius-sm);
 
             /* Shadows */
@@ -88,7 +108,7 @@ pub fn theme_css() -> &'static str {
         *::-webkit-scrollbar-thumb:hover { background: var(--ink-600); }
 
         /* Selection */
-        ::selection { background: rgba(156, 191, 174, 0.30); color: var(--ink-100); }
+        ::selection { background: var(--tint); color: var(--ink-100); }
 
         /* Focus — border-color only, no rings */
         *:focus { outline: none; }
@@ -585,7 +605,7 @@ pub fn app_css() -> &'static str {
         .card-remove-btn:hover {
             color: var(--status-critical);
             border-color: var(--status-critical);
-            background: rgba(217, 154, 154, 0.12);
+            background: var(--err-bg);
         }
 
         /* ── Auth status (kept for setup view compatibility) ── */
@@ -689,7 +709,7 @@ pub fn app_css() -> &'static str {
             padding: 8px 14px;
             font-size: 13px;
             color: var(--status-critical);
-            background: rgba(217, 154, 154, 0.12);
+            background: var(--err-bg);
             border: 1px solid rgba(217, 154, 154, 0.25);
             border-radius: var(--radius-sm);
             max-width: 320px;
