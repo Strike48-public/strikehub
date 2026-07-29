@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Source me. Resolves the live Hyprland session + ydotool socket.
+# Source me. Resolves the live Hyprland session + system ydotool socket + grim helper.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-/run/ydotoold/socket}"
 
-# Find the Hyprland instance signature whose socket actually responds.
 _resolve_hypr_sig() {
   local d sig
   for d in "$XDG_RUNTIME_DIR"/hypr/*/; do
@@ -14,13 +13,12 @@ _resolve_hypr_sig() {
   done
   return 1
 }
-
 HYPR_SIG="$(_resolve_hypr_sig)" || { echo "ERROR: no live Hyprland instance" >&2; return 1 2>/dev/null || exit 1; }
-export HYPRLAND_INSTANCE_SIGNATURE="$HYPR_SIG"
-export HYPR_SIG
+export HYPRLAND_INSTANCE_SIGNATURE="$HYPR_SIG" HYPR_SIG
 
-# hyprctl wrapper
+# Resolve the real Hyprland wayland display (grim needs it).
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+
 hyprq() { hyprctl "$@"; }
-
-# ydotool wrapper: runs through sg so the ydotool group is active without re-login.
-ydo() { sg ydotool -c "YDOTOOL_SOCKET=$YDOTOOL_SOCKET ydotool $*"; }
+# grim the headless output: shot <headless-name> <out.png>
+shot() { WAYLAND_DISPLAY="$WAYLAND_DISPLAY" grim -o "$1" "$2"; }
