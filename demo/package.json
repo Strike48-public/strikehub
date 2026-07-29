@@ -10,6 +10,7 @@
     "test": "tsx --test capture/*.test.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
     "@remotion/cli": "^4.0.0",
     "@remotion/transitions": "^4.0.0",
     "remotion": "^4.0.0",
