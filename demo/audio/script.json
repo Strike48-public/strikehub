@@ -1,0 +1,30 @@
+[
+  {
+    "scene": "intro",
+    "vo": "StrikeHub. The unified desktop for security and DevOps."
+  },
+  {
+    "scene": "scan",
+    "vo": "Meet Pick — your AI pentesting agent. Just ask it to scan your network, and watch it run real reconnaissance tools for you."
+  },
+  {
+    "scene": "doc",
+    "vo": "Every scan becomes a shareable report, documenting your findings with executive summaries and detailed insights."
+  },
+  {
+    "scene": "share",
+    "vo": "Share it in one click."
+  },
+  {
+    "scene": "easymode",
+    "vo": "StrikeHub starts in Easy Mode — perfect for focused workflows. Turn it off to reveal advanced tools like KubeStudio, our full Kubernetes dashboard."
+  },
+  {
+    "scene": "pickmode",
+    "vo": "Pick has an Easy Mode too. Flip it off to unlock the complete pentest workstation — shells, tools, and expert controls."
+  },
+  {
+    "scene": "outro",
+    "vo": "StrikeHub. One desktop. All your security and infrastructure tools, unified."
+  }
+]

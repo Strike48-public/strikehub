@@ -3,3 +3,8 @@ recordings/
 out/
 *.log
 cache/failures/
+
+# Audio files — large binaries, regenerate with audio/build-audio.sh
+audio/vo/*.wav
+audio/voices/*.onnx
+audio/music.mp3
