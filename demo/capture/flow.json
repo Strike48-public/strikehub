@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "output": { "headlessName": "HEADLESS", "width": 1920, "height": 1080, "fps": 30 },
+  "auth": {
+    "signInStep": { "id": "auth.signin", "act": "click the 'Sign In' button", "verify": "an OAuth login browser has opened (app shows a signing-in / waiting state)", "timeoutMs": 20000 },
+    "readyVerify": "the authenticated Pick home screen with a 'Scan My Network' button and a connector rail on the left is visible"
+  },
+  "scenes": [
+    {
+      "id": "scan",
+      "caption": "Ask Pick to scan your network — it runs the tools for you",
+      "record": true,
+      "steps": [
+        { "id": "scan.click_scan", "act": "click the large 'Scan My Network' button at the top", "verify": "the agent is executing tool calls (a Phase / device_info step with a success badge is visible)", "timeoutMs": 25000 },
+        { "id": "scan.wait_report", "verify": "a Network Discovery Report summary with host counts and security findings is visible", "timeoutMs": 300000 }
+      ],
+      "trim": [
+        { "from": "verify:scan.click_scan", "to": "+42s", "speed": 1.8 },
+        { "from": "end-12s", "to": "end", "speed": 1.3 }
+      ]
+    },
+    {
+      "id": "doc",
+      "caption": "Every scan becomes a shareable report",
+      "record": true,
+      "kenBurns": { "from": 1.0, "to": 1.06 },
+      "steps": [
+        { "id": "doc.open", "act": "click the 'Network Discovery Report' entry under 'DOCUMENTS FROM THIS CHAT' near the bottom", "verify": "the report document is open showing an Executive Summary heading", "timeoutMs": 15000 },
+        { "id": "doc.scroll", "scroll": { "dy": -15, "repeat": 5, "settleMs": 900 } }
+      ],
+      "trim": [ { "from": "verify:doc.open", "to": "end", "speed": 1.0 } ]
+    },
+    {
+      "id": "share",
+      "caption": "Share it in one click",
+      "record": true,
+      "steps": [
+        { "id": "share.click", "act": "click the share icon in the top-right corner of the report header", "verify": "a share menu or share affordance is shown", "timeoutMs": 10000 }
+      ],
+      "trim": [ { "from": "start", "to": "end", "speed": 1.0 } ]
+    },
+    {
+      "id": "easymode",
+      "caption": "Turn off Easy Mode to reveal KubeStudio",
+      "record": true,
+      "steps": [
+        { "id": "easymode.settings", "act": "click the settings gear icon at the bottom of the far-left rail", "verify": "the Settings screen with an 'Easy mode' toggle is visible", "timeoutMs": 12000 },
+        { "id": "easymode.toggle_off", "act": "click the 'Easy mode' toggle to turn it OFF", "verify": "both a KubeStudio card and a Pick card are shown (advanced connectors revealed)", "timeoutMs": 12000 },
+        { "id": "easymode.open_kube", "act": "click the KubeStudio card", "verify": "the KubeStudio Kubernetes dashboard (Cluster Overview with Nodes/Pods/Workloads) is visible", "timeoutMs": 30000 }
+      ],
+      "trim": [ { "from": "verify:easymode.toggle_off", "to": "end", "speed": 1.2 } ]
+    },
+    {
+      "id": "pickmode",
+      "caption": "Pick has an Easy Mode too — flip it off for the expert view",
+      "record": true,
+      "steps": [
+        { "id": "pickmode.to_pick", "act": "click the Pick (shield) icon in the far-left connector rail", "verify": "the Pick home screen is visible", "timeoutMs": 12000 },
+        { "id": "pickmode.menu", "act": "click the hamburger menu icon at the top-left next to the 'Pick' title", "verify": "a slide-out menu with 'New chat', 'Reports', and 'Settings' is visible", "timeoutMs": 10000 },
+        { "id": "pickmode.settings", "act": "click 'Settings' in the slide-out menu", "verify": "the Pick Settings screen with an 'Easy Mode' toggle is visible", "timeoutMs": 10000 },
+        { "id": "pickmode.toggle_off", "act": "click the 'Easy Mode' toggle to turn it off", "verify": "the full expert Pentest dashboard with a Tools/Shell/Chat nav and Quick Actions grid is visible", "timeoutMs": 20000 }
+      ],
+      "trim": [ { "from": "verify:pickmode.toggle_off", "to": "end", "speed": 1.2 } ]
+    }
+  ]
+}

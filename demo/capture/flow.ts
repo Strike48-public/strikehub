@@ -1,72 +1,50 @@
-import { type Ctx, click, type as typeText, key, wait } from "./actions.ts";
+import { readFileSync } from "node:fs";
 
-export type Step = (ctx: Ctx) => Promise<void>;
+export type Step = {
+  id: string;
+  act?: string;
+  verify?: string;
+  scroll?: { dy: number; repeat: number; settleMs: number };
+  timeoutMs?: number;
+};
+export type TrimSeg = { from: string; to: string; speed: number };
 export type Scene = {
-  name: string;
+  id: string;
   caption: string;
+  record: boolean;
   kenBurns?: { from: number; to: number };
   steps: Step[];
+  trim?: TrimSeg[];
+};
+export type Flow = {
+  version: number;
+  output: { headlessName: string; width: number; height: number; fps: number };
+  auth: { signInStep: Step; readyVerify: string };
+  scenes: Scene[];
 };
 
-// Click targets are window-relative fractions (0..1). Refine with `--probe`.
-export const scenes: Scene[] = [
-  {
-    name: "launch",
-    caption: "One window for every Strike48 tool",
-    steps: [async () => { await wait(2500); }],
-  },
-  {
-    name: "signin",
-    caption: "Sign in once with your Strike48 account",
-    steps: [
-      async (c) => { await click(c, 0.5, 0.53); }, // Sign In button
-      async () => { await wait(3000); },            // browser OAuth hands back
-    ],
-  },
-  {
-    name: "connectors",
-    caption: "Live status for every connector",
-    kenBurns: { from: 1.0, to: 1.12 },
-    steps: [
-      async (c) => { await click(c, 0.02, 0.12); }, // rail item 1
-      async () => { await wait(1500); },
-    ],
-  },
-  {
-    name: "launch-pick",
-    caption: "Launch Pick — your pentest copilot",
-    steps: [
-      async (c) => { await click(c, 0.02, 0.06); }, // Pick in rail
-      async () => { await wait(3500); },            // Pick UI loads
-    ],
-  },
-  {
-    name: "pick-run",
-    caption: "Kick off an assessment in one click",
-    steps: [
-      async (c) => { await click(c, 0.5, 0.85); },  // primary action
-      async () => { await wait(4000); },
-    ],
-  },
-  {
-    name: "pick-results",
-    caption: "Findings and evidence, organized",
-    kenBurns: { from: 1.0, to: 1.1 },
-    steps: [async () => { await wait(3000); }],
-  },
-  {
-    name: "easy-mode",
-    caption: "Easy mode keeps it simple — Advanced reveals the rest",
-    steps: [
-      async (c) => { await click(c, 0.01, 0.97); }, // settings gear
-      async () => { await wait(1200); },
-      async (c) => { await click(c, 0.5, 0.4); },   // easy-mode toggle
-      async () => { await wait(1800); },
-    ],
-  },
-  {
-    name: "outro",
-    caption: "StrikeHub — the unified Strike48 desktop",
-    steps: [async () => { await wait(2000); }],
-  },
-];
+export function validateFlow(obj: unknown): Flow {
+  const f = obj as Flow;
+  if (!f || typeof f !== "object") throw new Error("flow: not an object");
+  if (typeof f.version !== "number") throw new Error("flow: missing version");
+  if (!f.output?.headlessName) throw new Error("flow: missing output.headlessName");
+  if (!f.auth?.signInStep?.act) throw new Error("flow: missing auth.signInStep.act");
+  if (!Array.isArray(f.scenes) || f.scenes.length === 0) throw new Error("flow: no scenes");
+  const sceneIds = new Set<string>();
+  const stepIds = new Set<string>();
+  for (const sc of f.scenes) {
+    if (sceneIds.has(sc.id)) throw new Error(`flow: duplicate scene id ${sc.id}`);
+    sceneIds.add(sc.id);
+    for (const st of sc.steps) {
+      if (stepIds.has(st.id)) throw new Error(`flow: duplicate step id ${st.id}`);
+      stepIds.add(st.id);
+      if (!st.act && !st.verify && !st.scroll)
+        throw new Error(`flow: step ${st.id} must have act, verify, or scroll`);
+    }
+  }
+  return f;
+}
+
+export function loadFlow(path: string): Flow {
+  return validateFlow(JSON.parse(readFileSync(path, "utf8")));
+}

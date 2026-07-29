@@ -1,16 +1,36 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scenes } from "./flow.ts";
+import { validateFlow, loadFlow } from "./flow.ts";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
-test("scenes cover the whole-app tour with unique names and captions", () => {
-  assert.ok(scenes.length >= 8);
-  const names = scenes.map((s) => s.name);
-  assert.equal(new Set(names).size, names.length, "scene names must be unique");
-  for (const s of scenes) {
-    assert.ok(s.caption.length > 0, `${s.name} needs a caption`);
-    assert.ok(Array.isArray(s.steps), `${s.name} needs steps[]`);
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+test("validateFlow rejects duplicate step ids", () => {
+  const bad = {
+    version: 1, output: { headlessName: "HEADLESS", width: 1920, height: 1080, fps: 30 },
+    auth: { signInStep: { id: "auth.signin", act: "click Sign In" }, readyVerify: "home visible" },
+    scenes: [{ id: "a", caption: "c", record: true, steps: [
+      { id: "dup", act: "x", verify: "y" }, { id: "dup", verify: "z" },
+    ] }],
+  };
+  assert.throws(() => validateFlow(bad), /duplicate step id/i);
+});
+
+test("validateFlow rejects a step with no act/verify/scroll", () => {
+  const bad = {
+    version: 1, output: { headlessName: "HEADLESS", width: 1920, height: 1080, fps: 30 },
+    auth: { signInStep: { id: "auth.signin", act: "click Sign In" }, readyVerify: "home visible" },
+    scenes: [{ id: "a", caption: "c", record: true, steps: [{ id: "empty" }] }],
+  };
+  assert.throws(() => validateFlow(bad), /must have act, verify, or scroll/i);
+});
+
+test("the shipped flow.json is valid and has the 5 real scenes", () => {
+  const flow = loadFlow(join(HERE, "flow.json"));
+  const ids = flow.scenes.map((s) => s.id);
+  for (const want of ["scan", "doc", "share", "easymode", "pickmode"]) {
+    assert.ok(ids.includes(want), `missing scene ${want}`);
   }
-  assert.deepEqual(names.slice(0, 2), ["launch", "signin"]);
-  assert.ok(names.includes("easy-mode"));
-  assert.ok(names.includes("outro"));
+  assert.ok(flow.auth.signInStep.act);
 });
