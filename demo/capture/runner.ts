@@ -140,7 +140,10 @@ async function main() {
       const t0 = Date.now();
       if (scene.record && !noRecord) {
         const geom = `${out.x},${out.y} ${out.width}x${out.height}`;
-        rec = spawn("bash", ["-c", `WAYLAND_DISPLAY=wayland-1 wf-recorder -o ${headless} -g "${geom}" -f ${REC}/${scene.id}.mp4`], { stdio: "ignore" });
+        rec = spawn("wf-recorder", ["-o", headless, "-g", geom, "-f", `${REC}/${scene.id}.mp4`], {
+          stdio: "ignore",
+          env: { ...process.env, WAYLAND_DISPLAY: "wayland-1" },
+        });
         await sleep(800);
       }
       for (const step of scene.steps) {
