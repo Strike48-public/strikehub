@@ -35,6 +35,11 @@
         # at runtime by the WebKit/GTK stack; without them the desktop binary
         # (and test binaries linking it) fail to load their shared libraries.
         xz bzip2
+        # libxcb (and X libs) are needed by connector child processes that
+        # StrikeHub launches — e.g. the pick `pentest-agent`, which links
+        # libxcb.so.1. Connectors inherit this shell's LD_LIBRARY_PATH, so
+        # these must be present here for a sibling-workspace connector to run.
+        xorg.libxcb libpcap dbus
       ];
 
       # ----- macOS dev shell (toolchain + build tools only) -----
