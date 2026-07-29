@@ -28,3 +28,8 @@ sfx-*.7z
 
 .strike48
 .direnv/
+
+# demo video tooling
+demo/node_modules/
+demo/recordings/
+demo/out/

@@ -1,0 +1,4 @@
+node_modules/
+recordings/
+out/
+*.log

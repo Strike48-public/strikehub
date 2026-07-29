@@ -1,0 +1,25 @@
+{
+  "name": "strikehub-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "capture": "tsx capture/driver.ts",
+    "manifest": "tsx remotion/gen-manifest.ts",
+    "preview": "remotion studio remotion/src/Root.tsx",
+    "render": "remotion render remotion/src/Root.tsx Reel out/strikehub-reel.mp4",
+    "test": "tsx --test capture/*.test.ts"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.0",
+    "@remotion/transitions": "^4.0.0",
+    "remotion": "^4.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0"
+  }
+}
