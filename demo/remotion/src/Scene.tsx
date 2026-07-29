@@ -12,7 +12,7 @@ export const Scene: React.FC<{
   return (
     <AbsoluteFill style={{ backgroundColor: "#101014" }}>
       <AbsoluteFill style={{ transform: `scale(${scale})` }}>
-        <OffthreadVideo src={src} />
+        <OffthreadVideo src={staticFile(src)} />
       </AbsoluteFill>
       <Caption text={caption} />
     </AbsoluteFill>

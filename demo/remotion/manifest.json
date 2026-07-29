@@ -1,7 +1,7 @@
 [
   {
     "name": "launch",
-    "clip": "../recordings/launch.mp4",
+    "clip": "recordings/launch.mp4",
     "caption": "One window for every Strike48 tool",
     "kenBurns": null,
     "durationInFrames": 98

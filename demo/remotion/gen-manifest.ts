@@ -23,7 +23,7 @@ for (const s of scenes) {
   const secs = durationSeconds(clip);
   manifest.push({
     name: s.name,
-    clip: `../recordings/${s.name}.mp4`,
+    clip: `recordings/${s.name}.mp4`,
     caption: s.caption,
     kenBurns: s.kenBurns ?? null,
     durationInFrames: Math.max(1, Math.round(secs * FPS)),
