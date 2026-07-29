@@ -1,9 +1,10 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
+import type { ImageBlockParam } from "@anthropic-ai/sdk/resources/messages";
 
-const client = new Anthropic(); // reads ANTHROPIC_API_KEY
-const MODEL = "claude-opus-4-8";
+const client = new AnthropicBedrock({ awsRegion: process.env.AWS_REGION || "us-east-1" });
+const MODEL = "us.anthropic.claude-opus-4-8";
 
-function imageBlock(png: Buffer): Anthropic.ImageBlockParam {
+function imageBlock(png: Buffer): ImageBlockParam {
   return { type: "image", source: { type: "base64", media_type: "image/png", data: png.toString("base64") } };
 }
 

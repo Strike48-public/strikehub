@@ -10,17 +10,18 @@
     "test": "tsx --test capture/*.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.68.0",
+    "@anthropic-ai/bedrock-sdk": "^0.32.0",
+    "@anthropic-ai/sdk": "^0.115.0",
     "@remotion/cli": "^4.0.0",
     "@remotion/transitions": "^4.0.0",
-    "remotion": "^4.0.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0",
     "@types/node": "^22.0.0",
-    "@types/react": "^18.3.0"
+    "@types/react": "^18.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
   }
 }
