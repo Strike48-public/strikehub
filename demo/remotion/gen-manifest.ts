@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { scenes } from "../capture/flow.ts";
+import { loadFlow } from "../capture/flow.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEMO = resolve(HERE, "..");
@@ -16,14 +16,15 @@ function durationSeconds(file: string): number {
   return parseFloat(out);
 }
 
+const flow = loadFlow(resolve(DEMO, "capture", "flow.json"));
 const manifest = [];
-for (const s of scenes) {
-  const clip = resolve(REC, `${s.name}.mp4`);
-  if (!existsSync(clip)) { console.warn(`skip ${s.name}: no clip`); continue; }
+for (const s of flow.scenes) {
+  const clip = resolve(REC, `${s.id}.mp4`);
+  if (!existsSync(clip)) { console.warn(`skip ${s.id}: no clip`); continue; }
   const secs = durationSeconds(clip);
   manifest.push({
-    name: s.name,
-    clip: `recordings/${s.name}.mp4`,
+    name: s.id,
+    clip: `recordings/${s.id}.mp4`,
     caption: s.caption,
     kenBurns: s.kenBurns ?? null,
     durationInFrames: Math.max(1, Math.round(secs * FPS)),
