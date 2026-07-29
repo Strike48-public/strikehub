@@ -24,3 +24,16 @@ export function parseHeadlessOutput(hyprctlMonitorsJson: string): OutputInfo {
     scale: m.scale,
   };
 }
+
+/**
+ * Convert a screenshot pixel (sx, sy) on the given output to ydotool absolute
+ * coordinates. ydotool's absolute space is the compositor's device space, so
+ * global_logical = ydotool * scale — hence ydotool = (global_logical) / scale,
+ * where global_logical_x = out.x (offset of the output) + sx.
+ */
+export function screenToYdotool(sx: number, sy: number, out: OutputInfo) {
+  return {
+    x: Math.round((out.x + sx) / out.scale),
+    y: Math.round(sy / out.scale),
+  };
+}

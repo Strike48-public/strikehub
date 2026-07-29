@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toDevice, parseHeadlessOutput } from "./calibrate.ts";
+import { toDevice, parseHeadlessOutput, screenToYdotool } from "./calibrate.ts";
 
 test("toDevice divides by scale and rounds", () => {
   assert.deepEqual(toDevice(960, 540, 2), { x: 480, y: 270 });
@@ -23,4 +23,14 @@ test("parseHeadlessOutput picks the HEADLESS monitor", () => {
 test("parseHeadlessOutput throws when none present", () => {
   const json = JSON.stringify([{ name: "eDP-1", width: 3840, height: 2160, x: 0, y: 0, scale: 2 }]);
   assert.throws(() => parseHeadlessOutput(json), /no HEADLESS/i);
+});
+
+test("screenToYdotool applies (offsetX + sx)/scale and sy/scale", () => {
+  const out = { name: "HEADLESS-1", width: 1920, height: 1080, x: 1920, y: 0, scale: 2 };
+  // screenshot center (960,540) on a 1920-offset scale-2 output -> global (2880,540) -> ydotool (1440,270)
+  assert.deepEqual(screenToYdotool(960, 540, out), { x: 1440, y: 270 });
+  // screenshot origin (0,0) -> global (1920,0) -> ydotool (960,0)
+  assert.deepEqual(screenToYdotool(0, 0, out), { x: 960, y: 0 });
+  // rounding: (1920+1)/2 = 960.5 -> 961
+  assert.deepEqual(screenToYdotool(1, 0, out), { x: 961, y: 0 });
 });
