@@ -1,7 +1,11 @@
 import { toDevice } from "./calibrate.ts";
 
+// escape a string for safe inclusion inside a single-quoted shell word
+const shSingleQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
 const SOCK = "/run/ydotoold/socket";
-const wrap = (inner: string) => `sg ydotool -c "YDOTOOL_SOCKET=${SOCK} ydotool ${inner}"`;
+// wrap the inner ydotool invocation as a single-quoted argument to `sg ydotool -c`
+const wrap = (inner: string) => `sg ydotool -c ${shSingleQuote(`YDOTOOL_SOCKET=${SOCK} ydotool ${inner}`)}`;
 
 export type Ctx = {
   scale: number;
@@ -20,7 +24,7 @@ export function resolveFrac(ctx: Ctx, fx: number, fy: number) {
 export const moveCmd = (x: number, y: number) => wrap(`mousemove --absolute -- ${x} ${y}`);
 export const clickCmd = () => wrap(`click 0xC0`);
 export const keyCmd = (combo: string) => wrap(`key ${combo}`);
-export const typeCmd = (text: string) => wrap(`type -- "${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+export const typeCmd = (text: string) => wrap(`type -- ${JSON.stringify(text)}`);
 
 export const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
