@@ -7,8 +7,8 @@ import { Outro } from "./Outro.tsx";
 import { Narration, MusicBed, buildVoTimeline, type VoiceoverMap, type DuckRange } from "./audio";
 import manifest from "../manifest.json" with { type: "json" };
 
-const INTRO = 60;
-const OUTRO = 60;
+const INTRO = 105; // ~3.5s — long enough for the intro VO (~3.6s) to play over the logo
+const OUTRO = 180; // ~6s — must exceed the outro VO (~4.9s) so it isn't cut off
 const XFADE = 15; // frames
 const FPS = 30;
 
@@ -16,13 +16,13 @@ const FPS = 30;
 // by audio/build-audio.sh). If you re-run build-audio.sh with different text or
 // voice, update these to match the printed durations.
 const voiceoverMap: VoiceoverMap = {
-  intro: { file: "audio/vo/intro.wav", durationInFrames: Math.ceil(3.668753 * FPS) },
-  scan: { file: "audio/vo/scan.wav", durationInFrames: Math.ceil(6.907937 * FPS) },
-  doc: { file: "audio/vo/doc.wav", durationInFrames: Math.ceil(5.816599 * FPS) },
-  share: { file: "audio/vo/share.wav", durationInFrames: Math.ceil(1.219048 * FPS) },
-  easymode: { file: "audio/vo/easymode.wav", durationInFrames: Math.ceil(8.939683 * FPS) },
-  pickmode: { file: "audio/vo/pickmode.wav", durationInFrames: Math.ceil(7.128526 * FPS) },
-  outro: { file: "audio/vo/outro.wav", durationInFrames: Math.ceil(4.702041 * FPS) },
+  intro: { file: "audio/vo/intro.wav", durationInFrames: Math.ceil(3.622313 * FPS) },
+  scan: { file: "audio/vo/scan.wav", durationInFrames: Math.ceil(6.733787 * FPS) },
+  doc: { file: "audio/vo/doc.wav", durationInFrames: Math.ceil(6.118458 * FPS) },
+  share: { file: "audio/vo/share.wav", durationInFrames: Math.ceil(1.149388 * FPS) },
+  easymode: { file: "audio/vo/easymode.wav", durationInFrames: Math.ceil(8.730703 * FPS) },
+  pickmode: { file: "audio/vo/pickmode.wav", durationInFrames: Math.ceil(7.058866 * FPS) },
+  outro: { file: "audio/vo/outro.wav", durationInFrames: Math.ceil(4.922630 * FPS) },
 };
 
 export const Reel: React.FC = () => {
