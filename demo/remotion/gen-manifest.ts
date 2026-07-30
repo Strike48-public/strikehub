@@ -1,34 +1,37 @@
 import { execSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { loadFlow } from "../capture/flow.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEMO = resolve(HERE, "..");
-const REC = resolve(DEMO, "recordings");
+const SCENES = resolve(DEMO, "recordings", "scenes");
 const FPS = 30;
 
-function durationSeconds(file: string): number {
-  const out = execSync(
-    `nix-shell -p ffmpeg --run 'ffprobe -v error -show_entries format=duration -of csv=p=0 "${file}"'`,
-  ).toString().trim();
+const flow = loadFlow(resolve(DEMO, "capture", "flow.json"));
+const captionById = new Map(flow.scenes.map((s) => [s.id, s]));
+
+function dur(file: string): number {
+  const out = execSync(`nix-shell -p ffmpeg --run 'ffprobe -v error -show_entries format=duration -of csv=p=0 "${file}"'`).toString().trim();
   return parseFloat(out);
 }
 
-const flow = loadFlow(resolve(DEMO, "capture", "flow.json"));
+const clips = existsSync(SCENES) ? readdirSync(SCENES).filter((f) => f.endsWith(".mp4")).sort() : [];
 const manifest = [];
-for (const s of flow.scenes) {
-  const clip = resolve(REC, `${s.id}.mp4`);
-  if (!existsSync(clip)) { console.warn(`skip ${s.id}: no clip`); continue; }
-  const secs = durationSeconds(clip);
+for (const clip of clips) {
+  // clip name is "<sceneId>.mp4" or "<sceneId>_<n>.mp4"
+  const sceneId = clip.replace(/\.mp4$/, "").replace(/_\d+$/, "");
+  const scene = captionById.get(sceneId);
+  if (!scene) { console.warn(`skip ${clip}: no scene ${sceneId} in flow`); continue; }
+  const secs = dur(resolve(SCENES, clip));
   manifest.push({
-    name: s.id,
-    clip: `recordings/${s.id}.mp4`,
-    caption: s.caption,
-    kenBurns: s.kenBurns ?? null,
+    name: clip.replace(/\.mp4$/, ""),
+    clip: `recordings/scenes/${clip}`,
+    caption: scene.caption,
+    kenBurns: scene.kenBurns ?? null,
     durationInFrames: Math.max(1, Math.round(secs * FPS)),
   });
 }
 writeFileSync(resolve(HERE, "manifest.json"), JSON.stringify(manifest, null, 2));
-console.log(`wrote manifest.json with ${manifest.length} scenes`);
+console.log(`wrote manifest.json with ${manifest.length} clips`);
