@@ -85,14 +85,21 @@ export const buildVoTimeline = (
 ): VoPlacement[] => {
   const placements: VoPlacement[] = [];
 
+  // Narration must never overlap itself (double-talk sounds terrible). Each clip
+  // starts at its scene's ideal frame, but no earlier than the previous clip
+  // ends + GAP — so short scenes (share) or a long intro can't collide with
+  // their neighbours. Clips stay in scene order, just serialized.
+  const GAP = 6; // frames of breathing room between VO clips (~0.2s)
+  let nextFree = 0;
+  const place = (key: string, file: string, ideal: number, durationInFrames: number) => {
+    const from = Math.max(0, ideal, nextFree);
+    placements.push({ key, file, from, durationInFrames });
+    nextFree = from + durationInFrames + GAP;
+  };
+
   // Intro VO — Intro sequence has no preceding transition, so it begins at 0.
   if (voiceoverMap.intro) {
-    placements.push({
-      key: "intro",
-      file: voiceoverMap.intro.file,
-      from: 0,
-      durationInFrames: voiceoverMap.intro.durationInFrames,
-    });
+    place("intro", voiceoverMap.intro.file, 0, voiceoverMap.intro.durationInFrames);
   }
 
   // Scene VOs — play at the start of the first scene matching each VO key,
@@ -103,12 +110,7 @@ export const buildVoTimeline = (
     const start = introFrames + cum - (i + 1) * xfade;
     const voKey = sceneToVoKey(scene.name);
     if (!usedKeys.has(voKey) && voiceoverMap[voKey]) {
-      placements.push({
-        key: voKey,
-        file: voiceoverMap[voKey]!.file,
-        from: Math.max(0, start),
-        durationInFrames: voiceoverMap[voKey]!.durationInFrames,
-      });
+      place(voKey, voiceoverMap[voKey]!.file, start, voiceoverMap[voKey]!.durationInFrames);
       usedKeys.add(voKey);
     }
     cum += scene.durationInFrames;
@@ -117,12 +119,7 @@ export const buildVoTimeline = (
   // Outro VO — the Outro sequence follows the final transition.
   if (voiceoverMap.outro) {
     const outroStart = introFrames + cum - (manifest.length + 1) * xfade;
-    placements.push({
-      key: "outro",
-      file: voiceoverMap.outro.file,
-      from: Math.max(0, outroStart),
-      durationInFrames: voiceoverMap.outro.durationInFrames,
-    });
+    place("outro", voiceoverMap.outro.file, outroStart, voiceoverMap.outro.durationInFrames);
   }
 
   return placements;
