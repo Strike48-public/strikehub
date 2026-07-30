@@ -140,11 +140,24 @@ async function main() {
       const t0 = Date.now();
       if (scene.record && !noRecord) {
         const geom = `${out.x},${out.y} ${out.width}x${out.height}`;
+        // wf-recorder needs XDG_RUNTIME_DIR + WAYLAND_DISPLAY to find the socket;
+        // the runner's own env may lack them (spawned outside the graphical session).
+        const xdg = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`;
         rec = spawn("wf-recorder", ["-o", headless, "-g", geom, "-f", `${REC}/${scene.id}.mp4`], {
-          stdio: "ignore",
-          env: { ...process.env, WAYLAND_DISPLAY: "wayland-1" },
+          stdio: ["ignore", "ignore", "pipe"],
+          env: { ...process.env, WAYLAND_DISPLAY: "wayland-1", XDG_RUNTIME_DIR: xdg },
         });
-        await sleep(800);
+        let recErr = "";
+        rec.stderr?.on("data", (d) => { recErr += d.toString(); });
+        rec.on("error", (e) => console.error(`  wf-recorder spawn error: ${e.message}`));
+        rec.on("exit", (code) => {
+          // wf-recorder exits 0 on SIGINT; a non-zero/early exit means it never recorded.
+          if (code && code !== 0) console.error(`  wf-recorder exited ${code} for ${scene.id}: ${recErr.trim()}`);
+        });
+        await sleep(1200);
+        if (rec.exitCode !== null && rec.exitCode !== 0) {
+          throw new Error(`wf-recorder failed to start for scene ${scene.id} (exit ${rec.exitCode}): ${recErr.trim()}`);
+        }
       }
       for (const step of scene.steps) {
         await runStep(step, out, cache, headless);
