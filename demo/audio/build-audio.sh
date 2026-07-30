@@ -45,19 +45,23 @@ nix-shell -p piper-tts jq ffmpeg --run "
 "
 
 echo "==> Preparing music bed..."
-# For now, generate a simple silent placeholder — integrator can replace with real music
-# A real implementation would download/generate a CC0 instrumental bed here
+# Synthesized ambient pad (our own output — CC0-equivalent, no licensing issue).
+# A sustained Cadd9 chord (C3 G3 C4 E4 G4 D5) with tremolo shimmer + echo/reverb
+# and a soft low-pass, normalized to an audible bed level. Regenerated every run
+# so it's deterministic. Swap in a licensed track here if a richer bed is wanted.
 MUSIC_OUT="$AUDIO_DIR/music.mp3"
-if [[ ! -f "$MUSIC_OUT" ]]; then
-  nix-shell -p ffmpeg --run "
-    ffmpeg -y -f lavfi -i 'anoisesrc=color=white:r=44100:d=90' \
-      -filter:a 'lowpass=f=200,highpass=f=80,volume=0.02' \
-      -t 90 -b:a 128k '$MUSIC_OUT' >/dev/null 2>&1
-  "
-  echo "  ✓ $MUSIC_OUT (generated 90s ambient bed — replace with real track)"
-else
-  echo "  ✓ $MUSIC_OUT (exists)"
-fi
+nix-shell -p ffmpeg --run "
+  ffmpeg -y -loglevel error \
+    -f lavfi -i 'sine=frequency=130.81:duration=70' \
+    -f lavfi -i 'sine=frequency=196.00:duration=70' \
+    -f lavfi -i 'sine=frequency=261.63:duration=70' \
+    -f lavfi -i 'sine=frequency=329.63:duration=70' \
+    -f lavfi -i 'sine=frequency=392.00:duration=70' \
+    -f lavfi -i 'sine=frequency=587.33:duration=70' \
+    -filter_complex '[0][1][2][3][4][5]amix=inputs=6:normalize=1,tremolo=f=0.13:d=0.45,vibrato=f=0.15:d=0.2,aecho=0.8:0.85:900|1600:0.35|0.25,lowpass=f=1700,highpass=f=70,loudnorm=I=-20:TP=-2,afade=t=in:st=0:d=3,afade=t=out:st=67:d=3,aformat=channel_layouts=stereo:sample_rates=44100' \
+    -t 70 -b:a 160k '$MUSIC_OUT'
+"
+echo "  ✓ $MUSIC_OUT (synthesized ambient pad)"
 
 echo "==> Audio build complete!"
 echo "    Voiceover files: $VO_DIR/*.wav"

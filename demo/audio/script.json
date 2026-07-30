@@ -5,7 +5,7 @@
   },
   {
     "scene": "scan",
-    "vo": "Meet Pick — your AI pentesting agent. Just ask it to scan your network, and watch it run real reconnaissance tools for you."
+    "vo": "Meet Pick — your AI penetration testing agent. Just ask it to scan your network, and watch it run real reconnaissance tools for you."
   },
   {
     "scene": "doc",
@@ -21,7 +21,7 @@
   },
   {
     "scene": "pickmode",
-    "vo": "Pick has an Easy Mode too. Flip it off to unlock the complete pentest workstation — shells, tools, and expert controls."
+    "vo": "Pick has an Easy Mode too. Flip it off to unlock the complete penetration testing workstation — shells, tools, and expert controls."
   },
   {
     "scene": "outro",
