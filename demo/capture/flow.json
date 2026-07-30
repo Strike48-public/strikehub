@@ -45,7 +45,7 @@
       "record": true,
       "steps": [
         { "id": "easymode.settings", "act": "click the settings gear icon at the bottom of the far-left rail", "verify": "an 'Easy mode' toggle control is visible on screen", "timeoutMs": 12000 },
-        { "id": "easymode.toggle_off", "act": "click the 'Easy mode' toggle to turn it OFF", "verify": "both a KubeStudio card and a Pick card are shown (advanced connectors revealed)", "timeoutMs": 12000 },
+        { "id": "easymode.toggle_off", "act": "click the 'Easy mode' toggle to turn it OFF", "verify": "a card labeled 'KubeStudio' and a card labeled 'Pick' are both visible below the Easy mode toggle", "timeoutMs": 12000 },
         { "id": "easymode.open_kube", "act": "click the KubeStudio card", "verify": "the KubeStudio Kubernetes dashboard (Cluster Overview with Nodes/Pods/Workloads) is visible", "timeoutMs": 30000 }
       ],
       "trim": [ { "from": "verify:easymode.toggle_off", "to": "end", "speed": 1.2 } ]
