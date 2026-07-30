@@ -17,7 +17,22 @@ function dur(file: string): number {
   return parseFloat(out);
 }
 
-const clips = existsSync(SCENES) ? readdirSync(SCENES).filter((f) => f.endsWith(".mp4")).sort() : [];
+// Order by flow.json scene order, then by segment index within a scene —
+// NOT alphabetically (which would scramble the narrative, e.g. doc before scan).
+const sceneOrder = new Map(flow.scenes.map((s, i) => [s.id, i]));
+const segIndex = (f: string) => {
+  const m = f.replace(/\.mp4$/, "").match(/_(\d+)$/);
+  return m ? parseInt(m[1], 10) : 0;
+};
+const clips = existsSync(SCENES)
+  ? readdirSync(SCENES)
+      .filter((f) => f.endsWith(".mp4"))
+      .sort((a, b) => {
+        const sa = sceneOrder.get(a.replace(/\.mp4$/, "").replace(/_\d+$/, "")) ?? 999;
+        const sb = sceneOrder.get(b.replace(/\.mp4$/, "").replace(/_\d+$/, "")) ?? 999;
+        return sa !== sb ? sa - sb : segIndex(a) - segIndex(b);
+      })
+  : [];
 const manifest = [];
 for (const clip of clips) {
   // clip name is "<sceneId>.mp4" or "<sceneId>_<n>.mp4"
