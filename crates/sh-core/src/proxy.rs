@@ -60,6 +60,13 @@ impl ConnectorProxy {
             .route("/c/:port/liveview", get(handle_liveview))
             .route("/c/:port/*path", get(handle_passthrough))
             .route("/ws/graphql", get(handle_graphql_ws))
+            // Pick's Absinthe conversationEvents subscription dials this exact
+            // path against the local proxy (embedded connector). Forward the WS
+            // upgrade to the Matrix host, same as the /matrix/* reverse-proxy.
+            .route(
+                "/v1alpha/graphql_socket/websocket",
+                get(handle_graphql_socket_ws),
+            )
             // Proxy /api/v1alpha → /v1alpha/graphql with the Keycloak JWT
             // as a ?token= query parameter (matching the WebSocket relay pattern).
             .route("/api/v1alpha", any(handle_app_graphql_rewrite))
@@ -615,6 +622,13 @@ async fn handle_matrix_proxy(
 }
 
 /// Handle WebSocket upgrade for Matrix proxy paths.
+/// Handle Pick's Absinthe subscription WS at the bare
+/// `/v1alpha/graphql_socket/websocket` path (no `/matrix/` prefix). Forwards
+/// the upgrade to the Matrix host via the same relay as `handle_matrix_proxy`.
+async fn handle_graphql_socket_ws(State(state): State<Arc<ProxyState>>, req: Request<Body>) -> Response {
+    handle_matrix_ws_upgrade("v1alpha/graphql_socket/websocket".to_string(), state, req).await
+}
+
 async fn handle_matrix_ws_upgrade(
     path: String,
     state: Arc<ProxyState>,
