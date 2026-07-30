@@ -117,6 +117,10 @@ async function main() {
 
     // AUTH GATE
     console.log("\n=== AUTH: driving to Sign In ===");
+    // Focus the window before clicking — ydotool clicks only reach the focused
+    // window; without this the Sign In click can silently miss (flaky auth).
+    hypr(`hyprctl dispatch focuswindow address:${win.address}`);
+    await sleep(500);
     await runStep(flow.auth.signInStep, out, cache, headless);
     console.log("\n*** Complete the OAuth login in the browser window on your screen. Waiting... ***\n");
     await waitFor(flow.auth.readyVerify, headless, 300000, "auth.ready");
