@@ -2,7 +2,7 @@
   "version": 1,
   "output": { "headlessName": "HEADLESS", "width": 1920, "height": 1080, "fps": 30 },
   "auth": {
-    "signInStep": { "id": "auth.signin", "act": "click the 'Sign In' button", "verify": "an OAuth login browser has opened (app shows a signing-in / waiting state)", "timeoutMs": 20000 },
+    "signInStep": { "id": "auth.signin", "act": "click the 'Sign In' button" },
     "readyVerify": "the authenticated Pick home screen with a 'Scan My Network' button and a connector rail on the left is visible"
   },
   "scenes": [
