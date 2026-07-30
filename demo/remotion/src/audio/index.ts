@@ -1,2 +1,10 @@
-export { Narration, type VoiceoverEntry, type VoiceoverMap } from "./Narration.tsx";
+export {
+  Narration,
+  buildVoTimeline,
+  sceneToVoKey,
+  staticFilePresent,
+  type VoiceoverEntry,
+  type VoiceoverMap,
+  type VoPlacement,
+} from "./Narration.tsx";
 export { MusicBed, type DuckRange } from "./MusicBed.tsx";

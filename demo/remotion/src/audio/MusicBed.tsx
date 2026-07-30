@@ -1,4 +1,5 @@
 import { Audio, staticFile, interpolate, useCurrentFrame } from "remotion";
+import { staticFilePresent } from "./Narration.tsx";
 
 /**
  * MusicBed component — background music with volume ducking during voiceover.
@@ -39,6 +40,10 @@ export const MusicBed: React.FC<MusicBedProps> = ({
   totalDurationInFrames,
 }) => {
   const frame = useCurrentFrame();
+
+  // Guard: render nothing if the music file is absent so the composition
+  // still renders (and lists) without crashing at build time.
+  if (!staticFilePresent(src)) return null;
 
   // Determine if current frame is in a duck range
   const isDucked = duckRanges.some((r) => frame >= r.from && frame < r.to);

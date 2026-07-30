@@ -4,7 +4,7 @@ import { fade } from "@remotion/transitions/fade";
 import { Scene } from "./Scene.tsx";
 import { Intro } from "./Intro.tsx";
 import { Outro } from "./Outro.tsx";
-import { Narration, MusicBed, type VoiceoverMap } from "./audio";
+import { Narration, MusicBed, buildVoTimeline, type VoiceoverMap, type DuckRange } from "./audio";
 import manifest from "../manifest.json" with { type: "json" };
 
 const INTRO = 60;
@@ -23,43 +23,20 @@ const voiceoverMap: VoiceoverMap = {
   outro: { file: "audio/vo/outro.wav", durationInFrames: Math.ceil(4.911020 * FPS) },
 };
 
-// Helper: build duck ranges for music bed
-const buildDuckRanges = (voMap: VoiceoverMap, introFrames: number, manifest: any[]) => {
-  const ranges = [];
-  let frame = 0;
-
-  // Intro
-  if (voMap.intro) {
-    ranges.push({ from: frame, to: frame + voMap.intro.durationInFrames });
-  }
-  frame += introFrames;
-
-  // Scenes (matches Narration's sceneToVoKey logic)
-  const usedKeys = new Set<string>();
-  for (const scene of manifest) {
-    const voKey = scene.name.replace(/_(tools|report|toggle|kube|expert)$/, "");
-    if (!usedKeys.has(voKey) && voMap[voKey]) {
-      ranges.push({ from: frame, to: frame + voMap[voKey]!.durationInFrames });
-      usedKeys.add(voKey);
-    }
-    frame += scene.durationInFrames;
-  }
-
-  // Outro
-  if (voMap.outro) {
-    ranges.push({ from: frame, to: frame + voMap.outro.durationInFrames });
-  }
-
-  return ranges;
-};
-
 export const Reel: React.FC = () => {
-  const duckRanges = buildDuckRanges(voiceoverMap, INTRO, manifest);
+  // Single source of truth for VO placement: XFADE-corrected absolute start
+  // frames. Both the music-ducking ranges and <Narration> derive from this
+  // exact timeline (and the same XFADE), so they can never drift apart.
+  const voTimeline = buildVoTimeline(voiceoverMap, INTRO, manifest, XFADE);
+  const duckRanges: DuckRange[] = voTimeline.map((p) => ({
+    from: p.from,
+    to: p.from + p.durationInFrames,
+  }));
   const totalDuration = reelDuration();
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#101014" }}>
-      {/* Background music with ducking */}
+      {/* Background music with ducking (renders nothing if music.mp3 absent) */}
       <MusicBed
         src="audio/music.mp3"
         baseVolume={0.15}
@@ -67,8 +44,9 @@ export const Reel: React.FC = () => {
         duckRanges={duckRanges}
         totalDurationInFrames={totalDuration}
       />
-      {/* Voiceover narration */}
-      <Narration voiceoverMap={voiceoverMap} introFrames={INTRO} manifest={manifest} />
+      {/* Voiceover narration — intro + per-scene + outro, XFADE-aligned.
+          Skips any VO whose wav is missing so the composition still renders. */}
+      <Narration voiceoverMap={voiceoverMap} introFrames={INTRO} manifest={manifest} xfade={XFADE} />
 
       <TransitionSeries>
         <TransitionSeries.Sequence durationInFrames={INTRO}><Intro /></TransitionSeries.Sequence>
