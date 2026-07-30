@@ -167,6 +167,9 @@ async function main() {
         await runStep(step, out, cache, headless);
         timings[`verify:${step.id}`] = (Date.now() - t0) / 1000;
       }
+      // Dwell on the final state (the payoff/reveal) before cutting the recorder,
+      // so trims anchored at the last verify have footage to show.
+      if (scene.record && !noRecord && scene.holdMs) await sleep(scene.holdMs);
       timings.end = (Date.now() - t0) / 1000;
       if (rec) { rec.kill("SIGINT"); await sleep(700); }
       if (scene.record && !noRecord) {

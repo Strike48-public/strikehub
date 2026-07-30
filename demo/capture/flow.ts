@@ -15,6 +15,9 @@ export type Scene = {
   kenBurns?: { from: number; to: number };
   steps: Step[];
   trim?: TrimSeg[];
+  /** Extra ms to keep recording after the last step, so a reveal/payoff dwells
+   *  on screen instead of the recorder cutting the instant the verify passes. */
+  holdMs?: number;
 };
 export type Flow = {
   version: number;

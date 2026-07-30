@@ -9,17 +9,20 @@ mkdir -p scenes norm
 # Resolve a trim anchor ("start" | "end" | "end-Ns" | "verify:<stepId>" | "+Ns" relative to prev) to seconds.
 # Args: <scene> <anchor> <prevSeconds>
 resolve_anchor() {
-  local scene="$1" a="$2" prev="$3" t v
+  local scene="$1" a="$2" prev="$3" t v raw
   local timings="${scene}.timings.json"
   local dur; dur=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "${scene}.mp4")
   case "$a" in
-    start) echo 0 ;;
-    end) echo "$dur" ;;
-    end-*) v="${a#end-}"; v="${v%s}"; awk "BEGIN{print $dur - $v}" ;;
-    +*) v="${a#+}"; v="${v%s}"; awk "BEGIN{print $prev + $v}" ;;
-    verify:*) t=$(jq -r ".\"$a\" // empty" "$timings"); [ -n "$t" ] && echo "$t" || echo 0 ;;
-    *) echo 0 ;;
+    start) raw=0 ;;
+    end) raw="$dur" ;;
+    end-*) v="${a#end-}"; v="${v%s}"; raw=$(awk "BEGIN{print $dur - $v}") ;;
+    +*) v="${a#+}"; v="${v%s}"; raw=$(awk "BEGIN{print $prev + $v}") ;;
+    verify:*) t=$(jq -r ".\"$a\" // empty" "$timings"); [ -n "$t" ] && raw="$t" || raw=0 ;;
+    *) raw=0 ;;
   esac
+  # Clamp to [0, dur]: verify timestamps are wall-clock and can land a hair past
+  # the encoded duration when the recorder is stopped right at the last verify.
+  awk "BEGIN{v=$raw; if(v<0)v=0; if(v>$dur)v=$dur; print v}"
 }
 
 # Force CFR + bt709 full-range on every cut.
@@ -46,8 +49,15 @@ for scene in $(jq -r '.scenes[]|select(.record==true)|.id' "$FLOW"); do
       spd=$(jq -r ".scenes[]|select(.id==\"$scene\")|.trim[$i].speed" "$FLOW")
       from=$(resolve_anchor "$scene" "$fromA" "$prev")
       to=$(resolve_anchor "$scene" "$toA" "$from")
-      cut "norm/${scene}.mp4" "$from" "$to" "$spd" "scenes/${scene}_${n}.mp4"
-      prev="$to"; n=$((n+1))
+      # Skip degenerate segments (to <= from + 0.1s) — e.g. a trim anchored at the
+      # final verify with no dwell footage after it — so ffmpeg never aborts.
+      if awk "BEGIN{exit !($to > $from + 0.1)}"; then
+        cut "norm/${scene}.mp4" "$from" "$to" "$spd" "scenes/${scene}_${n}.mp4"
+        prev="$to"; n=$((n+1))
+      else
+        echo "skip ${scene} seg $i: empty range ($from..$to)"
+        prev="$to"
+      fi
     done
   fi
 done

@@ -48,6 +48,7 @@
         { "id": "easymode.toggle_off", "act": "click the 'Easy mode' toggle to turn it OFF", "verify": "a card labeled 'KubeStudio' and a card labeled 'Pick' are both visible below the Easy mode toggle", "timeoutMs": 12000 },
         { "id": "easymode.open_kube", "act": "click the KubeStudio card", "verify": "the KubeStudio Kubernetes dashboard (Cluster Overview with Nodes/Pods/Workloads) is visible", "timeoutMs": 30000 }
       ],
+      "holdMs": 4000,
       "trim": [ { "from": "verify:easymode.toggle_off", "to": "end", "speed": 1.2 } ]
     },
     {
@@ -60,7 +61,8 @@
         { "id": "pickmode.settings", "act": "click 'Settings' in the slide-out menu", "verify": "the Pick Settings screen with an 'Easy Mode' toggle is visible", "timeoutMs": 10000 },
         { "id": "pickmode.toggle_off", "act": "click the 'Easy Mode' toggle to turn it off", "verify": "the full expert Pentest dashboard with a Tools/Shell/Chat nav and Quick Actions grid is visible", "timeoutMs": 20000 }
       ],
-      "trim": [ { "from": "verify:pickmode.toggle_off", "to": "end", "speed": 1.2 } ]
+      "holdMs": 5000,
+      "trim": [ { "from": "verify:pickmode.settings", "to": "end", "speed": 1.2 } ]
     }
   ]
 }
