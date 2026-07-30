@@ -162,11 +162,14 @@ The current `music.mp3` is a generated 90s ambient placeholder (filtered white n
 
 ## Timing Alignment
 
-The voiceover script is written to match the *intent* of the 5 core scenes from `flow.json`. However, the actual video manifest has 7 scenes (scan split into scan_tools + scan_report, etc.). The `Narration` component handles this by mapping:
+The voiceover script matches the core scenes from `flow.json`. `build-scenes.sh`
+emits clips named `<sceneId>_<segmentIndex>` (e.g. `scan_0`, `scan_1`, `doc_0`).
+`sceneToVoKey` strips the trailing `_<number>` so every segment maps to its
+scene's single VO key; the VO plays once, at the start of the first segment:
 
-- `scan_tools`, `scan_report` → `scan` VO (plays at start of scan_tools)
-- `easymode_toggle`, `easymode_kube` → `easymode` VO (plays at start of easymode_toggle)
-- `pickmode_toggle`, `pickmode_expert` → `pickmode` VO (plays at start of pickmode_toggle)
+- `scan_0`, `scan_1` → `scan` VO (plays at start of scan_0)
+- `doc_0` → `doc` VO, `share_0` → `share` VO
+- `easymode_0` → `easymode` VO, `pickmode_0` → `pickmode` VO
 
 If the VO doesn't align perfectly (e.g. VO too long for the scene), adjust the script or scene trims:
 - **Tighten VO**: edit `script.json`, re-run `build-audio.sh`

@@ -91,6 +91,21 @@ async function runStep(step: Step, out: OutputInfo, cache: ActionCache, headless
 }
 function noRecordDisablesClicks() { return false; } // clicks always fire; --no-record only skips recording
 
+let tornDown = false;
+/** Idempotent teardown: kill app, remove HEADLESS-*, restore eDP-1 + dim.
+ *  Runs from the normal finally AND from signal handlers, so an operator Ctrl-C
+ *  during the OAuth/scan waits never leaks a headless output (which would shift
+ *  the real screen). Node does not unwind `finally` on an unhandled SIGINT, so
+ *  the signal handlers below are required, not redundant. */
+function teardown() {
+  if (tornDown) return;
+  tornDown = true;
+  try { bashEnv("stage_down"); } catch (e) { console.error("stage_down failed:", e); }
+}
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(sig, () => { console.error(`\n${sig} — tearing down stage...`); teardown(); process.exit(130); });
+}
+
 async function main() {
   mkdirSync(REC, { recursive: true });
   const flow = loadFlow(resolve(HERE, "flow.json"));
@@ -178,7 +193,7 @@ async function main() {
     }
     console.log("\ncapture complete");
   } finally {
-    bashEnv("stage_down");
+    teardown();
   }
 }
 

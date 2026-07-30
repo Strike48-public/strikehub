@@ -12,15 +12,17 @@ const OUTRO = 60;
 const XFADE = 15; // frames
 const FPS = 30;
 
-// Voiceover map — durations from actual wav files
+// Voiceover map — durations from actual wav files (en_US-ryan-high, regenerated
+// by audio/build-audio.sh). If you re-run build-audio.sh with different text or
+// voice, update these to match the printed durations.
 const voiceoverMap: VoiceoverMap = {
-  intro: { file: "audio/vo/intro.wav", durationInFrames: Math.ceil(3.610703 * FPS) },
-  scan: { file: "audio/vo/scan.wav", durationInFrames: Math.ceil(7.116916 * FPS) },
-  doc: { file: "audio/vo/doc.wav", durationInFrames: Math.ceil(6.153288 * FPS) },
-  share: { file: "audio/vo/share.wav", durationInFrames: Math.ceil(1.207438 * FPS) },
-  easymode: { file: "audio/vo/easymode.wav", durationInFrames: Math.ceil(8.417234 * FPS) },
-  pickmode: { file: "audio/vo/pickmode.wav", durationInFrames: Math.ceil(7.976054 * FPS) },
-  outro: { file: "audio/vo/outro.wav", durationInFrames: Math.ceil(4.911020 * FPS) },
+  intro: { file: "audio/vo/intro.wav", durationInFrames: Math.ceil(3.633923 * FPS) },
+  scan: { file: "audio/vo/scan.wav", durationInFrames: Math.ceil(6.548027 * FPS) },
+  doc: { file: "audio/vo/doc.wav", durationInFrames: Math.ceil(5.886259 * FPS) },
+  share: { file: "audio/vo/share.wav", durationInFrames: Math.ceil(1.253878 * FPS) },
+  easymode: { file: "audio/vo/easymode.wav", durationInFrames: Math.ceil(8.742313 * FPS) },
+  pickmode: { file: "audio/vo/pickmode.wav", durationInFrames: Math.ceil(6.455147 * FPS) },
+  outro: { file: "audio/vo/outro.wav", durationInFrames: Math.ceil(4.713651 * FPS) },
 };
 
 export const Reel: React.FC = () => {

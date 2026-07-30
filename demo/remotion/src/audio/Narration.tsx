@@ -53,12 +53,15 @@ interface NarrationProps {
  * This allows flexible mapping when manifest has more granular scenes than VO script.
  *
  * Example:
- *   manifest scene "scan_tools" + "scan_report" → vo key "scan"
- *   manifest scene "easymode_toggle" + "easymode_kube" → vo key "easymode"
+ *   manifest clips "scan_0" + "scan_1" → vo key "scan"
+ *   manifest clip "easymode_0" → vo key "easymode"
  */
 export const sceneToVoKey = (sceneName: string): string => {
-  // Remove suffixes like _tools, _report, _toggle, _kube, _expert
-  return sceneName.replace(/_(tools|report|toggle|kube|expert)$/, "");
+  // build-scenes emits clips named "<sceneId>_<segmentIndex>" (e.g. "scan_0",
+  // "scan_1", "doc_0"). Strip a trailing "_<number>" so every segment of a
+  // scene maps to that scene's single VO key. Also tolerate the older semantic
+  // suffixes (_tools/_report/_toggle/_kube/_expert) just in case.
+  return sceneName.replace(/_\d+$/, "").replace(/_(tools|report|toggle|kube|expert)$/, "");
 };
 
 /**

@@ -7,14 +7,16 @@ set -euo pipefail
 DEMO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUDIO_DIR="$DEMO_ROOT/audio"
 SCRIPT="$AUDIO_DIR/script.json"
-VOICE_MODEL="$AUDIO_DIR/voices/en_US-lessac-medium.onnx"
+# ryan-high: Piper's high-quality US male voice — noticeably more natural than
+# the lessac-medium model. ~120MB.
+VOICE_MODEL="$AUDIO_DIR/voices/en_US-ryan-high.onnx"
 VO_DIR="$AUDIO_DIR/vo"
 
 if [[ ! -f "$VOICE_MODEL" ]]; then
   echo "ERROR: Voice model not found at $VOICE_MODEL"
   echo "Download it with:"
-  echo "  curl -L -o $VOICE_MODEL https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-  echo "  curl -L -o $VOICE_MODEL.json https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+  echo "  curl -L -o $VOICE_MODEL https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx"
+  echo "  curl -L -o $VOICE_MODEL.json https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json"
   exit 1
 fi
 
