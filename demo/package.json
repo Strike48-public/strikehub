@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "capture": "tsx capture/driver.ts",
+    "capture": "tsx capture/runner.ts",
     "manifest": "tsx remotion/gen-manifest.ts",
     "preview": "remotion studio remotion/src/Root.tsx --public-dir=remotion/public",
     "render": "remotion render remotion/src/Root.tsx Reel out/strikehub-reel.mp4 --public-dir=remotion/public",

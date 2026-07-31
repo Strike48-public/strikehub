@@ -33,6 +33,13 @@ const clips = existsSync(SCENES)
         return sa !== sb ? sa - sb : segIndex(a) - segIndex(b);
       })
   : [];
+// A TransitionSeries.Sequence must be longer than the transitions overlapping
+// it. Each scene is flanked by two XFADE-frame fades, so anything ≤ 2*XFADE
+// makes Remotion throw and aborts the whole render. Enforce a floor of
+// 2*XFADE+1 (matches XFADE=15 in Reel.tsx) and warn on any clip we bump.
+const XFADE = 15;
+const MIN_FRAMES = XFADE * 2 + 1;
+
 const manifest = [];
 for (const clip of clips) {
   // clip name is "<sceneId>.mp4" or "<sceneId>_<n>.mp4"
@@ -40,12 +47,17 @@ for (const clip of clips) {
   const scene = captionById.get(sceneId);
   if (!scene) { console.warn(`skip ${clip}: no scene ${sceneId} in flow`); continue; }
   const secs = dur(resolve(SCENES, clip));
+  let frames = Math.max(1, Math.round(secs * FPS));
+  if (frames < MIN_FRAMES) {
+    console.warn(`bump ${clip}: ${frames}f < ${MIN_FRAMES}f (2*XFADE+1); padding to avoid TransitionSeries abort`);
+    frames = MIN_FRAMES;
+  }
   manifest.push({
     name: clip.replace(/\.mp4$/, ""),
     clip: `recordings/scenes/${clip}`,
     caption: scene.caption,
     kenBurns: scene.kenBurns ?? null,
-    durationInFrames: Math.max(1, Math.round(secs * FPS)),
+    durationInFrames: frames,
   });
 }
 writeFileSync(resolve(HERE, "manifest.json"), JSON.stringify(manifest, null, 2));

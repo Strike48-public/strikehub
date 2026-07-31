@@ -38,9 +38,7 @@ impl ConnectorProxy {
     /// Start the proxy server on an ephemeral port. Returns immediately after
     /// binding; the server runs in a background tokio task.
     pub async fn start(auth: AuthManager) -> anyhow::Result<Self> {
-        let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let tls_insecure = crate::auth::resolve_tls_insecure(auth.matrix_url());
         let http = reqwest::Client::builder()
             .danger_accept_invalid_certs(tls_insecure)
             .build()?;

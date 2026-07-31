@@ -22,7 +22,15 @@ export type Scene = {
 export type Flow = {
   version: number;
   output: { headlessName: string; width: number; height: number; fps: number };
-  auth: { signInStep: Step; readyVerify: string };
+  auth: {
+    signInStep: Step;
+    readyVerify: string;
+    /** After OAuth, a Preflight/registration overlay may block the home screen.
+     *  If `postLoginVerify` matches, the runner dismisses it via `dismissStep`
+     *  before waiting for `readyVerify`. Both optional — absent = no overlay. */
+    postLoginVerify?: string;
+    dismissStep?: Step;
+  };
   scenes: Scene[];
 };
 

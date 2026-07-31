@@ -86,11 +86,10 @@ pub async fn create_pre_approved_token(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "pre-approve request failed: {} — {}",
-            status,
-            &body[..body.len().min(300)]
-        );
+        // Truncate by CHARS, not bytes: a byte slice can land mid-codepoint on a
+        // server-controlled body and panic. Take up to 300 chars.
+        let preview: String = body.chars().take(300).collect();
+        anyhow::bail!("pre-approve request failed: {} — {}", status, preview);
     }
 
     let body: serde_json::Value = resp.json().await?;

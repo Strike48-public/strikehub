@@ -1,4 +1,4 @@
-import { Audio, Sequence, staticFile, getStaticFiles } from "remotion";
+import { Audio, Sequence, staticFile } from "remotion";
 import { useMemo } from "react";
 
 /**
@@ -126,18 +126,14 @@ export const buildVoTimeline = (
 };
 
 /**
- * True if a static file is present in the Remotion public dir. Lets the
- * composition render (and list) even when audio assets are absent at build
- * time. Uses `getStaticFiles()` rather than node:fs because this component is
- * bundled for the browser, where node:fs is unavailable.
+ * Retained for API compatibility, but NO LONGER used to gate playback.
+ * `getStaticFiles()` only enumerates in the Studio — during `remotion render`
+ * it behaves inconsistently (empty or non-matching paths), which silently
+ * killed ALL audio in the render. The build pipeline (build-audio.sh) always
+ * writes the wavs before render, so we mount `<Audio>` unconditionally; a
+ * genuinely missing asset now fails loudly instead of muting the whole reel.
  */
-export const staticFilePresent = (path: string): boolean => {
-  try {
-    return getStaticFiles().some((f) => f.name === path || f.src.endsWith(path));
-  } catch {
-    return false;
-  }
-};
+export const staticFilePresent = (_path: string): boolean => true;
 
 export const Narration: React.FC<NarrationProps> = ({ voiceoverMap, introFrames, manifest, xfade = 0 }) => {
   const timeline = useMemo(
@@ -147,14 +143,11 @@ export const Narration: React.FC<NarrationProps> = ({ voiceoverMap, introFrames,
 
   return (
     <>
-      {timeline
-        // Guard: skip any VO whose wav is missing so the composition still renders.
-        .filter((entry) => staticFilePresent(entry.file))
-        .map((entry) => (
-          <Sequence key={entry.key} from={entry.from} durationInFrames={entry.durationInFrames}>
-            <Audio src={staticFile(entry.file)} />
-          </Sequence>
-        ))}
+      {timeline.map((entry) => (
+        <Sequence key={entry.key} from={entry.from} durationInFrames={entry.durationInFrames}>
+          <Audio src={staticFile(entry.file)} />
+        </Sequence>
+      ))}
     </>
   );
 };

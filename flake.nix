@@ -31,6 +31,12 @@
       desktopLibs = with pkgs; [
         gtk3 webkitgtk_4_1 libsoup_3 glib gdk-pixbuf cairo pango atk
         openssl xdotool
+        # glib-networking supplies GIO's TLS backend (gnutls). WebKitGTK/libsoup
+        # route HTTPS through it; without it *and* GIO_EXTRA_MODULES pointing at
+        # its module dir, every https request in the webview fails with
+        # "TLS support not available" (e.g. restty's CDN font fetches → the
+        # terminal grid can't size and renders blank). See shellHook below.
+        glib-networking
         # xz (liblzma.so.5) and bzip2 (libbz2.so.1) are dlopened transitively
         # at runtime by the WebKit/GTK stack; without them the desktop binary
         # (and test binaries linking it) fail to load their shared libraries.
@@ -63,6 +69,11 @@
           # so desktop/test binaries that dlopen GTK/WebKit/openssl need these
           # on LD_LIBRARY_PATH to run under `nix develop`.
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath desktopLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+          # GIO loads its TLS backend (from glib-networking) as a dynamic module
+          # discovered via GIO_EXTRA_MODULES. Point it at the gio-modules dir so
+          # WebKit/libsoup can do HTTPS (otherwise: "TLS support not available").
+          export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
         '';
       };
 

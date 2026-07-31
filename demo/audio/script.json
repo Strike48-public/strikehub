@@ -1,7 +1,7 @@
 [
   {
     "scene": "intro",
-    "vo": "Strike Hub. The unified desktop for security and DevOps."
+    "vo": "Strike [hʌb](/hʌb/). The unified desktop for security and DevOps."
   },
   {
     "scene": "scan",
@@ -17,7 +17,7 @@
   },
   {
     "scene": "easymode",
-    "vo": "Strike Hub starts in Easy Mode — perfect for focused workflows. Turn it off to reveal advanced tools like KubeStudio, our full Kubernetes dashboard."
+    "vo": "Strike [hʌb](/hʌb/) starts in Easy Mode — perfect for focused workflows. Turn it off to reveal advanced tools like KubeStudio, our full Kubernetes dashboard."
   },
   {
     "scene": "pickmode",
@@ -25,6 +25,6 @@
   },
   {
     "scene": "outro",
-    "vo": "Strike Hub. One desktop. All your security and infrastructure tools, unified."
+    "vo": "Strike [hʌb](/hʌb/). One desktop. All your security and infrastructure tools, unified."
   }
 ]

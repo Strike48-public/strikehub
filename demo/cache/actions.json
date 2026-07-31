@@ -1,15 +1,15 @@
 {
   "auth.signin": {
     "x": 982,
-    "y": 570,
+    "y": 571,
     "instruction": "click the 'Sign In' button",
-    "resolvedAt": "2026-07-29T23:39:08.458Z"
+    "resolvedAt": "2026-07-31T06:55:08.910Z"
   },
   "scan.click_scan": {
     "x": 983,
-    "y": 152,
-    "instruction": "click the large 'Scan My Network' button at the top",
-    "resolvedAt": "2026-07-30T00:55:48.388Z"
+    "y": 375,
+    "instruction": "click the large 'Scan My Network' button at the top center",
+    "resolvedAt": "2026-07-30T06:46:35.958Z"
   },
   "doc.open": {
     "x": 228,
@@ -43,26 +43,32 @@
   },
   "pickmode.to_pick": {
     "x": 36,
-    "y": 159,
+    "y": 121,
     "instruction": "click the Pick (shield) icon in the far-left connector rail",
-    "resolvedAt": "2026-07-30T01:42:56.125Z"
+    "resolvedAt": "2026-07-31T06:55:47.924Z"
   },
   "pickmode.menu": {
     "x": 98,
-    "y": 73,
+    "y": 72,
     "instruction": "click the hamburger menu icon at the top-left next to the 'Pick' title",
-    "resolvedAt": "2026-07-30T01:43:16.114Z"
+    "resolvedAt": "2026-07-31T06:55:59.618Z"
   },
   "pickmode.settings": {
-    "x": 160,
-    "y": 242,
+    "x": 159,
+    "y": 243,
     "instruction": "click 'Settings' in the slide-out menu",
-    "resolvedAt": "2026-07-30T01:43:24.635Z"
+    "resolvedAt": "2026-07-31T06:56:10.307Z"
   },
   "pickmode.toggle_off": {
     "x": 1864,
     "y": 186,
     "instruction": "click the 'Easy Mode' toggle to turn it off",
-    "resolvedAt": "2026-07-30T01:43:34.620Z"
+    "resolvedAt": "2026-07-31T06:56:20.040Z"
+  },
+  "auth.dismiss_preflight": {
+    "x": 1841,
+    "y": 1039,
+    "instruction": "click the 'Next' button in the bottom-right corner",
+    "resolvedAt": "2026-07-31T06:55:32.162Z"
   }
 }

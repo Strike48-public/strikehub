@@ -1,46 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# build-audio.sh — deterministic audio pipeline: script.json → Piper TTS → normalized wav files
-# Produces demo/audio/vo/<scene>.wav for each scene + music bed at demo/audio/music.mp3
+# build-audio.sh — deterministic audio pipeline: script.json → Kokoro-82M TTS
+#   → normalized wav files. Produces demo/audio/vo/<scene>.wav + music bed.
+#
+# Voice: Kokoro bm_lewis (British male narrator). Kokoro is Apache-2.0, local,
+# CPU-fine, and far more natural than Piper. It requires Python 3.12 (upstream
+# caps at <3.13) and libstdc++ on LD_LIBRARY_PATH; we build a cached venv below.
+# script.json may embed inline phoneme overrides, e.g. "Strike [hʌb](/hʌb/)",
+# to fix brand-word pronunciation.
 
 DEMO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUDIO_DIR="$DEMO_ROOT/audio"
 SCRIPT="$AUDIO_DIR/script.json"
-# ryan-high: Piper's high-quality US male voice — noticeably more natural than
-# the lessac-medium model. ~120MB.
-VOICE_MODEL="$AUDIO_DIR/voices/en_US-ryan-high.onnx"
 VO_DIR="$AUDIO_DIR/vo"
-
-if [[ ! -f "$VOICE_MODEL" ]]; then
-  echo "ERROR: Voice model not found at $VOICE_MODEL"
-  echo "Download it with:"
-  echo "  curl -L -o $VOICE_MODEL https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx"
-  echo "  curl -L -o $VOICE_MODEL.json https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json"
-  exit 1
-fi
+VOICE="${KOKORO_VOICE:-bm_lewis}"
+VENV="${KOKORO_VENV:-$AUDIO_DIR/.kokoro-venv}"   # cached; gitignored
 
 mkdir -p "$VO_DIR"
 
-echo "==> Synthesizing voiceover from $SCRIPT..."
-# Parse script.json and generate a wav for each scene
-nix-shell -p piper-tts jq ffmpeg --run "
+echo "==> Ensuring Kokoro venv ($VENV)..."
+# Create the py3.12 venv once (prebuilt wheels only; torch from the CPU index).
+if [[ ! -x "$VENV/bin/python" ]]; then
+  nix-shell -p python312 stdenv.cc.cc.lib zlib --run "
+    set -euo pipefail
+    export LD_LIBRARY_PATH=\"\$(cc --print-file-name=libstdc++.so.6 | xargs dirname):\$(dirname \$(ls /nix/store/*zlib*/lib/libz.so.1 2>/dev/null | head -1)):\${LD_LIBRARY_PATH:-}\"
+    python3 -m venv '$VENV'
+    . '$VENV/bin/activate'
+    pip -q install --upgrade pip
+    pip -q install torch --index-url https://download.pytorch.org/whl/cpu
+    pip -q install --prefer-binary 'kokoro==0.9.4' 'misaki[en]==0.9.4' soundfile numpy
+  "
+fi
+
+echo "==> Synthesizing voiceover ($VOICE) from $SCRIPT..."
+nix-shell -p python312 stdenv.cc.cc.lib zlib espeak-ng ffmpeg jq --run "
   set -euo pipefail
-  jq -c '.[]' '$SCRIPT' | while read -r entry; do
-    scene=\$(echo \"\$entry\" | jq -r '.scene')
-    text=\$(echo \"\$entry\" | jq -r '.vo')
-    out_raw=\"$VO_DIR/\${scene}_raw.wav\"
-    out_final=\"$VO_DIR/\${scene}.wav\"
-
-    echo \"  → \$scene\"
-    echo \"\$text\" | piper --model '$VOICE_MODEL' --output_file \"\$out_raw\" 2>&1 | grep -v '^$' || true
-
-    # Normalize audio: convert to 16-bit PCM 44.1kHz mono, apply light normalization
-    ffmpeg -y -i \"\$out_raw\" -ar 44100 -ac 1 -sample_fmt s16 -filter:a 'loudnorm=I=-16:LRA=11:TP=-1.5' \"\$out_final\" >/dev/null 2>&1
-    rm \"\$out_raw\"
-
-    duration=\$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"\$out_final\" 2>/dev/null)
-    echo \"     ✓ \$out_final (\${duration}s)\"
+  export LD_LIBRARY_PATH=\"\$(cc --print-file-name=libstdc++.so.6 | xargs dirname):\$(dirname \$(ls /nix/store/*zlib*/lib/libz.so.1 2>/dev/null | head -1)):\${LD_LIBRARY_PATH:-}\"
+  '$VENV/bin/python' '$AUDIO_DIR/kokoro_tts.py' '$SCRIPT' '$VO_DIR' '$VOICE'
+  # Normalize each raw 24 kHz wav → 16-bit PCM 44.1 kHz mono, loudnorm.
+  jq -r '.[].scene' '$SCRIPT' | while read -r scene; do
+    ffmpeg -y -i \"$VO_DIR/\${scene}_raw.wav\" -ar 44100 -ac 1 -sample_fmt s16 \
+      -filter:a 'loudnorm=I=-16:LRA=11:TP=-1.5' \"$VO_DIR/\${scene}.wav\" >/dev/null 2>&1
+    rm \"$VO_DIR/\${scene}_raw.wav\"
+    dur=\$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 \"$VO_DIR/\${scene}.wav\" 2>/dev/null)
+    echo \"     ✓ \${scene}.wav (\${dur}s)\"
   done
 "
 

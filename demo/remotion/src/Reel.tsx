@@ -16,13 +16,13 @@ const FPS = 30;
 // by audio/build-audio.sh). If you re-run build-audio.sh with different text or
 // voice, update these to match the printed durations.
 const voiceoverMap: VoiceoverMap = {
-  intro: { file: "audio/vo/intro.wav", durationInFrames: Math.ceil(3.622313 * FPS) },
-  scan: { file: "audio/vo/scan.wav", durationInFrames: Math.ceil(6.733787 * FPS) },
-  doc: { file: "audio/vo/doc.wav", durationInFrames: Math.ceil(6.118458 * FPS) },
-  share: { file: "audio/vo/share.wav", durationInFrames: Math.ceil(1.149388 * FPS) },
-  easymode: { file: "audio/vo/easymode.wav", durationInFrames: Math.ceil(8.730703 * FPS) },
-  pickmode: { file: "audio/vo/pickmode.wav", durationInFrames: Math.ceil(7.058866 * FPS) },
-  outro: { file: "audio/vo/outro.wav", durationInFrames: Math.ceil(4.922630 * FPS) },
+  intro: { file: "audio/vo/intro.wav", durationInFrames: Math.ceil(4.900000 * FPS) },
+  scan: { file: "audio/vo/scan.wav", durationInFrames: Math.ceil(9.650000 * FPS) },
+  doc: { file: "audio/vo/doc.wav", durationInFrames: Math.ceil(8.325011 * FPS) },
+  share: { file: "audio/vo/share.wav", durationInFrames: Math.ceil(2.125011 * FPS) },
+  easymode: { file: "audio/vo/easymode.wav", durationInFrames: Math.ceil(10.525011 * FPS) },
+  pickmode: { file: "audio/vo/pickmode.wav", durationInFrames: Math.ceil(9.725011 * FPS) },
+  outro: { file: "audio/vo/outro.wav", durationInFrames: Math.ceil(6.425011 * FPS) },
 };
 
 export const Reel: React.FC = () => {

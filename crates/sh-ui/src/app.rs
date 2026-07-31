@@ -34,6 +34,35 @@ fn oauth_server_store() -> &'static tokio::sync::Mutex<Option<tokio::task::JoinH
     STORE.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
+/// Connector IDs hidden behind "Advanced" (easy mode ON). In easy mode these
+/// are neither shown NOR started/registered — a connector the user can't see
+/// must not be live on their tenant. Toggling easy mode off reveals + starts them.
+const ADVANCED_CONNECTOR_IDS: &[&str] = &["kubestudio"];
+
+/// True if `id` is an advanced connector gated behind easy mode.
+fn is_advanced_connector(id: &str) -> bool {
+    ADVANCED_CONNECTOR_IDS.contains(&id)
+}
+
+/// Thread-safe overrides for connector env values that are resolved at runtime
+/// (dynamic transport URL, custom Studio URL). Previously these were written to
+/// the process-global environment via `unsafe std::env::set_var`, which is UB on
+/// the multi-threaded tokio runtime StrikeHub actually uses (concurrent getenv
+/// on worker threads). We keep them in a locked map instead and overlay them in
+/// `matrix_env_vars()`, so no global env mutation is needed.
+fn runtime_env_overrides() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>> {
+    static OVERRIDES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    OVERRIDES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Set a runtime env override (thread-safe; replaces the old `set_var`).
+fn set_runtime_env(key: &str, val: &str) {
+    if let Ok(mut m) = runtime_env_overrides().write() {
+        m.insert(key.to_string(), val.to_string());
+    }
+}
+
 /// Forward environment variables to the connector child process.
 ///
 /// These are read directly from the StrikeHub process env so they're available
@@ -68,6 +97,16 @@ fn matrix_env_vars() -> Vec<(String, String)> {
         .iter()
         .filter_map(|&key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
         .collect();
+
+    // Overlay runtime overrides (dynamic transport URL, custom Studio URL) set
+    // via `set_runtime_env` — these replace the process-env value for the key,
+    // matching the old `set_var` precedence without mutating global env.
+    if let Ok(overrides) = runtime_env_overrides().read() {
+        for (key, val) in overrides.iter() {
+            vars.retain(|(k, _)| k != key);
+            vars.push((key.clone(), val.clone()));
+        }
+    }
 
     for &(key, default) in defaults {
         if !vars.iter().any(|(k, _)| k == key) {
@@ -552,10 +591,9 @@ pub fn App() -> Element {
                 transport.url(),
                 transport.scheme
             );
-            // SAFETY: single-threaded Dioxus runtime; no concurrent env reads.
-            unsafe {
-                std::env::set_var("STRIKE48_URL", transport.url());
-            }
+            // Thread-safe runtime override (no global env mutation): connectors
+            // pick this up via matrix_env_vars() when they start.
+            set_runtime_env("STRIKE48_URL", transport.url());
 
             auth_manager.set(Some(auth));
         });
@@ -610,6 +648,9 @@ pub fn App() -> Element {
             return;
         }
         let current = connectors.read().clone();
+        // Read easy_mode here so this effect re-runs when it toggles: flipping
+        // easy mode OFF re-fires and starts the now-revealed advanced connectors.
+        let easy_on = *easy_mode.read();
         let setup_complete = hub_config.read().setup_complete;
         tracing::info!(
             "[connector-start] effect fired: signed_in={}, setup_complete={}, connector_count={}, connectors=[{}]",
@@ -709,6 +750,18 @@ pub fn App() -> Element {
             let mut registered_types: Option<std::collections::HashSet<String>> = None;
 
             for conn in &current {
+                // In easy mode, advanced connectors (KubeStudio) are hidden — do
+                // NOT start/register them. A connector the user can't see must not
+                // be live on their tenant. Revealed when easy mode is toggled off
+                // (this effect re-runs on that toggle).
+                if easy_on && is_advanced_connector(&conn.id) {
+                    tracing::debug!(
+                        "[connector-start] '{}' gated by easy mode, skipping",
+                        conn.id
+                    );
+                    continue;
+                }
+
                 // Custom IPC connectors are externally managed — just register
                 // their socket in bridge state so the protocol handler can reach them.
                 if conn.id.starts_with("ipc-") {
@@ -823,7 +876,14 @@ pub fn App() -> Element {
                 // because the instance ID was rotated above — the server
                 // treats the rotated ID as a brand-new connector, so the
                 // DeregisteredStore block on the old ID doesn't apply.
-                if !sh_core::ott::has_saved_credentials(&conn.id, &conn_instance_id)
+                // Track whether this connector can authenticate to the gateway.
+                // Saved credentials (private_key_jwt) count; otherwise it needs a
+                // freshly minted OTT. If neither is available we must NOT spawn it
+                // — a connector that can't authenticate would come up unable to
+                // talk to the gateway and silently fail (looks started, isn't).
+                let has_saved = sh_core::ott::has_saved_credentials(&conn.id, &conn_instance_id);
+                let mut can_authenticate = has_saved;
+                if !has_saved
                     && let Some(ref auth) = *auth_manager.peek()
                 {
                     let jwt = auth.token();
@@ -838,6 +898,7 @@ pub fn App() -> Element {
                         .await
                         {
                             Ok(ott) => {
+                                can_authenticate = true;
                                 tracing::info!(
                                     "[connector-start] OTT created for '{}' auto-registration (tenant_id={:?})",
                                     conn.id,
@@ -848,13 +909,10 @@ pub fn App() -> Element {
                                 // queried fetch_tenant_id value, so connectors
                                 // register under the correct PLG tenant.
                                 if let Some(tenant) = ott.tenant_id.as_deref() {
-                                    // SAFETY: single-threaded in the Dioxus
-                                    // runtime here; connector children are
-                                    // spawned just below and read these vars.
-                                    unsafe {
-                                        std::env::set_var("STRIKE48_TENANT", tenant);
-                                        std::env::set_var("TENANT_ID", tenant);
-                                    }
+                                    // Scope the tenant to THIS connector's env only.
+                                    // (No global set_var: it was both unsound on the
+                                    // multi-threaded runtime and would leak the last
+                                    // connector's tenant into every later connector.)
                                     conn_env.retain(|(k, _)| k != "STRIKE48_TENANT" && k != "TENANT_ID");
                                     conn_env.push(("STRIKE48_TENANT".into(), tenant.to_string()));
                                     conn_env.push(("TENANT_ID".into(), tenant.to_string()));
@@ -869,6 +927,25 @@ pub fn App() -> Element {
                             }
                         }
                     }
+                }
+
+                // Don't spawn a connector that can neither use saved credentials
+                // nor register via a fresh OTT — it can't authenticate, so treat
+                // this as a hard start failure (surface it, free the lock) rather
+                // than launching a process that silently can't reach the gateway.
+                if !can_authenticate {
+                    tracing::error!(
+                        "[connector-start] '{}' cannot authenticate (no saved credentials and OTT unavailable) — not starting",
+                        conn.id
+                    );
+                    let mut updated = connectors.read().clone();
+                    if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
+                        c.status = ConnectorStatus::Offline;
+                    }
+                    connectors.set(updated);
+                    let mut starting = lock.lock().await;
+                    starting.remove(&conn.id);
+                    continue;
                 }
 
                 tracing::info!(
@@ -1283,12 +1360,10 @@ pub fn App() -> Element {
                             transport.url(),
                             transport.scheme
                         );
-                        // SAFETY: Dioxus runs on a single thread; no concurrent env reads
-                        // happen during sign-in. Child connectors are spawned later.
-                        unsafe {
-                            std::env::set_var("STRIKE48_API_URL", studio_url);
-                            std::env::set_var("STRIKE48_URL", transport.url());
-                        }
+                        // Thread-safe runtime overrides (no global env mutation);
+                        // connectors read these via matrix_env_vars() at start.
+                        set_runtime_env("STRIKE48_API_URL", studio_url);
+                        set_runtime_env("STRIKE48_URL", transport.url());
                     }
                 }
 
@@ -1950,15 +2025,24 @@ pub fn App() -> Element {
         // If we're leaving easy mode and the active connector was hidden, no
         // change needed; if we re-enter easy mode while KubeStudio is active,
         // fall back to the primary connector so the view isn't stranded.
-        if next && active_id.peek().as_deref() == Some("kubestudio") {
+        if next && active_id.peek().as_deref().is_some_and(is_advanced_connector) {
             active_id.set(Some(DEFAULT_CONNECTOR_ID.to_string()));
         }
-        let mut cfg = hub_config.peek().clone();
-        cfg.easy_mode = Some(next);
-        if let Err(e) = cfg.save() {
-            tracing::warn!("Failed to persist easy_mode: {}", e);
+        // Mutate in place on the live config, NOT a peek().clone()+set(), so a
+        // concurrent instance-ID rotation (health-check loop) isn't clobbered by
+        // a stale whole-config overwrite.
+        hub_config.write().easy_mode = Some(next);
+        let save_result = {
+            let cfg = hub_config.peek();
+            cfg.save()
+        };
+        if let Err(e) = save_result {
+            // Persist failed: revert the in-memory flag so UI/disk don't diverge
+            // (we promise the choice survives restarts).
+            tracing::error!("Failed to persist easy_mode, reverting: {}", e);
+            hub_config.write().easy_mode = Some(!next);
+            easy_mode.set(!next);
         }
-        hub_config.set(cfg);
     };
 
     let current_connectors = connectors.read();
@@ -1969,7 +2053,7 @@ pub fn App() -> Element {
     let easy_on = *easy_mode.read();
     let sidebar_items: Vec<ConnectorItem> = current_connectors
         .iter()
-        .filter(|c| !easy_on || c.id != "kubestudio")
+        .filter(|c| !easy_on || !is_advanced_connector(&c.id))
         .map(|c| ConnectorItem {
             id: c.id.clone(),
             display_name: c.display_name.clone(),
@@ -1998,7 +2082,7 @@ pub fn App() -> Element {
     let setup_list: Vec<SetupConnector> = setup_connectors
         .read()
         .iter()
-        .filter(|c| !easy_on || c.manifest.id != "kubestudio")
+        .filter(|c| !easy_on || !is_advanced_connector(&c.manifest.id))
         .cloned()
         .collect();
     let custom_list = custom_connectors.read().clone();

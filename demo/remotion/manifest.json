@@ -1,9 +1,47 @@
 [
   {
-    "name": "launch",
-    "clip": "recordings/launch.mp4",
-    "caption": "One window for every Strike48 tool",
+    "name": "scan_0",
+    "clip": "recordings/scenes/scan_0.mp4",
+    "caption": "Ask Pick to scan your network — it runs the tools for you",
     "kenBurns": null,
-    "durationInFrames": 98
+    "durationInFrames": 700
+  },
+  {
+    "name": "scan_1",
+    "clip": "recordings/scenes/scan_1.mp4",
+    "caption": "Ask Pick to scan your network — it runs the tools for you",
+    "kenBurns": null,
+    "durationInFrames": 277
+  },
+  {
+    "name": "doc_0",
+    "clip": "recordings/scenes/doc_0.mp4",
+    "caption": "Every scan becomes a shareable report",
+    "kenBurns": {
+      "from": 1,
+      "to": 1.06
+    },
+    "durationInFrames": 136
+  },
+  {
+    "name": "share_0",
+    "clip": "recordings/scenes/share_0.mp4",
+    "caption": "Share it in one click",
+    "kenBurns": null,
+    "durationInFrames": 223
+  },
+  {
+    "name": "easymode_0",
+    "clip": "recordings/scenes/easymode_0.mp4",
+    "caption": "Turn off Easy Mode to reveal KubeStudio",
+    "kenBurns": null,
+    "durationInFrames": 455
+  },
+  {
+    "name": "pickmode_0",
+    "clip": "recordings/scenes/pickmode_0.mp4",
+    "caption": "Pick has an Easy Mode too — flip it off for the expert view",
+    "kenBurns": null,
+    "durationInFrames": 387
   }
 ]

@@ -7,4 +7,7 @@ cache/failures/
 # Audio files — large binaries, regenerate with audio/build-audio.sh
 audio/vo/*.wav
 audio/voices/*.onnx
+audio/voices/*.onnx.json
 audio/music.mp3
+audio/.kokoro-venv
+audio/samples/

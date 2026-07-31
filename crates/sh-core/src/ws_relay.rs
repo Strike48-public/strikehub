@@ -36,9 +36,8 @@ impl WsRelay {
         bridge: SharedBridgeState,
         auth: Option<AuthManager>,
     ) -> anyhow::Result<Self> {
-        let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let upstream = auth.as_ref().map(|a| a.matrix_url()).unwrap_or("");
+        let tls_insecure = crate::auth::resolve_tls_insecure(upstream);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();

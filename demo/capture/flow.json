@@ -3,6 +3,8 @@
   "output": { "headlessName": "HEADLESS", "width": 1920, "height": 1080, "fps": 30 },
   "auth": {
     "signInStep": { "id": "auth.signin", "act": "click the 'Sign In' button" },
+    "postLoginVerify": "a 'Preflight Check' connector-registration screen is shown (with a Next button in the bottom-right)",
+    "dismissStep": { "id": "auth.dismiss_preflight", "act": "click the 'Next' button in the bottom-right corner" },
     "readyVerify": "the authenticated Pick home screen with a 'Scan My Network' button and a connector rail on the left is visible"
   },
   "scenes": [
@@ -11,7 +13,7 @@
       "caption": "Ask Pick to scan your network — it runs the tools for you",
       "record": true,
       "steps": [
-        { "id": "scan.click_scan", "act": "click the large 'Scan My Network' button at the top", "verify": "the agent is executing tool calls (a Phase / device_info step with a success badge is visible)", "timeoutMs": 25000 },
+        { "id": "scan.click_scan", "act": "click the large 'Scan My Network' button at the top center", "verify": "the pentest agent has begun responding — an assistant reply, a Phase heading, or a tool-call step (device_info / execute_command / port_scan) is visible below the user's scan request", "timeoutMs": 90000 },
         { "id": "scan.wait_report", "verify": "a Network Discovery Report summary with host counts and security findings is visible", "timeoutMs": 300000 }
       ],
       "trim": [

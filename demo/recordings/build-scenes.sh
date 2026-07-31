@@ -2,6 +2,7 @@
 # Normalize raw clips to CFR 30fps bt709 full-range, then cut per-scene trim
 # segments (from capture/flow.json, anchors resolved via <scene>.timings.json).
 set -euo pipefail
+shopt -s nullglob   # empty globs expand to nothing, not the literal pattern
 cd "$(dirname "$0")"
 FLOW=../capture/flow.json
 mkdir -p scenes norm
@@ -27,6 +28,11 @@ resolve_anchor() {
 
 # Force CFR + bt709 full-range on every cut.
 cut() { # cut <src.mp4> <start> <end> <speed> <out.mp4>
+  # Guard speed: setpts=(1/speed) divides by speed, so 0 or negative would make
+  # ffmpeg abort the whole build. Default a bad/zero speed to 1.0.
+  if awk "BEGIN{exit !($4 > 0)}"; then :; else
+    echo "warn: non-positive speed '$4' for $5 — using 1.0"; set -- "$1" "$2" "$3" "1.0" "$5"
+  fi
   ffmpeg -y -loglevel error -ss "$2" -to "$3" -i "$1" -an \
     -vf "setpts=(1/$4)*PTS,fps=30,scale=1920:1080:out_range=full:out_color_matrix=bt709,format=yuv420p" \
     -color_range pc -colorspace bt709 -color_primaries bt709 -color_trc bt709 \
@@ -35,9 +41,12 @@ cut() { # cut <src.mp4> <start> <end> <speed> <out.mp4>
 
 for scene in $(jq -r '.scenes[]|select(.record==true)|.id' "$FLOW"); do
   [ -f "${scene}.mp4" ] || { echo "skip ${scene}: no raw clip"; continue; }
-  # normalize to CFR first so setpts works
+  # Normalize to CFR first so setpts works. Keep it in RGB (libx264rgb) — the raw
+  # clip is RGB (libx264rgb capture); a plain libx264 pass here would squeeze the
+  # range back to limited before cut() does its single controlled RGB→bt709-full
+  # conversion. Staying RGB until cut() preserves the deep blacks.
   ffmpeg -y -loglevel error -i "${scene}.mp4" -an -r 30 -vsync cfr \
-    -vf "scale=1920:1080" -c:v libx264 -preset fast -crf 20 "norm/${scene}.mp4"
+    -vf "scale=1920:1080" -c:v libx264rgb -preset fast -qp 0 "norm/${scene}.mp4"
   n=0; prev=0
   seg_count=$(jq -r ".scenes[]|select(.id==\"$scene\")|.trim|length // 0" "$FLOW")
   if [ "$seg_count" = "0" ]; then

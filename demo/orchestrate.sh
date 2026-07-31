@@ -13,15 +13,11 @@ npx tsx remotion/gen-manifest.ts
 
 echo "== render =="
 mkdir -p out
-nix-shell -p chromium ffmpeg --run 'npx remotion render remotion/src/Root.tsx Reel out/strikehub-reel.mp4 --browser-executable=$(which chromium) --public-dir=remotion/public'
-
-echo "== retag bt709 (ensure players read the HD matrix) =="
-nix-shell -p ffmpeg --run '
-  ffmpeg -y -loglevel error -i out/strikehub-reel.mp4 \
-    -vf "scale=out_range=full:out_color_matrix=bt709,format=yuv420p" \
-    -color_range pc -colorspace bt709 -color_primaries bt709 -color_trc bt709 \
-    -c:v libx264 -crf 18 -preset medium -c:a copy -movflags +faststart out/strikehub-reel-bt709.mp4
-  mv out/strikehub-reel-bt709.mp4 out/strikehub-reel.mp4
-'
+# High quality: --crf 16 (visually lossless for screen content) + max jpeg quality
+# on the frame pipeline so text/UI stays crisp. The RGB capture path already
+# gives correct color, so NO post re-encode/retag — that only added a second
+# lossy generation (artifacts). The bt470bg matrix tag is cosmetic; players
+# render it correctly. Add a lossless tag-only fixup if a target demands bt709.
+nix-shell -p chromium ffmpeg --run 'npx remotion render remotion/src/Root.tsx Reel out/strikehub-reel.mp4 --browser-executable=$(which chromium) --public-dir=remotion/public --crf 16 --jpeg-quality 100'
 
 echo "done -> out/strikehub-reel.mp4"
