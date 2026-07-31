@@ -51,13 +51,30 @@ impl IpcConnectorRunner {
         // orphaned connector processes when StrikeHub exits unexpectedly.
         cmd.kill_on_drop(true);
 
-        // On Windows the desktop app has no console, so inheriting stdio would
-        // cause Windows to allocate a visible console window for each connector.
-        // Suppress that by sending output to null and setting CREATE_NO_WINDOW.
+        // On Windows the desktop app is a GUI-subsystem binary with no console,
+        // so inheriting stdio would make Windows allocate a visible console
+        // window per connector (and CREATE_NO_WINDOW alone would send the child's
+        // output nowhere). Route the child's stdout+stderr to a per-connector log
+        // file next to StrikeHub's own logs so the connector's tracing (e.g. the
+        // shell/PTY spawn path) is captured for debugging; fall back to null if
+        // the file can't be opened. CREATE_NO_WINDOW still suppresses the console.
         #[cfg(windows)]
         {
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::null());
+            match connector_log_file(id) {
+                Some((path, out, err)) => {
+                    tracing::info!(
+                        "connector '{}' stdout/stderr → {}",
+                        id,
+                        path.display()
+                    );
+                    cmd.stdout(out);
+                    cmd.stderr(err);
+                }
+                None => {
+                    cmd.stdout(std::process::Stdio::null());
+                    cmd.stderr(std::process::Stdio::null());
+                }
+            }
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         #[cfg(not(windows))]
@@ -192,6 +209,40 @@ impl Drop for IpcConnectorRunner {
         }
         self.ipc_addr.cleanup();
     }
+}
+
+/// Build the per-connector stdout/stderr log destination on Windows.
+///
+/// Returns the log path plus two independent `Stdio` handles (one for stdout,
+/// one for stderr) both pointing at the same file, or `None` if the directory
+/// or file can't be created (caller then falls back to `Stdio::null()`).
+///
+/// The file lives alongside StrikeHub's own logs
+/// (`%LOCALAPPDATA%\StrikeHub\logs\connector-<id>.log`) and is truncated on each
+/// spawn so it reflects the current run rather than growing without bound.
+#[cfg(windows)]
+fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::process::Stdio)> {
+    let log_dir = dirs::data_local_dir()?.join("StrikeHub").join("logs");
+    std::fs::create_dir_all(&log_dir).ok()?;
+
+    // Sanitize the connector id so it can't escape the directory or produce an
+    // invalid filename (ids are normally simple slugs, but be defensive).
+    let safe_id: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let path = log_dir.join(format!("connector-{safe_id}.log"));
+
+    // Truncate on open so each launch starts fresh.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .ok()?;
+    // stdout and stderr need separate owned handles to the same file.
+    let err = file.try_clone().ok()?;
+    Some((path, std::process::Stdio::from(file), std::process::Stdio::from(err)))
 }
 
 // ── Binary resolution ──────────────────────────────────────────────────
