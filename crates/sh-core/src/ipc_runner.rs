@@ -62,11 +62,7 @@ impl IpcConnectorRunner {
         {
             match connector_log_file(id) {
                 Some((path, out, err)) => {
-                    tracing::info!(
-                        "connector '{}' stdout/stderr → {}",
-                        id,
-                        path.display()
-                    );
+                    tracing::info!("connector '{}' stdout/stderr → {}", id, path.display());
                     cmd.stdout(out);
                     cmd.stderr(err);
                 }
@@ -229,7 +225,13 @@ fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::pr
     // invalid filename (ids are normally simple slugs, but be defensive).
     let safe_id: String = id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let path = log_dir.join(format!("connector-{safe_id}.log"));
 
@@ -242,7 +244,11 @@ fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::pr
         .ok()?;
     // stdout and stderr need separate owned handles to the same file.
     let err = file.try_clone().ok()?;
-    Some((path, std::process::Stdio::from(file), std::process::Stdio::from(err)))
+    Some((
+        path,
+        std::process::Stdio::from(file),
+        std::process::Stdio::from(err),
+    ))
 }
 
 // ── Binary resolution ──────────────────────────────────────────────────

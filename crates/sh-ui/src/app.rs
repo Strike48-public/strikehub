@@ -50,9 +50,11 @@ fn is_advanced_connector(id: &str) -> bool {
 /// the multi-threaded tokio runtime StrikeHub actually uses (concurrent getenv
 /// on worker threads). We keep them in a locked map instead and overlay them in
 /// `matrix_env_vars()`, so no global env mutation is needed.
-fn runtime_env_overrides() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>> {
-    static OVERRIDES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<String, String>>> =
-        std::sync::OnceLock::new();
+fn runtime_env_overrides() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>>
+{
+    static OVERRIDES: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
     OVERRIDES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
@@ -316,8 +318,7 @@ pub fn App() -> Element {
     // Easy mode: persisted user choice > build-time default. When on, only the
     // primary connector is shown and the rest (e.g. KubeStudio) are gated behind
     // the Advanced toggle. Reactive signal so toggling swaps the sidebar live.
-    let mut easy_mode =
-        use_signal(move || sh_core::resolve_easy_mode(hub_config.peek().easy_mode));
+    let mut easy_mode = use_signal(move || sh_core::resolve_easy_mode(hub_config.peek().easy_mode));
 
     // Persistent WS client for GraphQL queries (shared with preflight).
     let mut ws_client_signal: Signal<Option<Arc<MatrixWsClient>>> = use_signal(|| None);
@@ -883,9 +884,7 @@ pub fn App() -> Element {
                 // talk to the gateway and silently fail (looks started, isn't).
                 let has_saved = sh_core::ott::has_saved_credentials(&conn.id, &conn_instance_id);
                 let mut can_authenticate = has_saved;
-                if !has_saved
-                    && let Some(ref auth) = *auth_manager.peek()
-                {
+                if !has_saved && let Some(ref auth) = *auth_manager.peek() {
                     let jwt = auth.token();
                     if !jwt.is_empty() {
                         let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
@@ -913,11 +912,14 @@ pub fn App() -> Element {
                                     // (No global set_var: it was both unsound on the
                                     // multi-threaded runtime and would leak the last
                                     // connector's tenant into every later connector.)
-                                    conn_env.retain(|(k, _)| k != "STRIKE48_TENANT" && k != "TENANT_ID");
+                                    conn_env.retain(|(k, _)| {
+                                        k != "STRIKE48_TENANT" && k != "TENANT_ID"
+                                    });
                                     conn_env.push(("STRIKE48_TENANT".into(), tenant.to_string()));
                                     conn_env.push(("TENANT_ID".into(), tenant.to_string()));
                                 }
-                                conn_env.push(("STRIKE48_REGISTRATION_TOKEN".into(), ott.token_json));
+                                conn_env
+                                    .push(("STRIKE48_REGISTRATION_TOKEN".into(), ott.token_json));
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -2025,7 +2027,12 @@ pub fn App() -> Element {
         // If we're leaving easy mode and the active connector was hidden, no
         // change needed; if we re-enter easy mode while KubeStudio is active,
         // fall back to the primary connector so the view isn't stranded.
-        if next && active_id.peek().as_deref().is_some_and(is_advanced_connector) {
+        if next
+            && active_id
+                .peek()
+                .as_deref()
+                .is_some_and(is_advanced_connector)
+        {
             active_id.set(Some(DEFAULT_CONNECTOR_ID.to_string()));
         }
         // Mutate in place on the live config, NOT a peek().clone()+set(), so a

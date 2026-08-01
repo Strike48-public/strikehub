@@ -489,10 +489,8 @@ fn extract_injected_token(html: &str) -> Option<String> {
     // Extract the quoted value (single or double quotes)
     let (quote, rest) = if let Some(rest) = rest.strip_prefix('\'') {
         ('\'', rest)
-    } else if let Some(rest) = rest.strip_prefix('"') {
-        ('"', rest)
     } else {
-        return None;
+        ('"', rest.strip_prefix('"')?)
     };
     let end = rest.find(quote)?;
     let token = &rest[..end];

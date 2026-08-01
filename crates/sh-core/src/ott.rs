@@ -40,7 +40,10 @@ pub(crate) fn parse_pre_approve_body(
     })
     .to_string();
 
-    Ok(PreApprovedOtt { token_json, tenant_id })
+    Ok(PreApprovedOtt {
+        token_json,
+        tenant_id,
+    })
 }
 
 /// Create a pre-approved OTT by calling the Matrix pre-approve REST endpoint.
@@ -95,10 +98,7 @@ pub async fn create_pre_approved_token(
     let body: serde_json::Value = resp.json().await?;
     let ott = parse_pre_approve_body(&body, base)?;
 
-    tracing::info!(
-        "Pre-approved OTT created (tenant_id={:?})",
-        ott.tenant_id
-    );
+    tracing::info!("Pre-approved OTT created (tenant_id={:?})", ott.tenant_id);
 
     Ok(ott)
 }
@@ -249,15 +249,20 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&ott.token_json).unwrap();
         assert_eq!(parsed["token"], "ott_abc123");
         assert_eq!(parsed["matrix_url"], "https://studio.strike48.test");
-        assert!(parsed.get("tenant_id").is_none(), "tenant_id must NOT leak into SDK JSON");
+        assert!(
+            parsed.get("tenant_id").is_none(),
+            "tenant_id must NOT leak into SDK JSON"
+        );
 
-        assert_eq!(ott.tenant_id.as_deref(), Some("019f86b4-d2bf-7f56-89cf-30485d8a956b"));
+        assert_eq!(
+            ott.tenant_id.as_deref(),
+            Some("019f86b4-d2bf-7f56-89cf-30485d8a956b")
+        );
     }
 
     #[test]
     fn tenant_id_absent_is_none_and_json_unchanged() {
-        let body: serde_json::Value =
-            serde_json::from_str(r#"{ "token": "ott_only" }"#).unwrap();
+        let body: serde_json::Value = serde_json::from_str(r#"{ "token": "ott_only" }"#).unwrap();
 
         let ott = parse_pre_approve_body(&body, "https://api.test").unwrap();
 
@@ -269,8 +274,7 @@ mod tests {
 
     #[test]
     fn missing_token_is_error() {
-        let body: serde_json::Value =
-            serde_json::from_str(r#"{ "tenant_id": "t" }"#).unwrap();
+        let body: serde_json::Value = serde_json::from_str(r#"{ "tenant_id": "t" }"#).unwrap();
         assert!(parse_pre_approve_body(&body, "https://api.test").is_err());
     }
 }
