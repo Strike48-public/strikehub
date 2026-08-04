@@ -300,13 +300,25 @@ async fn run_graphql_ws_proxy(
         .trim_start_matches("http://");
 
     let token = params.token.unwrap_or_default();
-    let vsn = params.vsn.unwrap_or_else(|| "2.0.0".into());
+    // Forward the client's Phoenix serializer choice verbatim: only append
+    // `vsn` when the client actually sent one. The Absinthe subscription
+    // serializer is version-locked to the frame shape the client emits —
+    // pick's chat client omits `vsn` so Phoenix uses the v1 object-frame
+    // serializer matching its `{topic,event,payload,ref}` frames. Forcing
+    // `vsn=2.0.0` here would make Phoenix expect v2 ARRAY frames, silently
+    // fail the subscription join ("join was not acknowledged"), and no events
+    // stream (chat stuck "Thinking" while the agent runs). Mirror pick's
+    // fix(core) b751700 — pass through, don't default.
+    let vsn_qs = match params.vsn {
+        Some(v) => format!("&vsn={}", v),
+        None => String::new(),
+    };
     let upstream_url = format!(
-        "{}://{}/v1alpha/graphql_socket/websocket?token={}&vsn={}",
+        "{}://{}/v1alpha/graphql_socket/websocket?token={}{}",
         scheme,
         host,
         urlencoding::encode(&token),
-        vsn
+        vsn_qs
     );
 
     tracing::debug!(
