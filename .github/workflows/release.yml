@@ -31,6 +31,12 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Ship easy-mode-first. Both are read at BUILD time via option_env!, so they
+  # must be present during cargo build; setting them here applies to every job
+  # (strikehub reads STRIKEHUB_DEFAULT_EASY_MODE, the pentest-agent build reads
+  # PICK_EASY_MODE — each ignores the other's var).
+  STRIKEHUB_DEFAULT_EASY_MODE: "true"
+  PICK_EASY_MODE: "true"
 
 # Versioning: Cargo.toml is bumped in the same PR that ships the change.
 # Each job below re-stamps Cargo.toml from the tag at build time, so
