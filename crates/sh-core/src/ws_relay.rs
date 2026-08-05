@@ -235,47 +235,71 @@ async fn relay_frames<S>(
     let (mut client_sink, mut client_stream) = client_ws.split();
     let (mut upstream_sink, mut upstream_stream) = upstream_ws.split();
 
+    // TEMP WSDBG: prove which direction of the pipe-bridged WS carries frames on
+    // Windows. c2u = browser→connector (the suspected-dead upstream direction).
     let c2u = async {
-        while let Some(msg) = client_stream.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(_) => break,
-            };
-            let ts_msg = match msg {
-                ws::Message::Text(t) => TsMessage::Text(t.to_string()),
-                ws::Message::Binary(b) => TsMessage::Binary(b.to_vec()),
-                ws::Message::Ping(p) => TsMessage::Ping(p.to_vec()),
-                ws::Message::Pong(p) => TsMessage::Pong(p.to_vec()),
-                ws::Message::Close(_) => break,
-            };
-            if upstream_sink.send(ts_msg).await.is_err() {
-                break;
+        let mut n: u64 = 0;
+        loop {
+            match client_stream.next().await {
+                None => {
+                    tracing::warn!("WSDBG c2u: client_stream ENDED after {n} frames (browser closed / no more inbound)");
+                    break;
+                }
+                Some(Err(e)) => {
+                    tracing::warn!("WSDBG c2u: client_stream ERROR after {n} frames: {e}");
+                    break;
+                }
+                Some(Ok(msg)) => {
+                    let ts_msg = match msg {
+                        ws::Message::Text(t) => {
+                            n += 1;
+                            tracing::info!("WSDBG c2u #{n} TEXT len={} head={:?}", t.len(), &t[..t.len().min(120)]);
+                            TsMessage::Text(t.to_string())
+                        }
+                        ws::Message::Binary(b) => {
+                            n += 1;
+                            tracing::info!("WSDBG c2u #{n} BINARY len={}", b.len());
+                            TsMessage::Binary(b.to_vec())
+                        }
+                        ws::Message::Ping(p) => { tracing::info!("WSDBG c2u PING"); TsMessage::Ping(p.to_vec()) }
+                        ws::Message::Pong(p) => TsMessage::Pong(p.to_vec()),
+                        ws::Message::Close(_) => { tracing::warn!("WSDBG c2u: client sent CLOSE after {n} frames"); break; }
+                    };
+                    match upstream_sink.send(ts_msg).await {
+                        Ok(()) => tracing::info!("WSDBG c2u #{n} -> pipe OK"),
+                        Err(e) => { tracing::warn!("WSDBG c2u #{n} -> pipe SEND FAILED: {e}"); break; }
+                    }
+                }
             }
         }
     };
 
     let u2c = async {
-        while let Some(msg) = upstream_stream.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(_) => break,
-            };
-            let ax_msg = match msg {
-                TsMessage::Text(t) => ws::Message::Text(t),
-                TsMessage::Binary(b) => ws::Message::Binary(b),
-                TsMessage::Ping(p) => ws::Message::Ping(p),
-                TsMessage::Pong(p) => ws::Message::Pong(p),
-                TsMessage::Close(_) => break,
-                _ => continue,
-            };
-            if client_sink.send(ax_msg).await.is_err() {
-                break;
+        let mut n: u64 = 0;
+        loop {
+            match upstream_stream.next().await {
+                None => { tracing::warn!("WSDBG u2c: upstream_stream ENDED after {n} frames"); break; }
+                Some(Err(e)) => { tracing::warn!("WSDBG u2c: upstream_stream ERROR after {n} frames: {e}"); break; }
+                Some(Ok(msg)) => {
+                    let ax_msg = match msg {
+                        TsMessage::Text(t) => { n += 1; ws::Message::Text(t) }
+                        TsMessage::Binary(b) => { n += 1; ws::Message::Binary(b) }
+                        TsMessage::Ping(p) => ws::Message::Ping(p),
+                        TsMessage::Pong(p) => ws::Message::Pong(p),
+                        TsMessage::Close(_) => { tracing::warn!("WSDBG u2c: connector sent CLOSE after {n} frames"); break; }
+                        _ => continue,
+                    };
+                    if client_sink.send(ax_msg).await.is_err() {
+                        tracing::warn!("WSDBG u2c #{n} -> client SEND FAILED");
+                        break;
+                    }
+                }
             }
         }
     };
 
     tokio::select! {
-        _ = c2u => {},
-        _ = u2c => {},
+        _ = c2u => { tracing::warn!("WSDBG relay: c2u finished first"); },
+        _ = u2c => { tracing::warn!("WSDBG relay: u2c finished first"); },
     }
 }
