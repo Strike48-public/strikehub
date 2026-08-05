@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Path, Query, State, WebSocketUpgrade, ws},
+    extract::{Path, Query, RawQuery, State, WebSocketUpgrade, ws},
     response::Response,
     routing::get,
 };
@@ -153,10 +153,13 @@ async fn run_graphql_ws_relay(
 async fn handle_connector_ws(
     upgrade: WebSocketUpgrade,
     Path(connector_id): Path<String>,
+    RawQuery(query): RawQuery,
     State(state): State<Arc<RelayState>>,
 ) -> Response {
     upgrade.on_upgrade(move |client_ws| async move {
-        if let Err(e) = run_connector_ws_relay(client_ws, &connector_id, "/ws", &state).await {
+        if let Err(e) =
+            run_connector_ws_relay(client_ws, &connector_id, "/ws", query.as_deref(), &state).await
+        {
             tracing::error!("WsRelay connector '{}' error: {}", connector_id, e);
         }
     })
@@ -165,11 +168,15 @@ async fn handle_connector_ws(
 async fn handle_connector_ws_path(
     upgrade: WebSocketUpgrade,
     Path((connector_id, path)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
     State(state): State<Arc<RelayState>>,
 ) -> Response {
     let ws_path = format!("/{}", path);
     upgrade.on_upgrade(move |client_ws| async move {
-        if let Err(e) = run_connector_ws_relay(client_ws, &connector_id, &ws_path, &state).await {
+        if let Err(e) =
+            run_connector_ws_relay(client_ws, &connector_id, &ws_path, query.as_deref(), &state)
+                .await
+        {
             tracing::error!("WsRelay connector '{}' path error: {}", connector_id, e);
         }
     })
@@ -179,6 +186,7 @@ async fn run_connector_ws_relay(
     client_ws: ws::WebSocket,
     connector_id: &str,
     upstream_path: &str,
+    client_query: Option<&str>,
     state: &RelayState,
 ) -> anyhow::Result<()> {
     let guard = state.bridge.read().await;
@@ -192,23 +200,33 @@ async fn run_connector_ws_relay(
     // Connect WebSocket over IPC using tokio-tungstenite
     let ipc_stream = crate::ipc::IpcStream::connect(&ipc_addr).await?;
 
-    // Append the best auth token (__st) to the connector WebSocket URL so
-    // the connector's LiveView handle_ws_open() can extract it immediately,
-    // avoiding the fallback polling path that fails on Windows WebView2.
+    // Build the upstream query string. We must FORWARD the client's original
+    // query (e.g. the shell WS sends `?cols=..&rows=..&mode=..&token=<shell
+    // token>`) — dropping it made pick's `/ws/shell` reject every connection
+    // with 401 because its per-session `token` param went missing. On top of
+    // that we append the host auth token as `__st` so the connector's LiveView
+    // `handle_ws_open()` can extract it immediately, avoiding the fallback
+    // polling path that fails on Windows WebView2.
     let ws_url = {
         let token = state
             .auth
             .as_ref()
             .map(|a| a.api_token())
             .unwrap_or_default();
-        if token.is_empty() {
+
+        let mut query = client_query.unwrap_or("").to_string();
+        if !token.is_empty() {
+            if !query.is_empty() {
+                query.push('&');
+            }
+            query.push_str("__st=");
+            query.push_str(&urlencoding::encode(&token));
+        }
+
+        if query.is_empty() {
             format!("ws://localhost{}", upstream_path)
         } else {
-            format!(
-                "ws://localhost{}?__st={}",
-                upstream_path,
-                urlencoding::encode(&token)
-            )
+            format!("ws://localhost{}?{}", upstream_path, query)
         }
     };
 
