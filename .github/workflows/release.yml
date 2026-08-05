@@ -384,6 +384,10 @@ jobs:
           chmod +x scripts/build-appimage.sh
           TAG_VERSION="${{ github.ref_name }}"
           VERSION="${TAG_VERSION#v}"
+          # ref_name may be a branch on workflow_dispatch (e.g. feat/easy-mode);
+          # a '/' in the version breaks the output filename (mksquashfs can't
+          # create a path with a missing dir). Sanitize to a flat token.
+          VERSION="${VERSION//\//-}"
           ./scripts/build-appimage.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Generate checksum (AppImage)
@@ -419,7 +423,9 @@ jobs:
         if: matrix.installer == 'msi'
         shell: pwsh
         run: |
-          $Version = "${{ github.ref_name }}".TrimStart("v")
+          # ref_name may be a branch on workflow_dispatch (e.g. feat/easy-mode);
+          # '/' is invalid in a filename and in an MSI ProductVersion, so flatten.
+          $Version = "${{ github.ref_name }}".TrimStart("v").Replace("/", "-")
           .\scripts\build-msi.ps1 -Version $Version -Arch ${{ matrix.arch }}
           Move-Item "StrikeHub-$Version-${{ matrix.arch }}.msi" "dist\${{ matrix.artifact }}.msi"
 
@@ -560,6 +566,9 @@ jobs:
         run: |
           TAG_VERSION="${{ github.ref_name }}"
           VERSION="${TAG_VERSION#v}"
+          # ref_name may be a branch on workflow_dispatch (e.g. feat/easy-mode);
+          # a '/' breaks the .dmg filename and the Info.plist version fields.
+          VERSION="${VERSION//\//-}"
           ./scripts/build-dmg.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Notarize DMG
