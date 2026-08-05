@@ -44,6 +44,18 @@ fn is_advanced_connector(id: &str) -> bool {
     ADVANCED_CONNECTOR_IDS.contains(&id)
 }
 
+/// True if this connector should be included in preflight / start iterations.
+///
+/// Preflight/start applies to *managed* connectors that this StrikeHub actually
+/// launches — external IPC-only connectors (`ipc-*`) are owned by another
+/// process, and easy-mode-hidden connectors are neither shown nor started
+/// (see [`ADVANCED_CONNECTOR_IDS`]). Including them in preflight causes a
+/// 10-second wait for a connector that will never come up, followed by a
+/// false-negative "not responding" tile for something the user can't even see.
+fn is_managed_active_connector(id: &str, easy_on: bool) -> bool {
+    !(id.starts_with("ipc-") || easy_on && is_advanced_connector(id))
+}
+
 /// Thread-safe overrides for connector env values that are resolved at runtime
 /// (dynamic transport URL, custom Studio URL). Previously these were written to
 /// the process-global environment via `unsafe std::env::set_var`, which is UB on
@@ -1620,8 +1632,14 @@ pub fn App() -> Element {
     // Run preflight checks for all enabled connectors after sign-in.
     // Waits a few seconds for connectors to start and register before
     // checking their Matrix registration status.
+    //
+    // `easy_on` is read via `.read()` (not `.peek()`) so this effect re-runs
+    // when the user toggles easy mode: turning it off must re-run preflight so
+    // the now-revealed advanced connectors get checked; turning it on must
+    // stop treating them as required. See `is_managed_active_connector`.
     use_effect(move || {
         let signed_in = *is_signed_in.read();
+        let easy_on = *easy_mode.read();
         if signed_in
             && !*preflight_dismissed.peek()
             && preflight_result.peek().is_none()
@@ -1631,7 +1649,7 @@ pub fn App() -> Element {
                 let ids: Vec<String> = connectors
                     .read()
                     .iter()
-                    .filter(|c| !c.id.starts_with("ipc-"))
+                    .filter(|c| is_managed_active_connector(&c.id, easy_on))
                     .map(|c| c.id.clone())
                     .collect();
                 if ids.is_empty() {
@@ -1640,6 +1658,7 @@ pub fn App() -> Element {
                     );
                     all_manifests(&hub_config.read())
                         .iter()
+                        .filter(|m| is_managed_active_connector(&m.id, easy_on))
                         .map(|m| m.id.to_string())
                         .collect()
                 } else {
@@ -1664,7 +1683,7 @@ pub fn App() -> Element {
                     let all_online = connectors
                         .read()
                         .iter()
-                        .filter(|c| !c.id.starts_with("ipc-"))
+                        .filter(|c| is_managed_active_connector(&c.id, easy_on))
                         .all(|c| c.status == sh_core::ConnectorStatus::Online);
                     if all_online {
                         tracing::info!(
@@ -1687,7 +1706,7 @@ pub fn App() -> Element {
                 let runtimes: Vec<ConnectorRuntime> = connectors
                     .read()
                     .iter()
-                    .filter(|c| !c.id.starts_with("ipc-"))
+                    .filter(|c| is_managed_active_connector(&c.id, easy_on))
                     .map(|c| ConnectorRuntime {
                         id: c.id.clone(),
                         name: c.display_name.clone(),
@@ -1729,7 +1748,7 @@ pub fn App() -> Element {
                     let runtimes: Vec<ConnectorRuntime> = connectors
                         .read()
                         .iter()
-                        .filter(|c| !c.id.starts_with("ipc-"))
+                        .filter(|c| is_managed_active_connector(&c.id, easy_on))
                         .map(|c| ConnectorRuntime {
                             id: c.id.clone(),
                             name: c.display_name.clone(),
@@ -2184,15 +2203,17 @@ pub fn App() -> Element {
                         on_recheck: move |_: ()| {
                             preflight_checking.set(true);
                             let auth = auth_manager.read().clone();
+                            let easy_on = *easy_mode.peek();
                             let ids: Vec<String> = all_manifests(&hub_config.read())
                                 .iter()
+                                .filter(|m| is_managed_active_connector(&m.id, easy_on))
                                 .map(|m| m.id.to_string())
                                 .collect();
                             spawn(async move {
                                 let runtimes: Vec<ConnectorRuntime> = connectors
                                     .read()
                                     .iter()
-                                    .filter(|c| !c.id.starts_with("ipc-"))
+                                    .filter(|c| is_managed_active_connector(&c.id, easy_on))
                                     .map(|c| ConnectorRuntime {
                                         id: c.id.clone(),
                                         name: c.display_name.clone(),
@@ -2308,5 +2329,47 @@ async fn check_health_ipc(addr: &sh_core::IpcAddr) -> bool {
     match sender.send_request(req).await {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_advanced_connector_matches_the_registered_advanced_list() {
+        // The list is small on purpose: touching it changes what is hidden in
+        // easy mode. Keep this in lockstep with `ADVANCED_CONNECTOR_IDS`.
+        assert!(is_advanced_connector("kubestudio"));
+        assert!(!is_advanced_connector("pick"));
+        assert!(!is_advanced_connector("something-that-does-not-exist"));
+    }
+
+    #[test]
+    fn managed_active_excludes_ipc_regardless_of_easy_mode() {
+        // Externally-managed IPC connectors (`ipc-*`) are owned by another
+        // process — this StrikeHub does not start, health-check, or preflight
+        // them. Easy mode is orthogonal.
+        assert!(!is_managed_active_connector("ipc-custom", false));
+        assert!(!is_managed_active_connector("ipc-custom", true));
+    }
+
+    #[test]
+    fn managed_active_hides_advanced_when_easy_mode_is_on() {
+        // This is the whole point of the fix: with easy mode ON, the
+        // preflight loop must NOT wait on kubestudio (it will never start),
+        // so the KubeStudio tile does not show as "not responding" in a UI
+        // that also hides the connector.
+        assert!(!is_managed_active_connector("kubestudio", true));
+        // pick is not advanced — it must still be preflighted in easy mode.
+        assert!(is_managed_active_connector("pick", true));
+    }
+
+    #[test]
+    fn managed_active_includes_advanced_when_easy_mode_is_off() {
+        // Toggling easy mode off is what reveals + starts kubestudio; the
+        // preflight effect must re-run and now include it.
+        assert!(is_managed_active_connector("kubestudio", false));
+        assert!(is_managed_active_connector("pick", false));
     }
 }
