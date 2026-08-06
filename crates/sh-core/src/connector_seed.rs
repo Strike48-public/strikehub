@@ -29,6 +29,26 @@ fn binary_filename(base: &str) -> String {
     }
 }
 
+/// Locate the bundled connector binary relative to the StrikeHub executable's
+/// directory. Returns the first candidate that exists, or `None`.
+///
+/// Layout differs by packaging: mac/Linux bundle the connector as a direct
+/// sibling of the exe (`.app/Contents/MacOS/`, AppImage `usr/bin/`), but the
+/// Windows MSI installs connectors into an `connectors\` subdirectory (surfaced
+/// at runtime via a PATH entry, not as an exe sibling). Probe the sibling first,
+/// then the `connectors/` subdir, so the seed works on all three platforms.
+fn bundled_binary_path(exe_dir: &Path, filename: &str) -> Option<std::path::PathBuf> {
+    let sibling = exe_dir.join(filename);
+    if sibling.exists() {
+        return Some(sibling);
+    }
+    let sub = exe_dir.join("connectors").join(filename);
+    if sub.exists() {
+        return Some(sub);
+    }
+    None
+}
+
 /// For each seedable connector, copy the bundled binary + write its version
 /// record into the cache when the bundle is newer. Best-effort; never panics.
 pub fn seed_bundled_connectors(exe: Option<&Path>) {
@@ -39,16 +59,19 @@ pub fn seed_bundled_connectors(exe: Option<&Path>) {
 
     for (id, base) in SEEDABLE {
         let filename = binary_filename(base);
-        let bundled_bin = exe_dir.join(&filename);
+        let bundled_bin = bundled_binary_path(exe_dir, &filename);
         let cache_bin = cache_dir.join(&filename);
         let cache_ver = cache_dir.join(format!("{base}.version"));
 
         let bundle = bundled_version(id);
         let cached = read_version_file(&cache_ver);
 
-        if !decide_seed(&bundle.ts, &cached.ts, bundled_bin.exists()) {
+        if !decide_seed(&bundle.ts, &cached.ts, bundled_bin.is_some()) {
             continue;
         }
+        let Some(bundled_bin) = bundled_bin else {
+            continue;
+        };
 
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             tracing::warn!("seed: cannot create cache dir {}: {}", cache_dir.display(), e);
@@ -79,7 +102,38 @@ pub fn seed_bundled_connectors(exe: Option<&Path>) {
 
 #[cfg(test)]
 mod tests {
-    use super::decide_seed;
+    use super::{bundled_binary_path, decide_seed};
+
+    #[test]
+    fn finds_bundled_binary_as_exe_sibling() {
+        let dir = std::env::temp_dir().join(format!("seed-sib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("pentest-agent");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(bundled_binary_path(&dir, "pentest-agent"), Some(f));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finds_bundled_binary_in_connectors_subdir() {
+        // Windows MSI layout: connector lives in <exe_dir>\connectors\, not next
+        // to the exe. The seed must still locate it.
+        let dir = std::env::temp_dir().join(format!("seed-sub-{}", std::process::id()));
+        let sub = dir.join("connectors");
+        std::fs::create_dir_all(&sub).unwrap();
+        let f = sub.join("pentest-agent");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(bundled_binary_path(&dir, "pentest-agent"), Some(f));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn returns_none_when_bundle_absent_everywhere() {
+        let dir = std::env::temp_dir().join(format!("seed-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(bundled_binary_path(&dir, "pentest-agent"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn seeds_when_bundle_newer_and_present() {
