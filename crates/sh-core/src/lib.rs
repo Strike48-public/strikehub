@@ -3,6 +3,7 @@ pub mod auth;
 pub mod bridge;
 pub mod config;
 pub mod connector_fetch;
+pub mod connector_seed;
 pub mod connector_version;
 pub mod embedded;
 pub mod error;
@@ -28,6 +29,7 @@ pub use config::{
     slug_from_path, url_slug,
 };
 pub use connector_fetch::{EnsureResult, bin_cache_dir, ensure_all_connector_binaries};
+pub use connector_seed::seed_bundled_connectors;
 pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
