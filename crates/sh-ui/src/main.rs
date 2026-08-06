@@ -54,6 +54,12 @@ fn main() {
 
     // Extract bundled connector binaries (Windows: next to exe; other: no-op).
     sh_core::embedded::extract_bundled_binaries();
+    // "Newest wins": if the connectors bundled with THIS install are newer than
+    // whatever is in the per-user cache (~/.strike48/strikehub/bin), refresh the
+    // cache from the bundle now — before anything resolves or launches a
+    // connector. Fixes installing fresh over an old StrikeHub running the old
+    // connector. No-op on dev builds (bundle timestamp is epoch-0).
+    sh_core::seed_bundled_connectors(std::env::current_exe().ok().as_deref());
 
     // Create shared bridge state before launching Dioxus so the custom
     // protocol handler can reference it from day one.
