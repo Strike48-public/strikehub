@@ -127,6 +127,28 @@ jobs:
       - name: Load connector refs
         run: cat connector-versions.env >> "$GITHUB_ENV"
 
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Bake each pinned connector's git commit timestamp (ISO-8601 UTC) into
+          # the strikehub binary so the runtime "newest wins" resolver knows what
+          # this install shipped. Uses the GitHub API (no full clone needed here;
+          # the connectors are cloned+built in later steps).
+          resolve_ts () {
+            local repo="$1" ref="$2"
+            # Commit date of the ref; committer date in strict ISO-8601 (…Z).
+            gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -318,6 +340,28 @@ jobs:
         shell: bash
         run: cat connector-versions.env >> "$GITHUB_ENV"
 
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Bake each pinned connector's git commit timestamp (ISO-8601 UTC) into
+          # the strikehub binary so the runtime "newest wins" resolver knows what
+          # this install shipped. Uses the GitHub API (no full clone needed here;
+          # the connectors are cloned+built in later steps).
+          resolve_ts () {
+            local repo="$1" ref="$2"
+            # Commit date of the ref; committer date in strict ISO-8601 (…Z).
+            gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -507,6 +551,28 @@ jobs:
 
       - name: Load connector refs
         run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Bake each pinned connector's git commit timestamp (ISO-8601 UTC) into
+          # the strikehub binary so the runtime "newest wins" resolver knows what
+          # this install shipped. Uses the GitHub API (no full clone needed here;
+          # the connectors are cloned+built in later steps).
+          resolve_ts () {
+            local repo="$1" ref="$2"
+            # Commit date of the ref; committer date in strict ISO-8601 (…Z).
+            gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
