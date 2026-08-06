@@ -83,4 +83,29 @@ fn main() {
             );
         }
     }
+
+    // Bundled connector provenance (baked in so the runtime "newest wins"
+    // resolver knows what this install shipped, without an editable sidecar).
+    // CI sets these from the pinned connector ref's git commit timestamp; local
+    // builds leave them unset (option_env! -> None -> epoch-0, bundle never wins).
+    for (suffix, ref_env, ts_env) in [
+        ("PICK", "STRIKEHUB_BUNDLED_PICK_REF", "STRIKEHUB_BUNDLED_PICK_TS"),
+        (
+            "KUBESTUDIO",
+            "STRIKEHUB_BUNDLED_KUBESTUDIO_REF",
+            "STRIKEHUB_BUNDLED_KUBESTUDIO_TS",
+        ),
+    ] {
+        // Re-run build.rs when the caller changes these (so a new CI value is
+        // picked up without a clean rebuild).
+        println!("cargo:rerun-if-env-changed={}", ref_env);
+        println!("cargo:rerun-if-env-changed={}", ts_env);
+        if let Ok(v) = std::env::var(ref_env) {
+            println!("cargo:rustc-env={}={}", ref_env, v);
+        }
+        if let Ok(v) = std::env::var(ts_env) {
+            println!("cargo:rustc-env={}={}", ts_env, v);
+        }
+        let _ = suffix;
+    }
 }

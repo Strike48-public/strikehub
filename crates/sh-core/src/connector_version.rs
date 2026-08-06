@@ -54,6 +54,27 @@ pub fn is_newer(candidate_ts: &str, existing_ts: &str) -> bool {
     candidate_ts > existing_ts
 }
 
+/// The connector provenance baked into this StrikeHub binary at build time.
+///
+/// CI passes `STRIKEHUB_BUNDLED_<SUFFIX>_REF` / `_TS` to the strikehub build
+/// (see build.rs), where `<SUFFIX>` is `PICK` or `KUBESTUDIO`. Local/dev builds
+/// don't set them, so this returns an epoch-0 record and the bundle never wins
+/// a "newest" comparison — dev sibling-workspace resolution is unaffected.
+pub fn bundled_version(connector_id: &str) -> ConnectorVersion {
+    let (r#ref, ts) = match connector_id {
+        "pick" => (
+            option_env!("STRIKEHUB_BUNDLED_PICK_REF").unwrap_or(""),
+            option_env!("STRIKEHUB_BUNDLED_PICK_TS").unwrap_or(""),
+        ),
+        "kubestudio" => (
+            option_env!("STRIKEHUB_BUNDLED_KUBESTUDIO_REF").unwrap_or(""),
+            option_env!("STRIKEHUB_BUNDLED_KUBESTUDIO_TS").unwrap_or(""),
+        ),
+        _ => ("", ""),
+    };
+    ConnectorVersion::new(r#ref.to_string(), ts.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +124,19 @@ mod tests {
         assert_eq!(back.r#ref, "josh/catching-up");
         assert_eq!(back.ts, "2026-08-06T14:03:22Z");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bundled_version_unknown_id_is_epoch_zero() {
+        let v = bundled_version("does-not-exist");
+        assert_eq!(v.ts, "");
+    }
+
+    #[test]
+    fn bundled_version_known_ids_do_not_panic() {
+        // In a local build these are epoch-0 (env not baked); in CI they carry
+        // real values. Either way the call must be total and never panic.
+        let _pick = bundled_version("pick");
+        let _ks = bundled_version("kubestudio");
     }
 }
