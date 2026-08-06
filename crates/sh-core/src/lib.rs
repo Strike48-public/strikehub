@@ -3,6 +3,7 @@ pub mod auth;
 pub mod bridge;
 pub mod config;
 pub mod connector_fetch;
+pub mod connector_version;
 pub mod embedded;
 pub mod error;
 pub mod ipc;
