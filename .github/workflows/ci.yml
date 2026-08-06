@@ -102,11 +102,36 @@ jobs:
       - name: Install rsvg-convert and protobuf
         run: brew install librsvg protobuf
 
-      - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
-
+      # Load refs + bake connector timestamps BEFORE the strikehub build, so
+      # build.rs picks up STRIKEHUB_BUNDLED_*_TS at compile time (the runtime
+      # "newest wins" seed needs them; without this the bundle is epoch-0 and the
+      # seed never fires in PR artifacts).
       - name: Load connector refs
         run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null || true)"
+            if [ -z "$ts" ]; then
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null || true)"
+            fi
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
 
       - name: Prepare dist directory
         run: mkdir -p dist
@@ -193,6 +218,29 @@ jobs:
       - name: Load connector refs
         shell: bash
         run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      # Bake connector timestamps before the strikehub build (build.rs reads them
+      # at compile time for the runtime "newest wins" seed).
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null || true)"
+            if [ -z "$ts" ]; then
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null || true)"
+            fi
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
