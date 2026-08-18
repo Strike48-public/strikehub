@@ -95,20 +95,72 @@ done
 cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/strikehub.png" "$APPDIR/strikehub.png"
 cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/strikehub.png" "$APPDIR/.DirIcon"
 
-# Create a simple AppRun
-cat > "$APPDIR/AppRun" << RUNEOF
-#!/bin/bash
-HERE="\$(dirname "\$(readlink -f "\${0}")")"
-export PATH="\${HERE}/usr/bin:\${PATH}"
-export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${HERE}/usr/lib/${ARCH}-linux-gnu:\${LD_LIBRARY_PATH}"
-exec "\$HERE/usr/bin/strikehub" "\$@"
-RUNEOF
-chmod +x "$APPDIR/AppRun"
+# ── Portable packaging via linuxdeploy + GTK plugin ──────────────────────
+# linuxdeploy walks each --executable's ldd closure, copies the needed .so files
+# into usr/lib, patches their rpaths to $ORIGIN/../lib, and (via the gtk plugin)
+# bundles the WebKit/GTK runtime pieces a bare ldd copy misses: gdk-pixbuf
+# loaders, GIO modules, gsettings schemas, and WebKit's out-of-process helper
+# binaries. glibc/libGL/X11 are intentionally NOT bundled (linuxdeploy's
+# excludelist) — they must come from the host, which is why this must build on
+# the oldest glibc we support. This is what lets the AppImage run on a distro
+# WITHOUT webkit2gtk installed (previously it shipped zero libs and relied on the
+# host for GTK/WebKit/libxdo).
+LINUXDEPLOY="linuxdeploy-${ARCH}.AppImage"
+LINUXDEPLOY_GTK="linuxdeploy-plugin-gtk.sh"
+if [ ! -f "$LINUXDEPLOY" ]; then
+    echo "Downloading $LINUXDEPLOY..."
+    wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/${LINUXDEPLOY}"
+    chmod +x "$LINUXDEPLOY"
+fi
+if [ ! -f "$LINUXDEPLOY_GTK" ]; then
+    echo "Downloading $LINUXDEPLOY_GTK..."
+    wget -q "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/${LINUXDEPLOY_GTK}"
+    chmod +x "$LINUXDEPLOY_GTK"
+fi
 
-# Build the AppImage
-echo "Creating AppImage..."
-ARCH=$ARCH "./${APPIMAGETOOL}" "$APPDIR" "StrikeHub-${VERSION}-${ARCH}.AppImage"
+# linuxdeploy's `--output appimage` shells out to `appimagetool` on PATH — make
+# the arch-suffixed download we already have discoverable under that bare name.
+mkdir -p .ldbin
+ln -sf "$PWD/${APPIMAGETOOL}" ".ldbin/appimagetool"
+ln -sf "$PWD/${LINUXDEPLOY_GTK}" ".ldbin/linuxdeploy-plugin-gtk.sh"
+export PATH="$PWD/.ldbin:$PATH"
+
+# Run linuxdeploy's own AppImages by extraction (CI runners lack a usable FUSE
+# in some images) and tell the gtk plugin we target GTK3, not GTK4.
+export APPIMAGE_EXTRACT_AND_RUN=1
+export DEPLOY_GTK_VERSION=3
+
+# Env defaults as an AppRun hook. linuxdeploy's generated AppRun sources
+# apprun-hooks/*.sh before exec, so these apply regardless of whether it launches
+# the `strikehub` wrapper or `strikehub-real` directly (version-dependent) — the
+# wrapper alone isn't a reliable place to hang these under linuxdeploy. GDK_BACKEND=x11
+# avoids the WebKitGTK Wayland surface bug; the STRIKE48_* defaults match the wrapper.
+mkdir -p "$APPDIR/apprun-hooks"
+cat > "$APPDIR/apprun-hooks/00-strike48-env.sh" << 'HOOKEOF'
+if [ -z "$STRIKE48_API_URL" ]; then export STRIKE48_API_URL="https://studio.strike48.com"; fi
+if [ -z "$STRIKE48_URL" ]; then export STRIKE48_URL="wss://studio.strike48.com"; fi
+export GDK_BACKEND=x11
+HOOKEOF
+
+# Deploy libs for the real binary + both connectors so every ldd closure is
+# bundled. The connectors stay usr/bin siblings (the resolver + newest-wins seed
+# depend on that); passing them as --executable only deploys their libs, it does
+# not relocate them.
+EXTRA_EXE=()
+[ -f "$APPDIR/usr/bin/pentest-agent" ] && EXTRA_EXE+=(--executable "$APPDIR/usr/bin/pentest-agent")
+[ -f "$APPDIR/usr/bin/ks-connector" ]  && EXTRA_EXE+=(--executable "$APPDIR/usr/bin/ks-connector")
+
+echo "Creating portable AppImage via linuxdeploy..."
+OUTPUT="StrikeHub-${VERSION}-${ARCH}.AppImage" \
+"./${LINUXDEPLOY}" \
+    --appdir "$APPDIR" \
+    --executable "$APPDIR/usr/bin/strikehub-real" \
+    "${EXTRA_EXE[@]}" \
+    --desktop-file "$APPDIR/usr/share/applications/strikehub.desktop" \
+    --icon-file "$APPDIR/strikehub.png" \
+    --plugin gtk \
+    --output appimage
 
 echo ""
-echo "✅ AppImage created: StrikeHub-${VERSION}-${ARCH}.AppImage"
-echo "This version properly sets environment variables!"
+echo "✅ Portable AppImage created: StrikeHub-${VERSION}-${ARCH}.AppImage"
+echo "   (GTK/WebKit runtime bundled — runs without host webkit2gtk)"

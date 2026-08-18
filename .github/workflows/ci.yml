@@ -325,11 +325,29 @@ jobs:
           chmod +x scripts/build-appimage.sh
           ./scripts/build-appimage.sh ci-test ${{ matrix.arch }}
 
-      - name: Verify AppImage
+      - name: Verify AppImage bundles GTK/WebKit runtime
         if: matrix.installer == 'appimage'
         run: |
-          ls -la StrikeHub-*.AppImage
-          chmod +x StrikeHub-*.AppImage
+          set -euo pipefail
+          AI=$(ls StrikeHub-*.AppImage | head -1)
+          chmod +x "$AI"
+          ls -la "$AI"
+          # Assert the runtime is bundled — if these libs aren't inside, the
+          # AppImage relies on the host and isn't portable (the bug we fixed).
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./"$AI" --appimage-extract >/dev/null
+          MISSING=0
+          for lib in libwebkit2gtk-4.1.so.0 libgtk-3.so.0 libxdo.so.3; do
+            find squashfs-root -name "$lib*" | grep -q . || { echo "MISSING bundled lib: $lib"; MISSING=1; }
+          done
+          find squashfs-root -name 'WebKitNetworkProcess' | grep -q . || { echo "MISSING WebKitNetworkProcess helper"; MISSING=1; }
+          # Connectors must remain usr/bin siblings (resolver + newest-wins seed).
+          for c in pentest-agent ks-connector; do
+            find squashfs-root/usr/bin -maxdepth 1 -name "$c" | grep -q . || { echo "MISSING connector sibling: usr/bin/$c"; MISSING=1; }
+          done
+          rm -rf squashfs-root
+          [ "$MISSING" -eq 0 ] || { echo "AppImage is NOT portable — runtime not bundled."; exit 1; }
+          echo "AppImage bundles the GTK/WebKit runtime + keeps connector siblings ✓"
 
       - uses: actions/upload-artifact@v4
         if: matrix.installer == 'appimage'
