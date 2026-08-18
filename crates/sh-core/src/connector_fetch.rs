@@ -809,16 +809,24 @@ mod newest_tests {
     #[test]
     fn downloads_when_release_is_newer_than_cache() {
         assert!(should_download(
-            true,                    // binary_exists
-            "2026-08-05T00:00:00Z",  // cached ts
-            "2026-08-06T00:00:00Z",  // release ts
+            true,                   // binary_exists
+            "2026-08-05T00:00:00Z", // cached ts
+            "2026-08-06T00:00:00Z", // release ts
         ));
     }
 
     #[test]
     fn skips_when_cache_is_current_or_newer() {
-        assert!(!should_download(true, "2026-08-06T00:00:00Z", "2026-08-06T00:00:00Z"));
-        assert!(!should_download(true, "2026-08-07T00:00:00Z", "2026-08-06T00:00:00Z"));
+        assert!(!should_download(
+            true,
+            "2026-08-06T00:00:00Z",
+            "2026-08-06T00:00:00Z"
+        ));
+        assert!(!should_download(
+            true,
+            "2026-08-07T00:00:00Z",
+            "2026-08-06T00:00:00Z"
+        ));
     }
 
     #[test]

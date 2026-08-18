@@ -89,7 +89,11 @@ fn main() {
     // CI sets these from the pinned connector ref's git commit timestamp; local
     // builds leave them unset (option_env! -> None -> epoch-0, bundle never wins).
     for (suffix, ref_env, ts_env) in [
-        ("PICK", "STRIKEHUB_BUNDLED_PICK_REF", "STRIKEHUB_BUNDLED_PICK_TS"),
+        (
+            "PICK",
+            "STRIKEHUB_BUNDLED_PICK_REF",
+            "STRIKEHUB_BUNDLED_PICK_TS",
+        ),
         (
             "KUBESTUDIO",
             "STRIKEHUB_BUNDLED_KUBESTUDIO_REF",

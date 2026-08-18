@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::connector_fetch::bin_cache_dir;
 use crate::connector_version::{
-    bundled_version, is_newer, read_version_file, write_version_file, ConnectorVersion,
+    ConnectorVersion, bundled_version, is_newer, read_version_file, write_version_file,
 };
 
 /// (connector id, binary base name) pairs whose bundled copies we seed.
@@ -74,11 +74,19 @@ pub fn seed_bundled_connectors(exe: Option<&Path>) {
         };
 
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
-            tracing::warn!("seed: cannot create cache dir {}: {}", cache_dir.display(), e);
+            tracing::warn!(
+                "seed: cannot create cache dir {}: {}",
+                cache_dir.display(),
+                e
+            );
             continue;
         }
         if let Err(e) = std::fs::copy(&bundled_bin, &cache_bin) {
-            tracing::warn!("seed: copy {} -> cache failed: {}", bundled_bin.display(), e);
+            tracing::warn!(
+                "seed: copy {} -> cache failed: {}",
+                bundled_bin.display(),
+                e
+            );
             continue;
         }
         #[cfg(unix)]
@@ -137,13 +145,25 @@ mod tests {
 
     #[test]
     fn seeds_when_bundle_newer_and_present() {
-        assert!(decide_seed("2026-08-06T00:00:00Z", "2026-08-05T00:00:00Z", true));
+        assert!(decide_seed(
+            "2026-08-06T00:00:00Z",
+            "2026-08-05T00:00:00Z",
+            true
+        ));
     }
 
     #[test]
     fn does_not_seed_when_cache_current_or_newer() {
-        assert!(!decide_seed("2026-08-05T00:00:00Z", "2026-08-06T00:00:00Z", true));
-        assert!(!decide_seed("2026-08-06T00:00:00Z", "2026-08-06T00:00:00Z", true));
+        assert!(!decide_seed(
+            "2026-08-05T00:00:00Z",
+            "2026-08-06T00:00:00Z",
+            true
+        ));
+        assert!(!decide_seed(
+            "2026-08-06T00:00:00Z",
+            "2026-08-06T00:00:00Z",
+            true
+        ));
     }
 
     #[test]
