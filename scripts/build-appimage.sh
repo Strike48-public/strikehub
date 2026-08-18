@@ -98,13 +98,13 @@ cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/strikehub.png" "$APPDIR/.DirIco
 # ── Portable packaging via linuxdeploy + GTK plugin ──────────────────────
 # linuxdeploy walks each --executable's ldd closure, copies the needed .so files
 # into usr/lib, patches their rpaths to $ORIGIN/../lib, and (via the gtk plugin)
-# bundles the WebKit/GTK runtime pieces a bare ldd copy misses: gdk-pixbuf
-# loaders, GIO modules, gsettings schemas, and WebKit's out-of-process helper
-# binaries. glibc/libGL/X11 are intentionally NOT bundled (linuxdeploy's
-# excludelist) — they must come from the host, which is why this must build on
-# the oldest glibc we support. This is what lets the AppImage run on a distro
-# WITHOUT webkit2gtk installed (previously it shipped zero libs and relied on the
-# host for GTK/WebKit/libxdo).
+# bundles the GTK runtime pieces a bare ldd copy misses: gdk-pixbuf loaders, GIO
+# modules, gsettings schemas. It does NOT bundle WebKit's out-of-process helper
+# binaries (WebKitNetworkProcess/WebKitWebProcess) — those are copied separately
+# in Phase 2. glibc/libGL/X11 are intentionally NOT bundled (linuxdeploy's
+# excludelist) — they come from the host, so this must build on the oldest glibc
+# we support. Net effect: the AppImage runs on a distro WITHOUT webkit2gtk
+# installed (previously it shipped zero libs and relied on the host).
 LINUXDEPLOY="linuxdeploy-${ARCH}.AppImage"
 LINUXDEPLOY_GTK="linuxdeploy-plugin-gtk.sh"
 if [ ! -f "$LINUXDEPLOY" ]; then
@@ -130,37 +130,60 @@ export PATH="$PWD/.ldbin:$PATH"
 export APPIMAGE_EXTRACT_AND_RUN=1
 export DEPLOY_GTK_VERSION=3
 
-# Env defaults as an AppRun hook. linuxdeploy's generated AppRun sources
-# apprun-hooks/*.sh before exec, so these apply regardless of whether it launches
-# the `strikehub` wrapper or `strikehub-real` directly (version-dependent) — the
-# wrapper alone isn't a reliable place to hang these under linuxdeploy. GDK_BACKEND=x11
-# avoids the WebKitGTK Wayland surface bug; the STRIKE48_* defaults match the wrapper.
+# Env defaults + WebKit runtime paths as an AppRun hook. linuxdeploy's generated
+# AppRun sources apprun-hooks/*.sh before exec, so these apply whether it launches
+# the `strikehub` wrapper or `strikehub-real` directly (version-dependent).
+#  - GDK_BACKEND=x11 avoids the WebKitGTK Wayland surface bug.
+#  - WEBKIT_EXEC_PATH points WebKit at the out-of-process helpers bundled in
+#    Phase 2 below; LD_LIBRARY_PATH makes those helper processes (spawned fresh,
+#    so they don't inherit the main binary's patched rpath) resolve the bundled
+#    libwebkit/gtk. Without both, a web view can't spawn its network/web process
+#    on a host lacking webkit2gtk.
 mkdir -p "$APPDIR/apprun-hooks"
 cat > "$APPDIR/apprun-hooks/00-strike48-env.sh" << 'HOOKEOF'
 if [ -z "$STRIKE48_API_URL" ]; then export STRIKE48_API_URL="https://studio.strike48.com"; fi
 if [ -z "$STRIKE48_URL" ]; then export STRIKE48_URL="wss://studio.strike48.com"; fi
 export GDK_BACKEND=x11
+export WEBKIT_EXEC_PATH="${APPDIR}/usr/lib/webkit2gtk-4.1"
+export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
 HOOKEOF
 
-# Deploy libs for the real binary + both connectors so every ldd closure is
-# bundled. The connectors stay usr/bin siblings (the resolver + newest-wins seed
-# depend on that); passing them as --executable only deploys their libs, it does
-# not relocate them.
+# Phase 1 — deploy libs + GTK runtime into the AppDir (no packaging yet). The
+# connectors ride along as extra executables so their ldd closures bundle while
+# staying usr/bin siblings (the resolver + newest-wins seed depend on that);
+# --executable deploys their libs, it does not relocate them.
 EXTRA_EXE=()
 [ -f "$APPDIR/usr/bin/pentest-agent" ] && EXTRA_EXE+=(--executable "$APPDIR/usr/bin/pentest-agent")
 [ -f "$APPDIR/usr/bin/ks-connector" ]  && EXTRA_EXE+=(--executable "$APPDIR/usr/bin/ks-connector")
-
-echo "Creating portable AppImage via linuxdeploy..."
-OUTPUT="StrikeHub-${VERSION}-${ARCH}.AppImage" \
+echo "Deploying libraries via linuxdeploy..."
 "./${LINUXDEPLOY}" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/strikehub-real" \
     "${EXTRA_EXE[@]}" \
     --desktop-file "$APPDIR/usr/share/applications/strikehub.desktop" \
     --icon-file "$APPDIR/strikehub.png" \
-    --plugin gtk \
-    --output appimage
+    --plugin gtk
+
+# Phase 2 — bundle WebKit's out-of-process helpers. The gtk plugin bundles GTK
+# modules but NOT WebKitNetworkProcess/WebKitWebProcess (spawned at runtime,
+# invisible to ldd), which is what our CI verify flagged. Copy the whole host
+# webkit2gtk-4.1 libexec dir in; the hook above points WEBKIT_EXEC_PATH at it.
+WK_HELPER="$(find /usr/lib /usr/libexec -name WebKitNetworkProcess -path '*webkit2gtk-4.1*' 2>/dev/null | head -1)"
+if [ -n "$WK_HELPER" ]; then
+    WK_SRC="$(dirname "$WK_HELPER")"
+    WK_DST="$APPDIR/usr/lib/webkit2gtk-4.1"
+    mkdir -p "$WK_DST"
+    cp -rL "$WK_SRC/." "$WK_DST/"
+    echo "Bundled WebKit helpers from $WK_SRC"
+else
+    echo "ERROR: WebKitNetworkProcess not found on host — cannot build a portable AppImage" >&2
+    exit 1
+fi
+
+# Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
+echo "Packaging AppImage..."
+ARCH=$ARCH "./${APPIMAGETOOL}" "$APPDIR" "StrikeHub-${VERSION}-${ARCH}.AppImage"
 
 echo ""
 echo "✅ Portable AppImage created: StrikeHub-${VERSION}-${ARCH}.AppImage"
-echo "   (GTK/WebKit runtime bundled — runs without host webkit2gtk)"
+echo "   (GTK/WebKit runtime + out-of-process helpers bundled — runs without host webkit2gtk)"
