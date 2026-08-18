@@ -121,10 +121,16 @@ jobs:
         run: |
           resolve_ts () {
             local repo="$1" ref="$2" ts=""
-            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null || true)"
-            if [ -z "$ts" ]; then
-              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null || true)"
-            fi
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
             printf '%s' "$ts"
           }
           PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
@@ -233,10 +239,16 @@ jobs:
         run: |
           resolve_ts () {
             local repo="$1" ref="$2" ts=""
-            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null || true)"
-            if [ -z "$ts" ]; then
-              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null || true)"
-            fi
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
             printf '%s' "$ts"
           }
           PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
