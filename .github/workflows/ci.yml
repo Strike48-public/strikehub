@@ -11,6 +11,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Ship the bundled pentest-agent easy-mode-first, matching release.yml. Read at
+  # BUILD time via option_env! in pick's config.rs, so it must be present when the
+  # connector compiles. strikehub's own easy-mode default comes from
+  # build-defaults.toml (no env var needed).
+  PICK_EASY_MODE: "true"
 
 jobs:
   fmt:
