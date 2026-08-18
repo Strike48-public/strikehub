@@ -130,22 +130,24 @@ export PATH="$PWD/.ldbin:$PATH"
 export APPIMAGE_EXTRACT_AND_RUN=1
 export DEPLOY_GTK_VERSION=3
 
-# Env defaults + WebKit runtime paths as an AppRun hook. linuxdeploy's generated
-# AppRun sources apprun-hooks/*.sh before exec, so these apply whether it launches
-# the `strikehub` wrapper or `strikehub-real` directly (version-dependent).
+# Env + CWD as an AppRun hook. linuxdeploy's generated AppRun sources
+# apprun-hooks/*.sh before exec, so these apply whether it launches the
+# `strikehub` wrapper or `strikehub-real` directly (version-dependent).
 #  - GDK_BACKEND=x11 avoids the WebKitGTK Wayland surface bug.
-#  - WEBKIT_EXEC_PATH points WebKit at the out-of-process helpers bundled in
-#    Phase 2 below; LD_LIBRARY_PATH makes those helper processes (spawned fresh,
-#    so they don't inherit the main binary's patched rpath) resolve the bundled
-#    libwebkit/gtk. Without both, a web view can't spawn its network/web process
-#    on a host lacking webkit2gtk.
+#  - LD_LIBRARY_PATH makes WebKit's freshly-spawned helper processes (which don't
+#    inherit the main binary's patched rpath) resolve the bundled libwebkit/gtk.
+#  - cd "$APPDIR": WebKitGTK 2.52 removed WEBKIT_EXEC_PATH and hardcodes an
+#    ABSOLUTE libexec path into libwebkit; Phase 2 below binary-patches that to a
+#    RELATIVE path, which g_subprocess resolves against CWD — so anchor CWD at the
+#    AppDir root. StrikeHub uses absolute paths (data dir, current_exe-based
+#    connector resolution), so changing CWD here is safe.
 mkdir -p "$APPDIR/apprun-hooks"
 cat > "$APPDIR/apprun-hooks/00-strike48-env.sh" << 'HOOKEOF'
 if [ -z "$STRIKE48_API_URL" ]; then export STRIKE48_API_URL="https://studio.strike48.com"; fi
 if [ -z "$STRIKE48_URL" ]; then export STRIKE48_URL="wss://studio.strike48.com"; fi
 export GDK_BACKEND=x11
-export WEBKIT_EXEC_PATH="${APPDIR}/usr/lib/webkit2gtk-4.1"
 export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
+cd "${APPDIR}" 2>/dev/null || true
 HOOKEOF
 
 # Phase 1 — deploy libs + GTK runtime into the AppDir (no packaging yet). The
@@ -164,21 +166,52 @@ echo "Deploying libraries via linuxdeploy..."
     --icon-file "$APPDIR/strikehub.png" \
     --plugin gtk
 
-# Phase 2 — bundle WebKit's out-of-process helpers. The gtk plugin bundles GTK
-# modules but NOT WebKitNetworkProcess/WebKitWebProcess (spawned at runtime,
-# invisible to ldd), which is what our CI verify flagged. Copy the whole host
-# webkit2gtk-4.1 libexec dir in; the hook above points WEBKIT_EXEC_PATH at it.
+# Phase 2 — bundle WebKit's out-of-process helpers AND make them relocatable.
+# The gtk plugin bundles GTK modules but NOT WebKitNetworkProcess/WebKitWebProcess
+# (spawned at runtime, invisible to ldd). Worse, WebKitGTK 2.52 hardcodes the
+# ABSOLUTE PKGLIBEXECDIR (/usr/lib/<triplet>/webkit2gtk-4.1) into libwebkit and
+# removed the WEBKIT_EXEC_PATH override, so it spawns the helpers from that fixed
+# path — which doesn't exist on a host without webkit. Fix: (a) bundle the helper
+# dir at the SAME relative multiarch path, (b) binary-patch the compiled absolute
+# path to a same-length RELATIVE one (drop leading '/', pad with NUL), (c) the
+# AppRun hook cd's to $APPDIR so g_subprocess resolves the relative path in-bundle.
 WK_HELPER="$(find /usr/lib /usr/libexec -name WebKitNetworkProcess -path '*webkit2gtk-4.1*' 2>/dev/null | head -1)"
-if [ -n "$WK_HELPER" ]; then
-    WK_SRC="$(dirname "$WK_HELPER")"
-    WK_DST="$APPDIR/usr/lib/webkit2gtk-4.1"
-    mkdir -p "$WK_DST"
-    cp -rL "$WK_SRC/." "$WK_DST/"
-    echo "Bundled WebKit helpers from $WK_SRC"
-else
+if [ -z "$WK_HELPER" ]; then
     echo "ERROR: WebKitNetworkProcess not found on host — cannot build a portable AppImage" >&2
     exit 1
 fi
+WK_SRC="$(dirname "$WK_HELPER")"   # /usr/lib/<triplet>/webkit2gtk-4.1
+WK_REL="${WK_SRC#/}"                # usr/lib/<triplet>/webkit2gtk-4.1
+mkdir -p "$APPDIR/$WK_REL"
+cp -rL "$WK_SRC/." "$APPDIR/$WK_REL/"
+chmod +x "$APPDIR/$WK_REL/WebKitNetworkProcess" "$APPDIR/$WK_REL/WebKitWebProcess" 2>/dev/null || true
+echo "Bundled WebKit helpers: $WK_SRC -> $WK_REL"
+
+LIBWK="$(find "$APPDIR/usr/lib" -maxdepth 1 -name 'libwebkit2gtk-4.1.so.0*' -type f 2>/dev/null | head -1)"
+if [ -z "$LIBWK" ]; then
+    echo "ERROR: bundled libwebkit2gtk-4.1.so.0 not found (linuxdeploy should have deployed it)" >&2
+    exit 1
+fi
+echo "Patching hardcoded WebKit exec path in $(basename "$LIBWK")..."
+python3 - "$LIBWK" "$WK_SRC" <<'PY'
+import sys
+lib, wk_src = sys.argv[1], sys.argv[2]
+data = bytearray(open(lib, 'rb').read())
+def patch(absdir):
+    old = absdir.encode() + b'\x00'            # "/usr/lib/.../webkit2gtk-4.1\0"
+    rel = absdir[1:].encode() + b'\x00\x00'    # "usr/lib/.../webkit2gtk-4.1\0\0" (same length)
+    assert len(old) == len(rel), (len(old), len(rel))
+    n = data.count(old)
+    if n:
+        data[:] = data.replace(old, rel)
+    return n
+n_dir = patch(wk_src)                          # the helper libexec dir
+n_ib  = patch(wk_src + "/injected-bundle/")    # the injected-bundle dir
+open(lib, 'wb').write(data)
+print(f"  patched: exec-dir x{n_dir}, injected-bundle x{n_ib}")
+if n_dir == 0:
+    sys.exit("ERROR: hardcoded WebKit exec path not found in libwebkit — patch failed")
+PY
 
 # Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
 echo "Packaging AppImage..."

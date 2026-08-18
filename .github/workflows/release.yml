@@ -479,6 +479,12 @@ jobs:
             find squashfs-root -name "$lib*" | grep -q . || { echo "MISSING bundled lib: $lib"; MISSING=1; }
           done
           find squashfs-root -name 'WebKitNetworkProcess' | grep -q . || { echo "MISSING WebKitNetworkProcess helper"; MISSING=1; }
+          # The hardcoded absolute WebKit exec path must be patched out, else the
+          # web process can't spawn on a host without webkit at that fixed path.
+          LIBWK=$(find squashfs-root -name 'libwebkit2gtk-4.1.so.0' -type f | head -1)
+          python3 -c "import re,sys; d=open('$LIBWK','rb').read(); sys.exit(1 if re.search(rb'/usr/lib/[a-z0-9_]+-linux-gnu/webkit2gtk-4\.1\x00', d) else 0)" \
+            && echo "webkit exec path patched to relative ✓" \
+            || { echo "MISSING: libwebkit still has an absolute webkit2gtk-4.1 exec path (patch failed)"; MISSING=1; }
           for c in pentest-agent ks-connector; do
             find squashfs-root/usr/bin -maxdepth 1 -name "$c" | grep -q . || { echo "MISSING connector sibling: usr/bin/$c"; MISSING=1; }
           done
