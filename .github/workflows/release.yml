@@ -31,11 +31,11 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Ship easy-mode-first. Both are read at BUILD time via option_env!, so they
-  # must be present during cargo build; setting them here applies to every job
-  # (strikehub reads STRIKEHUB_DEFAULT_EASY_MODE, the pentest-agent build reads
-  # PICK_EASY_MODE — each ignores the other's var).
-  STRIKEHUB_DEFAULT_EASY_MODE: "true"
+  # Ship the bundled pentest-agent easy-mode-first. Read at BUILD time via
+  # option_env! in pick's config.rs, so it must be present when the connector
+  # compiles (applies to every job/step). NOTE: strikehub's own easy-mode default
+  # is NOT set here — build.rs bakes it from build-defaults.toml ([easy_mode]
+  # default), which overrides any ambient env, so a var here would be dead.
   PICK_EASY_MODE: "true"
 
 # Versioning: Cargo.toml is bumped in the same PR that ships the change.
