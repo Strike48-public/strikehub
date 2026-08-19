@@ -3,19 +3,23 @@
 pub fn theme_css() -> &'static str {
     r#"
         :root {
-            /* Strike48 Ink Scale — cool-blue undertone neutrals */
-            --ink-900: #07090d;
-            --ink-850: #0b0e14;
-            --ink-800: #0f1320;
-            --ink-750: #141a28;
-            --ink-700: #1a2233;
-            --ink-650: #222b40;
-            --ink-600: #2c3753;
-            --ink-500: #4a5578;
-            --ink-400: #6e7a9a;
-            --ink-300: #9ba4be;
-            --ink-200: #cdd2e2;
-            --ink-100: #eef0f7;
+            /* Strike48 "Sage" DS — muted sage-green pastel on near-black,
+               Material-3 shapes. Dark ink on all sage-filled controls. */
+
+            /* Neutral scale — aligned to the Sage DS surface ladder
+               (darkest → lightest). DS refs in comments. */
+            --ink-900: #101312;   /* deepest — rail + content + input bg (DS --p3) */
+            --ink-850: #141715;   /* body chrome bg (DS --bg) */
+            --ink-800: #242b27;   /* card / elevated surface (DS --surf) */
+            --ink-750: #2c352f;   /* hover surface (DS --surf2) */
+            --ink-700: #333d37;   /* card border / active surface */
+            --ink-650: #3c4640;   /* stronger hover */
+            --ink-600: #454f48;   /* active */
+            --ink-500: #55605a;   /* muted / offline */
+            --ink-400: #78847d;   /* secondary text (DS --dim) */
+            --ink-300: #a7b2ab;   /* tertiary / muted text (DS --mut) */
+            --ink-200: #cfd6d1;   /* body text */
+            --ink-100: #e9eeeb;   /* headings / emphasis (DS --tx) */
 
             /* Semantic mappings */
             --chrome:            var(--ink-850);
@@ -29,44 +33,65 @@ pub fn theme_css() -> &'static str {
             --chrome-card:       var(--ink-800);
             --chrome-card-border:var(--ink-700);
 
-            /* Strike48 Brand */
-            --brand-300: #7aa9ff;
-            --brand-500: #3978D5;
-            --brand-600: #2563eb;
-            --brand-700: #1d4ed8;
+            /* Sage brand — light pastel; text ON it must be dark ink. */
+            --brand-300: #b9d4c6;   /* light sage */
+            --brand-500: #9cbfae;   /* primary · sage (Sage --em-brand) */
+            --brand-600: #7fa894;   /* deeper sage / hover (Sage --em-brand-strong) */
+            --brand-700: #6b9280;   /* deepest */
 
             --accent:            var(--brand-500);
             --accent-hover:      var(--brand-600);
-            --accent-foreground: #ffffff;
+            --accent-foreground: #151a17;   /* dark ink on sage (DS --on-pri) — REQUIRED */
 
-            /* Strike48 Status Colors */
-            --status-critical:    #ef4444;
-            --status-high:        #f97316;
-            --status-medium:      #3b82f6;
-            --status-low:         #64748b;
-            --status-open:        #3b82f6;
-            --status-in-progress: #eab308;
-            --status-waiting:     #a855f7;
-            --status-resolved:    #10b981;
-            --status-closed:      #475569;
+            /* Gold secondary accent (DS --acc / --gold): highlighted numerics,
+               privilege/admin chips. Distinct from the sage primary. */
+            --gold: #c9b27e;
+
+            /* Status colors (Sage DS: --ok --warn --err --info) */
+            --status-critical:    #d99a9a;   /* muted rose (DS --err) */
+            --status-high:        #d9b07c;   /* warm amber */
+            --status-medium:      #9cbfae;   /* sage */
+            --status-low:         #55605a;   /* muted */
+            --status-open:        #9cbfae;
+            --status-in-progress: #d9b07c;   /* amber (DS --warn) */
+            --status-waiting:     #b9a9d4;   /* muted lavender */
+            --status-resolved:    #8fc4ab;   /* mint (DS --ok) */
+            --status-closed:      #3a433d;
+            --status-info:        #9cb8bf;   /* muted blue (DS --info) */
 
             --success:     var(--status-resolved);
             --warning:     var(--status-in-progress);
             --destructive: var(--status-critical);
+            --info:        var(--status-info);
 
-            /* Typography — IBM Plex */
+            /* Status tint backgrounds (DS --ok-bg etc): low-alpha fills behind
+               pills/badges/notes so tinted surfaces are consistent. */
+            --ok-bg:   rgba(143, 196, 171, 0.14);
+            --warn-bg: rgba(217, 176, 124, 0.14);
+            --err-bg:  rgba(217, 154, 154, 0.14);
+            --info-bg: rgba(156, 184, 191, 0.14);
+            --tint:    rgba(156, 191, 174, 0.16);   /* sage selection/hover wash (DS --tint) */
+
+            /* Glass surfaces (DS --glass-*): frosted panels for cards/overlays. */
+            --glass-bg:   rgba(255, 255, 255, 0.05);
+            --glass-line: rgba(255, 255, 255, 0.09);
+            --glass-sh:   0 14px 34px rgba(6, 12, 9, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+            /* Typography — IBM Plex (unchanged) */
             --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
             --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
             --font-size: 13px;
 
-            /* Radius — dense console style */
-            --radius-xs: 2px;
-            --radius-sm: 4px;
-            --radius-md: 6px;
+            /* Radius — Sage Material-3 shapes (rounder than the old console) */
+            --radius-xs: 6px;
+            --radius-sm: 8px;     /* default control radius (DS most-used) */
+            --radius-md: 12px;    /* inputs / notes */
+            --radius-lg: 16px;    /* cards */
+            --radius-pill: 999px; /* buttons / badges / chips */
             --radius: var(--radius-sm);
 
             /* Shadows */
-            --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.3);
+            --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.35);
             --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.5);
 
             --rail-width: 48px;
@@ -79,15 +104,15 @@ pub fn theme_css() -> &'static str {
         /* Strike48 scrollbars — visible, styled */
         *::-webkit-scrollbar { width: 8px; height: 8px; }
         *::-webkit-scrollbar-track { background: var(--ink-850); }
-        *::-webkit-scrollbar-thumb { background: var(--ink-650); border-radius: 2px; }
+        *::-webkit-scrollbar-thumb { background: var(--ink-650); border-radius: var(--radius-sm); }
         *::-webkit-scrollbar-thumb:hover { background: var(--ink-600); }
 
         /* Selection */
-        ::selection { background: rgba(37, 99, 235, 0.33); color: var(--ink-100); }
+        ::selection { background: var(--tint); color: var(--ink-100); }
 
         /* Focus — border-color only, no rings */
         *:focus { outline: none; }
-        *:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; border-radius: 2px; }
+        *:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 1px; border-radius: var(--radius-xs); }
         input:focus-visible, textarea:focus-visible, select:focus-visible {
             outline: none;
             border-color: var(--brand-500);
@@ -156,7 +181,7 @@ pub fn app_css() -> &'static str {
             justify-content: center;
             width: 32px;
             height: 32px;
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-md);
             background: var(--ink-800);
             margin-bottom: 4px;
             flex-shrink: 0;
@@ -189,7 +214,7 @@ pub fn app_css() -> &'static str {
             justify-content: center;
             width: 36px;
             height: 36px;
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-md);
             cursor: pointer;
             transition: background 0.15s;
         }
@@ -298,6 +323,74 @@ pub fn app_css() -> &'static str {
             color: var(--ink-100);
         }
 
+        /* ── Settings row + easy-mode toggle switch ── */
+        .settings-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            width: 100%;
+            max-width: 480px;
+            padding: 16px 18px;
+            margin-bottom: 8px;
+            background: var(--chrome-card);
+            border: 1px solid var(--chrome-card-border);
+            border-radius: var(--radius-lg);
+        }
+        .settings-row-text {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            text-align: left;
+        }
+        .settings-row-label {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--ink-100);
+        }
+        .settings-row-desc {
+            font-size: 12px;
+            color: var(--ink-400);
+        }
+
+        /* iOS-style toggle switch (a <button>, not a checkbox — the liveview
+           form-data path panics on checkbox onchange). `.easy-toggle-on` = on. */
+        .easy-toggle {
+            position: relative;
+            display: inline-block;
+            width: 46px;
+            height: 28px;
+            flex-shrink: 0;
+            padding: 0;
+            border: none;
+            background: none;
+            cursor: pointer;
+        }
+        .easy-toggle-track {
+            position: absolute;
+            inset: 0;
+            background: var(--ink-600);
+            border-radius: 999px;
+            transition: background 0.2s ease;
+        }
+        .easy-toggle-track::before {
+            content: "";
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 22px;
+            height: 22px;
+            background: #fff;
+            border-radius: 50%;
+            transition: transform 0.2s ease;
+        }
+        .easy-toggle.easy-toggle-on .easy-toggle-track { background: var(--accent); }
+        .easy-toggle.easy-toggle-on .easy-toggle-track::before {
+            transform: translateX(18px);
+            background: var(--accent-foreground);
+        }
+        .easy-toggle:hover { background: none; }
+
         /* ── Content area ── */
         .content-area {
             flex: 1;
@@ -312,6 +405,9 @@ pub fn app_css() -> &'static str {
             flex: 1;
             position: relative;
             overflow: hidden;
+            /* Dark backdrop behind the iframe so the fade-in reveals over the
+               app's own dark theme, not a white gap. */
+            background: var(--ink-900);
         }
 
         .content-webview {
@@ -320,6 +416,14 @@ pub fn app_css() -> &'static str {
             width: 100%;
             height: 100%;
             border: none;
+            /* Hidden until the connector's page has loaded (and had a moment to
+               apply its own CSS), then faded in — a central FOUC guard so each
+               connector doesn't flash its unstyled first frame. */
+            opacity: 0;
+            transition: opacity 0.25s ease;
+        }
+        .content-webview.loaded {
+            opacity: 1;
         }
 
         .content-empty, .content-offline, .setup-view {
@@ -359,7 +463,7 @@ pub fn app_css() -> &'static str {
             width: 200px;
             padding: 20px 16px 16px;
             border: 1px solid var(--ink-700);
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-lg);
             background: var(--ink-800);
             cursor: pointer;
             text-align: center;
@@ -386,7 +490,7 @@ pub fn app_css() -> &'static str {
             justify-content: center;
             width: 44px;
             height: 44px;
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-md);
             background: var(--ink-700);
             margin-bottom: 12px;
         }
@@ -501,7 +605,7 @@ pub fn app_css() -> &'static str {
         .card-remove-btn:hover {
             color: var(--status-critical);
             border-color: var(--status-critical);
-            background: rgba(239, 68, 68, 0.12);
+            background: var(--err-bg);
         }
 
         /* ── Auth status (kept for setup view compatibility) ── */
@@ -580,22 +684,23 @@ pub fn app_css() -> &'static str {
 
         .login-btn {
             margin-top: 8px;
-            padding: 8px 28px;
-            font-size: 13px;
+            padding: 12px 28px;
+            font-size: 14px;
             font-weight: 600;
+            font-family: var(--font-sans);
             border: none;
-            border-radius: var(--radius-sm);
-            background: var(--brand-500);
+            border-radius: var(--radius-pill);
+            background: var(--accent);
             color: var(--accent-foreground);
             cursor: pointer;
             transition: background 0.15s;
         }
 
-        .login-btn:hover { background: var(--brand-600); }
+        .login-btn:hover { background: var(--accent-hover); }
 
         .login-btn.disabled,
         .login-btn:disabled {
-            opacity: 0.5;
+            opacity: 0.6;
             cursor: default;
         }
 
@@ -604,8 +709,8 @@ pub fn app_css() -> &'static str {
             padding: 8px 14px;
             font-size: 13px;
             color: var(--status-critical);
-            background: rgba(239, 68, 68, 0.12);
-            border: 1px solid rgba(239, 68, 68, 0.25);
+            background: var(--err-bg);
+            border: 1px solid rgba(217, 154, 154, 0.25);
             border-radius: var(--radius-sm);
             max-width: 320px;
             text-align: center;
@@ -808,7 +913,7 @@ pub fn app_css() -> &'static str {
         .step-pill.active {
             border-color: var(--brand-500);
             background: var(--brand-500);
-            color: #ffffff;
+            color: var(--accent-foreground);
         }
         .step-pill.done {
             border-color: var(--status-resolved);
@@ -973,7 +1078,7 @@ pub fn app_css() -> &'static str {
             border: none;
             border-radius: var(--radius-sm);
             background: var(--brand-500);
-            color: #ffffff;
+            color: var(--accent-foreground);
             cursor: pointer;
             transition: background 0.15s;
         }
@@ -1071,7 +1176,7 @@ pub fn app_css() -> &'static str {
             border: none;
             border-radius: var(--radius-sm);
             background: var(--brand-500);
-            color: #ffffff;
+            color: var(--accent-foreground);
             cursor: pointer;
             transition: background 0.15s;
         }
@@ -1219,7 +1324,7 @@ pub fn app_css() -> &'static str {
 
         .account-sign-out-btn:hover {
             background: var(--status-critical);
-            color: #ffffff;
+            color: var(--accent-foreground);
         }
 
         .rail-action.signed-in.active {

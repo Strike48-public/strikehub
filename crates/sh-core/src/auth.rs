@@ -11,6 +11,48 @@ fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// True if `url`'s host is a development target where accepting self-signed
+/// certs is acceptable (`*.strike48.test`, `*.test`, `localhost`, loopback).
+fn is_dev_host(url: &str) -> bool {
+    let host = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("");
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.ends_with(".test")
+        || host.ends_with(".localhost")
+}
+
+/// Resolve whether TLS certificate verification should be skipped.
+///
+/// `MATRIX_TLS_INSECURE` is honored only in debug builds OR when the target
+/// host is a development host (see [`is_dev_host`]). In a release build talking
+/// to a real host the flag is IGNORED with a loud warning, so a shipped binary
+/// can't be tricked into disabling cert validation (and leaking the Keycloak
+/// JWT / OTT to a MITM) via an injected env var.
+pub fn resolve_tls_insecure(target_url: &str) -> bool {
+    let requested = std::env::var("MATRIX_TLS_INSECURE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if !requested {
+        return false;
+    }
+    if cfg!(debug_assertions) || is_dev_host(target_url) {
+        return true;
+    }
+    tracing::warn!(
+        "MATRIX_TLS_INSECURE is set but IGNORED: release build talking to non-dev host {} — refusing to disable TLS verification",
+        target_url
+    );
+    false
+}
+
 /// Manages OIDC authentication with Keycloak (discovered via Matrix publicConfig).
 ///
 /// Token is set externally after the system-browser OAuth flow completes
@@ -68,9 +110,7 @@ impl AuthManager {
             .ok()
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| Self::DEFAULT_API_URL.to_string());
-        let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let tls_insecure = resolve_tls_insecure(&matrix_url);
 
         Self::new(matrix_url, tls_insecure)
     }
@@ -449,10 +489,8 @@ fn extract_injected_token(html: &str) -> Option<String> {
     // Extract the quoted value (single or double quotes)
     let (quote, rest) = if let Some(rest) = rest.strip_prefix('\'') {
         ('\'', rest)
-    } else if let Some(rest) = rest.strip_prefix('"') {
-        ('"', rest)
     } else {
-        return None;
+        ('"', rest.strip_prefix('"')?)
     };
     let end = rest.find(quote)?;
     let token = &rest[..end];
@@ -575,9 +613,7 @@ pub async fn fetch_connector_apps(
     let base = auth.matrix_url().trim_end_matches('/');
     let url = format!("{}/api/v1alpha/graphql", base);
 
-    let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let tls_insecure = resolve_tls_insecure(base);
 
     let client = match reqwest::Client::builder()
         .danger_accept_invalid_certs(tls_insecure)
@@ -654,9 +690,7 @@ pub async fn fetch_tenant_id(
     let base = auth.matrix_url().trim_end_matches('/');
     let url = format!("{}/api/v1alpha/graphql", base);
 
-    let tls_insecure = std::env::var("MATRIX_TLS_INSECURE")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let tls_insecure = resolve_tls_insecure(base);
 
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(tls_insecure)

@@ -11,6 +11,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Ship the bundled pentest-agent easy-mode-first, matching release.yml. Read at
+  # BUILD time via option_env! in pick's config.rs, so it must be present when the
+  # connector compiles. strikehub's own easy-mode default comes from
+  # build-defaults.toml (no env var needed).
+  PICK_EASY_MODE: "true"
 
 jobs:
   fmt:
@@ -102,11 +107,42 @@ jobs:
       - name: Install rsvg-convert and protobuf
         run: brew install librsvg protobuf
 
-      - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
-
+      # Load refs + bake connector timestamps BEFORE the strikehub build, so
+      # build.rs picks up STRIKEHUB_BUNDLED_*_TS at compile time (the runtime
+      # "newest wins" seed needs them; without this the bundle is epoch-0 and the
+      # seed never fires in PR artifacts).
       - name: Load connector refs
         run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
 
       - name: Prepare dist directory
         run: mkdir -p dist
@@ -194,6 +230,35 @@ jobs:
         shell: bash
         run: cat connector-versions.env >> "$GITHUB_ENV"
 
+      # Bake connector timestamps before the strikehub build (build.rs reads them
+      # at compile time for the runtime "newest wins" seed).
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -260,11 +325,35 @@ jobs:
           chmod +x scripts/build-appimage.sh
           ./scripts/build-appimage.sh ci-test ${{ matrix.arch }}
 
-      - name: Verify AppImage
+      - name: Verify AppImage bundles GTK/WebKit runtime
         if: matrix.installer == 'appimage'
         run: |
-          ls -la StrikeHub-*.AppImage
-          chmod +x StrikeHub-*.AppImage
+          set -euo pipefail
+          AI=$(ls StrikeHub-*.AppImage | head -1)
+          chmod +x "$AI"
+          ls -la "$AI"
+          # Assert the runtime is bundled — if these libs aren't inside, the
+          # AppImage relies on the host and isn't portable (the bug we fixed).
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./"$AI" --appimage-extract >/dev/null
+          MISSING=0
+          for lib in libwebkit2gtk-4.1.so.0 libgtk-3.so.0 libxdo.so.3; do
+            find squashfs-root -name "$lib*" | grep -q . || { echo "MISSING bundled lib: $lib"; MISSING=1; }
+          done
+          find squashfs-root -name 'WebKitNetworkProcess' | grep -q . || { echo "MISSING WebKitNetworkProcess helper"; MISSING=1; }
+          # The hardcoded absolute WebKit exec path must be patched out, else the
+          # web process can't spawn on a host without webkit at that fixed path.
+          LIBWK=$(find squashfs-root -name 'libwebkit2gtk-4.1.so.0' -type f | head -1)
+          python3 -c "import re,sys; d=open('$LIBWK','rb').read(); sys.exit(1 if re.search(rb'/usr/lib/[a-z0-9_]+-linux-gnu/webkit2gtk-4\.1\x00', d) else 0)" \
+            && echo "webkit exec path patched to relative ✓" \
+            || { echo "MISSING: libwebkit still has an absolute webkit2gtk-4.1 exec path (patch failed)"; MISSING=1; }
+          # Connectors must remain usr/bin siblings (resolver + newest-wins seed).
+          for c in pentest-agent ks-connector; do
+            find squashfs-root/usr/bin -maxdepth 1 -name "$c" | grep -q . || { echo "MISSING connector sibling: usr/bin/$c"; MISSING=1; }
+          done
+          rm -rf squashfs-root
+          [ "$MISSING" -eq 0 ] || { echo "AppImage is NOT portable — runtime not bundled."; exit 1; }
+          echo "AppImage bundles the GTK/WebKit runtime + keeps connector siblings ✓"
 
       - uses: actions/upload-artifact@v4
         if: matrix.installer == 'appimage'

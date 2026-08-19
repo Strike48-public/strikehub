@@ -488,11 +488,12 @@ async fn fetch_oidc_config(
 // ---------------------------------------------------------------------------
 
 fn success_page(matrix_base_url: &str) -> String {
-    let studio_url = format!("{}/studio/", matrix_base_url.trim_end_matches('/'));
+    // Redirect to the app root, not /studio/ — StrikeHub is the shell.
+    let home_url = format!("{}/", matrix_base_url.trim_end_matches('/'));
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>StrikeHub - Signed In</title>
-<meta http-equiv="refresh" content="0;url={studio_url}">
+<meta http-equiv="refresh" content="0;url={home_url}">
 <style>
   body {{ font-family: system-ui, sans-serif; display: flex; align-items: center;
          justify-content: center; min-height: 100vh; margin: 0;
@@ -502,8 +503,8 @@ fn success_page(matrix_base_url: &str) -> String {
   .status {{ color: #888; font-size: 14px; }}
   a {{ color: #4ade80; }}
 </style></head><body>
-<script>window.location.replace('{studio_url}');</script>
-<div class="container"><h2>Signed in!</h2><p class="status">Redirecting to <a href="{studio_url}">Studio</a>…</p></div>
+<script>window.location.replace('{home_url}');</script>
+<div class="container"><h2>Signed in!</h2><p class="status">Redirecting…</p></div>
 </body></html>"#
     )
 }

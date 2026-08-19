@@ -31,6 +31,12 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Ship the bundled pentest-agent easy-mode-first. Read at BUILD time via
+  # option_env! in pick's config.rs, so it must be present when the connector
+  # compiles (applies to every job/step). NOTE: strikehub's own easy-mode default
+  # is NOT set here — build.rs bakes it from build-defaults.toml ([easy_mode]
+  # default), which overrides any ambient env, so a var here would be dead.
+  PICK_EASY_MODE: "true"
 
 # Versioning: Cargo.toml is bumped in the same PR that ships the change.
 # Each job below re-stamps Cargo.toml from the tag at build time, so
@@ -120,6 +126,43 @@ jobs:
 
       - name: Load connector refs
         run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Bake each pinned connector's git commit timestamp (ISO-8601 UTC) into
+          # the strikehub binary so the runtime "newest wins" resolver knows what
+          # this install shipped. Uses the GitHub API (no full clone needed here;
+          # the connectors are cloned+built in later steps).
+          # Resolve a ref's commit date (ISO-8601 …Z). Best-effort: a failed
+          # lookup prints nothing and returns 0, so the step never aborts under
+          # `set -e -o pipefail` (a missing ts just bakes epoch-0 → that connector
+          # won't seed, which is safe). Try the branches endpoint FIRST because it
+          # handles slash-containing branch names (e.g. josh/catching-up) that the
+          # commits/<ref> path misinterprets; fall back to commits/ for tags/SHAs.
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -312,6 +355,43 @@ jobs:
         shell: bash
         run: cat connector-versions.env >> "$GITHUB_ENV"
 
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Bake each pinned connector's git commit timestamp (ISO-8601 UTC) into
+          # the strikehub binary so the runtime "newest wins" resolver knows what
+          # this install shipped. Uses the GitHub API (no full clone needed here;
+          # the connectors are cloned+built in later steps).
+          # Resolve a ref's commit date (ISO-8601 …Z). Best-effort: a failed
+          # lookup prints nothing and returns 0, so the step never aborts under
+          # `set -e -o pipefail` (a missing ts just bakes epoch-0 → that connector
+          # won't seed, which is safe). Try the branches endpoint FIRST because it
+          # handles slash-containing branch names (e.g. josh/catching-up) that the
+          # commits/<ref> path misinterprets; fall back to commits/ for tags/SHAs.
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -378,7 +458,39 @@ jobs:
           chmod +x scripts/build-appimage.sh
           TAG_VERSION="${{ github.ref_name }}"
           VERSION="${TAG_VERSION#v}"
+          # ref_name may be a branch on workflow_dispatch (e.g. feat/easy-mode);
+          # a '/' in the version breaks the output filename (mksquashfs can't
+          # create a path with a missing dir). Sanitize to a flat token.
+          VERSION="${VERSION//\//-}"
           ./scripts/build-appimage.sh "$VERSION" "${{ matrix.arch }}"
+
+      - name: Verify AppImage bundles GTK/WebKit runtime
+        if: matrix.installer == 'appimage'
+        run: |
+          set -euo pipefail
+          AI=$(ls StrikeHub-*.AppImage | head -1)
+          chmod +x "$AI"
+          # Assert the runtime is bundled — if these libs aren't inside, the
+          # AppImage relies on the host and isn't portable (the bug we fixed).
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./"$AI" --appimage-extract >/dev/null
+          MISSING=0
+          for lib in libwebkit2gtk-4.1.so.0 libgtk-3.so.0 libxdo.so.3; do
+            find squashfs-root -name "$lib*" | grep -q . || { echo "MISSING bundled lib: $lib"; MISSING=1; }
+          done
+          find squashfs-root -name 'WebKitNetworkProcess' | grep -q . || { echo "MISSING WebKitNetworkProcess helper"; MISSING=1; }
+          # The hardcoded absolute WebKit exec path must be patched out, else the
+          # web process can't spawn on a host without webkit at that fixed path.
+          LIBWK=$(find squashfs-root -name 'libwebkit2gtk-4.1.so.0' -type f | head -1)
+          python3 -c "import re,sys; d=open('$LIBWK','rb').read(); sys.exit(1 if re.search(rb'/usr/lib/[a-z0-9_]+-linux-gnu/webkit2gtk-4\.1\x00', d) else 0)" \
+            && echo "webkit exec path patched to relative ✓" \
+            || { echo "MISSING: libwebkit still has an absolute webkit2gtk-4.1 exec path (patch failed)"; MISSING=1; }
+          for c in pentest-agent ks-connector; do
+            find squashfs-root/usr/bin -maxdepth 1 -name "$c" | grep -q . || { echo "MISSING connector sibling: usr/bin/$c"; MISSING=1; }
+          done
+          rm -rf squashfs-root
+          [ "$MISSING" -eq 0 ] || { echo "AppImage is NOT portable — runtime not bundled."; exit 1; }
+          echo "AppImage bundles the GTK/WebKit runtime + keeps connector siblings ✓"
 
       - name: Generate checksum (AppImage)
         if: matrix.installer == 'appimage'
@@ -413,7 +525,13 @@ jobs:
         if: matrix.installer == 'msi'
         shell: pwsh
         run: |
-          $Version = "${{ github.ref_name }}".TrimStart("v")
+          # WiX Product/@Version must be numeric x.x.x.x, so it can't be a branch
+          # name (workflow_dispatch sets ref_name to e.g. feat/easy-mode). Always
+          # build the MSI with the numeric Cargo.toml version; the artifact is
+          # renamed to the static name below regardless, so the branch label isn't
+          # needed in the filename.
+          $Version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          Write-Host "MSI ProductVersion: $Version"
           .\scripts\build-msi.ps1 -Version $Version -Arch ${{ matrix.arch }}
           Move-Item "StrikeHub-$Version-${{ matrix.arch }}.msi" "dist\${{ matrix.artifact }}.msi"
 
@@ -492,6 +610,43 @@ jobs:
       - name: Load connector refs
         run: cat connector-versions.env >> "$GITHUB_ENV"
 
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Bake each pinned connector's git commit timestamp (ISO-8601 UTC) into
+          # the strikehub binary so the runtime "newest wins" resolver knows what
+          # this install shipped. Uses the GitHub API (no full clone needed here;
+          # the connectors are cloned+built in later steps).
+          # Resolve a ref's commit date (ISO-8601 …Z). Best-effort: a failed
+          # lookup prints nothing and returns 0, so the step never aborts under
+          # `set -e -o pipefail` (a missing ts just bakes epoch-0 → that connector
+          # won't seed, which is safe). Try the branches endpoint FIRST because it
+          # handles slash-containing branch names (e.g. josh/catching-up) that the
+          # commits/<ref> path misinterprets; fall back to commits/ for tags/SHAs.
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -554,6 +709,9 @@ jobs:
         run: |
           TAG_VERSION="${{ github.ref_name }}"
           VERSION="${TAG_VERSION#v}"
+          # ref_name may be a branch on workflow_dispatch (e.g. feat/easy-mode);
+          # a '/' breaks the .dmg filename and the Info.plist version fields.
+          VERSION="${VERSION//\//-}"
           ./scripts/build-dmg.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Notarize DMG

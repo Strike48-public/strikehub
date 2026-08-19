@@ -3,6 +3,8 @@ pub mod auth;
 pub mod bridge;
 pub mod config;
 pub mod connector_fetch;
+pub mod connector_seed;
+pub mod connector_version;
 pub mod embedded;
 pub mod error;
 pub mod ipc;
@@ -23,15 +25,19 @@ pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant
 pub use bridge::{BridgeState, SharedBridgeState, new_bridge_state};
 pub use config::{
     AllowlistConfig, ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport,
-    DynamicConnectorDef, HubConfig, generate_instance_id, slug_from_path, url_slug,
+    DynamicConnectorDef, HubConfig, default_easy_mode, generate_instance_id, resolve_easy_mode,
+    slug_from_path, url_slug,
 };
 pub use connector_fetch::{EnsureResult, bin_cache_dir, ensure_all_connector_binaries};
+pub use connector_seed::seed_bundled_connectors;
 pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
 pub use matrix_ws::MatrixWsClient;
 pub use oauth::{js_string_escape, start_oauth_flow, start_oauth_flow_with};
-pub use ott::{create_pre_approved_token, has_saved_credentials, sdk_connector_type};
+pub use ott::{
+    PreApprovedOtt, create_pre_approved_token, has_saved_credentials, sdk_connector_type,
+};
 pub use preflight::{
     AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,

@@ -7,6 +7,15 @@ use std::path::PathBuf;
 
 use crate::registry::ConnectorManifest;
 
+/// Decide whether to download: yes if no binary is cached, or the release is
+/// strictly newer than the cached record. Split out so the rule is unit-tested.
+pub(crate) fn should_download(binary_exists: bool, cached_ts: &str, release_ts: &str) -> bool {
+    if !binary_exists {
+        return true;
+    }
+    crate::connector_version::is_newer(release_ts, cached_ts)
+}
+
 /// Result of ensuring a connector binary is available.
 #[derive(Debug)]
 pub enum EnsureResult {
@@ -102,9 +111,9 @@ async fn ensure_connector_binary_inner(
     let binary_path = cache_dir.join(&binary_filename);
     let version_path = cache_dir.join(format!("{}.version", binary_name));
 
-    // Fetch latest release tag from GitHub
-    let latest_tag = match fetch_latest_release(client, repo).await {
-        Ok(tag) => tag,
+    // Fetch latest release tag + publish time from GitHub
+    let (latest_tag, latest_ts) = match fetch_latest_release(client, repo).await {
+        Ok(pair) => pair,
         Err(e) => {
             let msg = format!("failed to fetch latest release for {}: {}", repo, e);
             tracing::warn!("{}", msg);
@@ -115,15 +124,14 @@ async fn ensure_connector_binary_inner(
         }
     };
 
-    // Check if we already have this version
-    if binary_path.exists()
-        && let Ok(cached_version) = std::fs::read_to_string(&version_path)
-        && cached_version.trim() == latest_tag
-    {
+    // Skip the download unless the release is strictly newer than what's cached.
+    let cached = crate::connector_version::read_version_file(&version_path);
+    if !should_download(binary_path.exists(), &cached.ts, &latest_ts) {
         tracing::debug!(
-            "connector '{}' already at version {}",
+            "connector '{}' cache is current (cached ts {}, release ts {})",
             manifest.id,
-            latest_tag
+            cached.ts,
+            latest_ts
         );
         return EnsureResult::AlreadyCurrent(binary_path);
     }
@@ -243,8 +251,9 @@ async fn ensure_connector_binary_inner(
         }
     }
 
-    // Write version file
-    if let Err(e) = std::fs::write(&version_path, &latest_tag) {
+    // Write version record (JSON: ref + source/publish timestamp).
+    let record = crate::connector_version::ConnectorVersion::new(latest_tag.clone(), latest_ts);
+    if let Err(e) = crate::connector_version::write_version_file(&version_path, &record) {
         tracing::warn!("failed to write version file: {}", e);
     }
 
@@ -284,8 +293,11 @@ pub async fn ensure_all_connector_binaries(
     futures::future::join_all(futures).await
 }
 
-/// Fetch the latest release tag name from a GitHub repo.
-async fn fetch_latest_release(client: &reqwest::Client, repo: &str) -> Result<String, String> {
+/// Fetch the latest release tag name and publish timestamp from a GitHub repo.
+async fn fetch_latest_release(
+    client: &reqwest::Client,
+    repo: &str,
+) -> Result<(String, String), String> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
 
     let resp = client
@@ -304,10 +316,19 @@ async fn fetch_latest_release(client: &reqwest::Client, repo: &str) -> Result<St
         .await
         .map_err(|e| format!("failed to parse response: {}", e))?;
 
-    json.get("tag_name")
+    let tag = json
+        .get("tag_name")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| "no tag_name in release response".into())
+        .ok_or_else(|| "no tag_name in release response".to_string())?;
+    // published_at is ISO-8601 UTC (e.g. 2026-08-06T14:03:22Z). Fall back to the
+    // empty string (epoch-0) if absent so a cached copy with a real ts wins.
+    let published_at = json
+        .get("published_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok((tag, published_at))
 }
 
 /// Download an asset from a URL, following redirects.
@@ -778,5 +799,38 @@ mod tests {
         };
 
         assert!(manifest.asset_name().is_none());
+    }
+}
+
+#[cfg(test)]
+mod newest_tests {
+    use super::should_download;
+
+    #[test]
+    fn downloads_when_release_is_newer_than_cache() {
+        assert!(should_download(
+            true,                   // binary_exists
+            "2026-08-05T00:00:00Z", // cached ts
+            "2026-08-06T00:00:00Z", // release ts
+        ));
+    }
+
+    #[test]
+    fn skips_when_cache_is_current_or_newer() {
+        assert!(!should_download(
+            true,
+            "2026-08-06T00:00:00Z",
+            "2026-08-06T00:00:00Z"
+        ));
+        assert!(!should_download(
+            true,
+            "2026-08-07T00:00:00Z",
+            "2026-08-06T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn downloads_when_no_binary_cached_regardless_of_ts() {
+        assert!(should_download(false, "2026-08-09T00:00:00Z", ""));
     }
 }

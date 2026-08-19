@@ -115,6 +115,7 @@ async fn main() {
             connectors: Default::default(),
             instance_ids: Default::default(),
             studio_url: None,
+            easy_mode: None,
             allowlist: Default::default(),
             dynamic_connectors: Vec::new(),
         }

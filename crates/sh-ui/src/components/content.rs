@@ -26,7 +26,13 @@ pub fn ContentArea(
     #[props(default)] hovered_id: Option<String>,
     #[props(default = 0)] auth_version: u32,
     #[props(default = false)] dev_mode: bool,
+    #[props(default = false)] easy_mode: bool,
+    #[props(default)] on_toggle_easy_mode: Option<EventHandler<()>>,
 ) -> Element {
+    // Tracks the connector URL whose iframe has finished loading, so we can
+    // fade it in and suppress the unstyled first-frame flash (FOUC).
+    let mut loaded_url = use_signal(|| None::<String>);
+
     // Choose the content URL based on transport mode:
     //   IPC  → connector://{id}/liveview  (custom protocol handler via bridge)
     //          Bridge injects __MATRIX_API_URL__ pointing at the auth proxy,
@@ -86,16 +92,28 @@ pub fn ContentArea(
                     on_hover: on_hover,
                     hovered_id: hovered_id.clone(),
                     dev_mode: dev_mode,
+                    easy_mode: easy_mode,
+                    on_toggle_easy_mode: on_toggle_easy_mode,
                 }
             } else {
                 match (&active_name, &url, &active_status) {
                     (Some(_name), Some(url), Some(ConnectorStatus::Online)) => {
+                        // Fade the iframe in once it has loaded, over a dark
+                        // wrapper background. This hides the brief unstyled flash
+                        // (white page + logo) some connectors show before their
+                        // own CSS applies — a central FOUC guard so each subapp
+                        // doesn't have to solve it. `key` on the URL remounts the
+                        // iframe per connector so `onload` fires on every switch.
+                        let onload_url = url.clone();
+                        let is_loaded = loaded_url.read().as_deref() == Some(url.as_str());
                         rsx! {
                             div { class: "content-frame-wrapper",
                                 iframe {
-                                    class: "content-webview",
+                                    key: "{url}",
+                                    class: if is_loaded { "content-webview loaded" } else { "content-webview" },
                                     src: "{url}",
                                     allow: "clipboard-read; clipboard-write; autoplay; fullscreen; accelerometer; gyroscope",
+                                    onload: move |_| loaded_url.set(Some(onload_url.clone())),
                                 }
                             }
                         }
