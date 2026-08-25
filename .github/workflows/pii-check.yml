@@ -10,6 +10,16 @@ permissions:
   pull-requests: read
 
 jobs:
+  # Self-test the scanner itself. Needs no secret, so it always runs and guards
+  # the fixed-string / fail-loud behavior (esp. names with regex metacharacters).
+  self-test:
+    name: Scanner self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scanner regression tests
+        run: bash scripts/test-check-pii.sh
+
   check-pii:
     name: Scan for customer names
     runs-on: ubuntu-latest
@@ -18,6 +28,9 @@ jobs:
     # Secrets and variables -> Actions -> PII_NAMES (newline- or comma-separated).
     env:
       PII_NAMES: ${{ secrets.PII_NAMES }}
+      # Redact matched content: on a hit the scanner prints only the location,
+      # never the name, so a customer name never lands in this public CI log.
+      PII_REDACT: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,6 +77,10 @@ jobs:
           echo "Scanning diff for added lines between $BASE_SHA..$HEAD_SHA"
           # Only scan added lines (lines starting with '+' but not '+++') to avoid
           # tripping on unchanged historical content or on removal of bad content.
-          git diff "$BASE_SHA..$HEAD_SHA" -- . ':!scripts/check-pii.sh' ':!.github/workflows/pii-check.yml' \
-            | grep -E '^\+[^+]' \
-            | scripts/check-pii.sh
+          # `|| true` keeps a deletion-only diff (grep finds nothing, exits 1)
+          # from failing the step under the runner's `pipefail` shell.
+          added="$(
+            git diff "$BASE_SHA..$HEAD_SHA" -- . ':!scripts/check-pii.sh' ':!.github/workflows/pii-check.yml' \
+              | grep -E '^\+[^+]' || true
+          )"
+          printf '%s\n' "$added" | scripts/check-pii.sh

@@ -14,8 +14,9 @@ fi
 # 2. PII scan - block customer/tenant names from landing in this public repo.
 # Scan only the added lines in staged changes. `git diff --cached` shows what's
 # about to be committed; grep '^+[^+]' filters to additions only (ignoring the
-# '+++' file-header lines). The scanner itself and its workflow/hooks are
-# excluded because they legitimately contain the banned names as definitions.
+# '+++' file-header lines). The scanner and its workflow are excluded (they name
+# the excluded paths, not customer names); this exclude set matches
+# pii-check.yml so the local and CI scans cover the same files.
 SCANNER="$(git rev-parse --show-toplevel)/scripts/check-pii.sh"
 if [[ -x "$SCANNER" ]]; then
     echo "  Checking for customer names (PII)..."
@@ -23,15 +24,20 @@ if [[ -x "$SCANNER" ]]; then
         git diff --cached -- . \
             ':!scripts/check-pii.sh' \
             ':!.github/workflows/pii-check.yml' \
-            ':!.githooks/pre-commit' \
-            ':!.githooks/commit-msg' \
         | grep -E '^\+[^+]' || true
     )"
     if [[ -n "$added_lines" ]]; then
-        if ! printf '%s\n' "$added_lines" | "$SCANNER" >&2; then
+        pii_rc=0
+        printf '%s\n' "$added_lines" | "$SCANNER" >&2 || pii_rc=$?
+        if [[ $pii_rc -eq 1 ]]; then
             echo "" >&2
             echo "Commit blocked: customer names (PII) found in staged changes." >&2
             echo "Remove the customer names above and retry, or bypass with --no-verify (not recommended)." >&2
+            exit 1
+        elif [[ $pii_rc -ge 2 ]]; then
+            echo "" >&2
+            echo "Commit blocked: PII scanner is not configured (no name list)." >&2
+            echo "Run scripts/install-hooks.sh or create .pii-names.local. See scripts/check-pii.sh." >&2
             exit 1
         fi
     fi

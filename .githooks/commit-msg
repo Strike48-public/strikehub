@@ -11,9 +11,16 @@ if [[ ! -x "$SCANNER" ]]; then
     exit 0
 fi
 
-if ! "$SCANNER" "$MSG_FILE" >&2; then
+pii_rc=0
+"$SCANNER" "$MSG_FILE" >&2 || pii_rc=$?
+if [[ $pii_rc -eq 1 ]]; then
     echo "" >&2
     echo "Commit blocked: customer names (PII) found in commit message." >&2
+    exit 1
+elif [[ $pii_rc -ge 2 ]]; then
+    echo "" >&2
+    echo "Commit blocked: PII scanner is not configured (no name list)." >&2
+    echo "Run scripts/install-hooks.sh or create .pii-names.local. See scripts/check-pii.sh." >&2
     exit 1
 fi
 
