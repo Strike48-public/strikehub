@@ -85,7 +85,14 @@
           # GBM_BACKENDS_PATH and LIBGL_DRIVERS_PATH replace Mesa's NixOS-only
           # /run/opengl-driver default, which does not exist on a non-NixOS host
           # (otherwise: "MESA-LOADER: failed to open dri" and software fallback).
-          export __EGL_VENDOR_LIBRARY_DIRS="${pkgs.mesa}/share/glvnd/egl_vendor.d"
+          #
+          # Setting __EGL_VENDOR_LIBRARY_DIRS REPLACES libglvnd's default search,
+          # so the host dirs are listed after Mesa rather than dropped: a machine
+          # whose GPU needs a non-Mesa vendor ICD (the proprietary NVIDIA driver
+          # ships 10_nvidia.json there) would otherwise be left with a Mesa EGL
+          # that cannot drive it. Mesa stays first, so Mesa-backed GPUs (Intel,
+          # AMD via radeonsi, nouveau) keep the path verified here.
+          export __EGL_VENDOR_LIBRARY_DIRS="${pkgs.mesa}/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d:/etc/glvnd/egl_vendor.d"
           export GBM_BACKENDS_PATH="${pkgs.mesa}/lib/gbm"
           export LIBGL_DRIVERS_PATH="${pkgs.mesa}/lib/dri"
         '';
