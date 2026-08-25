@@ -10,6 +10,10 @@ setup:
     git config core.hooksPath .githooks
     @echo "✓ git hooks installed (.githooks/pre-commit)"
 
+# Sync .pii-names.local to the PII_NAMES CI secret (--repo for repo-only scope)
+pii-sync *args:
+    scripts/set-pii-names.sh {{args}}
+
 # Build all connectors and StrikeHub, copy binaries, then run
 default: build-all run
 
