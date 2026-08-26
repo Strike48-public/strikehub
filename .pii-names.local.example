@@ -13,9 +13,13 @@
 # them would flag nearly every commit and PR. Prefer a distinctive full name
 # over a short token (e.g. "TE Connectivity", not "TE").
 #
-# To push this list to CI, run `just pii-sync` (or scripts/set-pii-names.sh),
-# which uploads it to the $PII_NAMES secret - see .github/workflows/pii-check.yml.
-# Secrets are write-only, so re-run after every edit here.
+# Sharing the list with the team (it must never be committed here):
+#   just pii-pull   fetch the shared list into .pii-names.local (developers).
+#                   Set PII_NAMES_REPO to the PRIVATE source repo first, e.g.
+#                   `PII_NAMES_REPO=Strike48/<repo> just pii-pull`.
+#   just pii-sync   push .pii-names.local to the $PII_NAMES CI secret
+#                   (maintainers) - see .github/workflows/pii-check.yml.
+# Secrets are write-only, so re-run pii-sync after every edit to the list.
 
 example-customer-one
 example-customer-two
