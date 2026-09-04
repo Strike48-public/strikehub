@@ -12,7 +12,7 @@ fi
 
 VERSION=${1:-latest}
 ARCH=${2:-x86_64}
-PICK_VERSION=${PICK_VERSION:-v0.1.2}
+PICK_VERSION=${PICK_VERSION:-v0.1.10}
 KUBESTUDIO_VERSION=${KUBESTUDIO_VERSION:-v0.1.3}
 
 echo "Building StrikeHub AppImage with connectors..."
@@ -33,30 +33,40 @@ echo "Preparing connectors..."
 mkdir -p dist
 cd dist
 
-# Download pentest-agent (Pick connector)
+# Download pentest-agent (Pick connector).
+# Pick v0.1.9 renamed the release archive pentest-agent-* -> pick-agent-*; the
+# binary inside is still "pentest-agent", so only the archive name changed.
 echo "Downloading pentest-agent..."
 if [ ! -f "pentest-agent" ]; then
     if command -v gh &> /dev/null; then
         gh release download $PICK_VERSION \
             --repo Strike48-public/pick \
-            --pattern "pentest-agent-linux-x86_64.tar.gz" \
+            --pattern "pick-agent-linux-x86_64.tar.gz" \
             2>/dev/null || {
             echo "WARNING: Could not download pentest-agent from GitHub"
-            echo "Try: wget https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pentest-agent-linux-x86_64.tar.gz"
+            echo "Try: wget https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pick-agent-linux-x86_64.tar.gz"
         }
     else
-        wget -q "https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pentest-agent-linux-x86_64.tar.gz" || {
+        wget -q "https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pick-agent-linux-x86_64.tar.gz" || {
             echo "WARNING: Could not download pentest-agent"
         }
     fi
 
-    if [ -f "pentest-agent-linux-x86_64.tar.gz" ]; then
-        tar -xzf pentest-agent-linux-x86_64.tar.gz
-        rm -f pentest-agent-linux-x86_64.tar.gz
+    if [ -f "pick-agent-linux-x86_64.tar.gz" ]; then
+        tar -xzf pick-agent-linux-x86_64.tar.gz
+        rm -f pick-agent-linux-x86_64.tar.gz
         echo "✓ pentest-agent downloaded"
     fi
 else
     echo "✓ pentest-agent already exists"
+fi
+
+# Fail loud rather than building an AppImage without the Pick connector: a bad
+# asset name or a failed download must not silently produce a broken bundle.
+if [ ! -f "pentest-agent" ]; then
+    echo "ERROR: pentest-agent binary missing - cannot bundle the Pick connector." >&2
+    echo "Ensure pick $PICK_VERSION publishes pick-agent-linux-x86_64.tar.gz." >&2
+    exit 1
 fi
 
 # Download ks-connector (KubeStudio connector)
