@@ -71,15 +71,24 @@
         };
 
         shellHook = ''
-          # buildInputs only affects compile/link env, not the runtime loader,
-          # so desktop/test binaries that dlopen GTK/WebKit/openssl need these
-          # on LD_LIBRARY_PATH to run under `nix develop`.
-          export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath desktopLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-          # GIO loads its TLS backend (from glib-networking) as a dynamic module
-          # discovered via GIO_EXTRA_MODULES. Point it at the gio-modules dir so
-          # WebKit/libsoup can do HTTPS (otherwise: "TLS support not available").
-          export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
+          # Runtime libs (and the GIO TLS module dir) for the Nix-built desktop
+          # and desktop-test binaries, which dlopen GTK/WebKit/openssl at runtime
+          # (buildInputs only affects compile/link, not the loader).
+          #
+          # We deliberately DO NOT export these as LD_LIBRARY_PATH /
+          # GIO_EXTRA_MODULES. direnv injects this shell's env into EVERY command
+          # run in the repo, host binaries included, and a global LD_LIBRARY_PATH
+          # force-loads Nix's glibc-2.42 libs (openssl, xz, ...) into system
+          # tools built against glibc 2.39 -> "GLIBC_ABI_DT_X86_64_PLT not found"
+          # (breaks ssh, scp, curl, and so `git push` and `just remote-build`).
+          #
+          # Instead export them under neutral names the loader ignores; the just
+          # recipes that actually execute the desktop binary (`run`, `test`)
+          # promote them to the real vars for that one process. Connectors the
+          # app launches inherit LD_LIBRARY_PATH from the app's env, so they
+          # still resolve their libs.
+          export STRIKEHUB_RUNTIME_LIBS="${pkgs.lib.makeLibraryPath desktopLibs}"
+          export STRIKEHUB_GIO_MODULES="${pkgs.glib-networking}/lib/gio/modules"
 
           # libglvnd dispatches to a vendor EGL named by these JSON manifests;
           # GBM_BACKENDS_PATH and LIBGL_DRIVERS_PATH replace Mesa's NixOS-only

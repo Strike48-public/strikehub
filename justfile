@@ -33,9 +33,19 @@ build-hub:
     cargo build --features desktop
     @echo "✓ strikehub updated"
 
-# Run StrikeHub: kill stale processes then launch (preserves credentials)
+# Run StrikeHub: kill stale processes then launch (preserves credentials).
+# Promotes the Nix runtime libs (exported under neutral names by the dev shell
+# so they don't poison host tools like ssh/git; see flake.nix) to the real
+# loader vars for this process only.
 run: kill
-    RUST_LOG=info cargo run --features desktop
+    LD_LIBRARY_PATH="${STRIKEHUB_RUNTIME_LIBS:-}" GIO_EXTRA_MODULES="${STRIKEHUB_GIO_MODULES:-}" \
+      RUST_LOG=info cargo run --features desktop
+
+# Run the workspace test suite. Uses the same runtime-lib promotion as `run`
+# so desktop test binaries that dlopen WebKit can load their libs in the shell.
+test *args:
+    LD_LIBRARY_PATH="${STRIKEHUB_RUNTIME_LIBS:-}" GIO_EXTRA_MODULES="${STRIKEHUB_GIO_MODULES:-}" \
+      cargo test --features desktop {{args}}
 
 # Clean rebuild everything from scratch
 rebuild-all: clean-all build-all
@@ -138,6 +148,27 @@ build-appimage profile="release" version="0.0.0-dev": build-all
     BIN_DIR="$BIN_DIR" ./scripts/build-appimage.sh "{{version}}" "$ARCH"
     echo ""
     ls -lh StrikeHub-*.AppImage
+
+# Run a built AppImage in a clean environment. The AppImage bundles its own
+# GTK/WebKit, so we strip LD_LIBRARY_PATH/GIO_EXTRA_MODULES defensively in case
+# either is set in the caller's env: Nix's glibc-2.42 libs force-loaded into
+# AppImageLauncher (system glibc 2.39) cause "GLIBC_ABI_* not found". Defaults
+# to the newest StrikeHub-*.AppImage.
+run-appimage image="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMG="{{image}}"
+    if [ -z "$IMG" ]; then
+        IMG="$(ls -1t StrikeHub-*.AppImage 2>/dev/null | head -1 || true)"
+    fi
+    if [ -z "$IMG" ] || [ ! -f "$IMG" ]; then
+        echo "No AppImage found. Build one with 'just build-appimage' or pass a path."
+        exit 1
+    fi
+    [[ "$IMG" == /* || "$IMG" == ./* ]] || IMG="./$IMG"
+    chmod +x "$IMG"
+    echo "→ Running $IMG in a clean environment..."
+    exec env -u LD_LIBRARY_PATH -u GIO_EXTRA_MODULES "$IMG"
 
 # Update connector-versions.env to the latest main HEAD of each connector repo
 pin:
