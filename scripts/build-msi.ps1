@@ -3,12 +3,23 @@ param(
     [string]$Arch = "x86_64",
     # Pick release to bundle when the pentest-agent binary is not pre-staged in
     # dist/ (local/offline builds). CI builds pentest-agent from source instead,
-    # so this only applies to manual builds. Keep in step with the release
-    # pipeline's PICK_REF.
-    [string]$PickVersion = "v0.1.10"
+    # so this only applies to manual builds. Empty means "read PICK_REF from
+    # connector-versions.env" below, so this default can't drift from the pipeline.
+    [string]$PickVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# Default the Pick version to the release tag pinned in connector-versions.env
+# (the same file CI/release reads) unless the caller passed -PickVersion.
+if (-not $PickVersion) {
+    $PickVersion = "v0.1.10"
+    $verFile = Join-Path $PSScriptRoot "..\connector-versions.env"
+    if (Test-Path $verFile) {
+        $m = Select-String -Path $verFile -Pattern '^\s*PICK_REF\s*=\s*(.+?)\s*$'
+        if ($m) { $PickVersion = $m.Matches[0].Groups[1].Value }
+    }
+}
 
 # Map arch to Rust target triple and WiX arch identifier
 switch ($Arch) {
@@ -80,11 +91,30 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
         # The binary inside is still pentest-agent.exe, so downstream stays the same.
         $paUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/pick-agent-windows-x86_64.zip"
         Invoke-WebRequest -Uri $paUrl -OutFile "dist\pentest-agent.zip"
+
+        # Verify against the release's SHA256SUMS.txt before trusting the archive:
+        # this executable ships inside the installer, so a tampered or re-uploaded
+        # asset must fail the build rather than flow into the MSI.
+        $sumsUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/SHA256SUMS.txt"
+        Invoke-WebRequest -Uri $sumsUrl -OutFile "dist\SHA256SUMS.txt"
+        $expected = Get-Content "dist\SHA256SUMS.txt" |
+            Where-Object { $_ -match '\s+pick-agent-windows-x86_64\.zip\s*$' } |
+            ForEach-Object { ($_ -split '\s+')[0] } |
+            Select-Object -First 1
+        if (-not $expected) {
+            throw "no SHA256 entry for pick-agent-windows-x86_64.zip in pick $PickVersion"
+        }
+        $actual = (Get-FileHash "dist\pentest-agent.zip" -Algorithm SHA256).Hash
+        if ($actual -ne $expected.Trim().ToUpper()) {
+            throw "SHA256 checksum mismatch for pick-agent-windows-x86_64.zip"
+        }
+        Remove-Item "dist\SHA256SUMS.txt"
+
         Expand-Archive -Path "dist\pentest-agent.zip" -DestinationPath "dist" -Force
         Remove-Item "dist\pentest-agent.zip"
-        Write-Host "  downloaded" -ForegroundColor Green
+        Write-Host "  downloaded and checksum-verified" -ForegroundColor Green
     } catch {
-        Write-Host "  WARNING: could not download pentest-agent" -ForegroundColor Yellow
+        Write-Host "  WARNING: could not download/verify pentest-agent: $_" -ForegroundColor Yellow
     }
 }
 
