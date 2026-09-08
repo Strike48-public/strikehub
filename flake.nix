@@ -46,6 +46,12 @@
         # libxcb.so.1. Connectors inherit this shell's LD_LIBRARY_PATH, so
         # these must be present here for a sibling-workspace connector to run.
         xorg.libxcb libpcap dbus
+        # EGL/GL provider. WebKitGTK dlopens libEGL.so.1, and binaries built
+        # here use the Nix loader, which does not read /etc/ld.so.cache, so the
+        # host's Mesa is invisible and nothing in WebKit's own RUNPATH supplies
+        # EGL. Without these the web process aborts with "Could not create
+        # default EGL display: EGL_BAD_PARAMETER" and the window never appears.
+        libglvnd mesa libdrm
       ];
 
       # ----- macOS dev shell (toolchain + build tools only) -----
@@ -74,6 +80,21 @@
           # discovered via GIO_EXTRA_MODULES. Point it at the gio-modules dir so
           # WebKit/libsoup can do HTTPS (otherwise: "TLS support not available").
           export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
+
+          # libglvnd dispatches to a vendor EGL named by these JSON manifests;
+          # GBM_BACKENDS_PATH and LIBGL_DRIVERS_PATH replace Mesa's NixOS-only
+          # /run/opengl-driver default, which does not exist on a non-NixOS host
+          # (otherwise: "MESA-LOADER: failed to open dri" and software fallback).
+          #
+          # Setting __EGL_VENDOR_LIBRARY_DIRS REPLACES libglvnd's default search,
+          # so the host dirs are listed after Mesa rather than dropped: a machine
+          # whose GPU needs a non-Mesa vendor ICD (the proprietary NVIDIA driver
+          # ships 10_nvidia.json there) would otherwise be left with a Mesa EGL
+          # that cannot drive it. Mesa stays first, so Mesa-backed GPUs (Intel,
+          # AMD via radeonsi, nouveau) keep the path verified here.
+          export __EGL_VENDOR_LIBRARY_DIRS="${pkgs.mesa}/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d:/etc/glvnd/egl_vendor.d"
+          export GBM_BACKENDS_PATH="${pkgs.mesa}/lib/gbm"
+          export LIBGL_DRIVERS_PATH="${pkgs.mesa}/lib/dri"
         '';
       };
 
