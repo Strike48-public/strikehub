@@ -12,8 +12,18 @@ fi
 
 VERSION=${1:-latest}
 ARCH=${2:-x86_64}
-PICK_VERSION=${PICK_VERSION:-v0.1.2}
-KUBESTUDIO_VERSION=${KUBESTUDIO_VERSION:-v0.1.3}
+
+# Default connector versions to the release tags pinned in connector-versions.env
+# (the same file CI/release reads) so these offline-build defaults can't drift
+# from the pipeline; still overridable via the PICK_VERSION/KUBESTUDIO_VERSION env
+# vars. These must be release *tags* for the download paths below.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$REPO_ROOT/connector-versions.env" ]; then
+    # shellcheck disable=SC1090,SC1091
+    source "$REPO_ROOT/connector-versions.env"
+fi
+PICK_VERSION=${PICK_VERSION:-${PICK_REF:-v0.1.10}}
+KUBESTUDIO_VERSION=${KUBESTUDIO_VERSION:-${KUBESTUDIO_REF:-v0.2.1}}
 
 echo "Building StrikeHub AppImage with connectors..."
 echo "============================================"
@@ -33,30 +43,61 @@ echo "Preparing connectors..."
 mkdir -p dist
 cd dist
 
-# Download pentest-agent (Pick connector)
+# Download pentest-agent (Pick connector).
+# Pick v0.1.9 renamed the release archive pentest-agent-* -> pick-agent-*; the
+# binary inside is still "pentest-agent", so only the archive name changed.
 echo "Downloading pentest-agent..."
 if [ ! -f "pentest-agent" ]; then
     if command -v gh &> /dev/null; then
         gh release download $PICK_VERSION \
             --repo Strike48-public/pick \
-            --pattern "pentest-agent-linux-x86_64.tar.gz" \
+            --pattern "pick-agent-linux-x86_64.tar.gz" \
             2>/dev/null || {
             echo "WARNING: Could not download pentest-agent from GitHub"
-            echo "Try: wget https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pentest-agent-linux-x86_64.tar.gz"
+            echo "Try: wget https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pick-agent-linux-x86_64.tar.gz"
         }
     else
-        wget -q "https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pentest-agent-linux-x86_64.tar.gz" || {
+        wget -q "https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/pick-agent-linux-x86_64.tar.gz" || {
             echo "WARNING: Could not download pentest-agent"
         }
     fi
 
-    if [ -f "pentest-agent-linux-x86_64.tar.gz" ]; then
-        tar -xzf pentest-agent-linux-x86_64.tar.gz
-        rm -f pentest-agent-linux-x86_64.tar.gz
-        echo "✓ pentest-agent downloaded"
+    if [ -f "pick-agent-linux-x86_64.tar.gz" ]; then
+        # Verify against the release's SHA256SUMS.txt before trusting the archive:
+        # this executable ships inside user-facing installers, so a tampered or
+        # re-uploaded asset must fail the build rather than flow into a bundle.
+        rm -f SHA256SUMS.txt
+        if command -v gh &> /dev/null; then
+            gh release download "$PICK_VERSION" --repo Strike48-public/pick \
+                --pattern "SHA256SUMS.txt" --dir . 2>/dev/null || true
+        fi
+        if [ ! -s SHA256SUMS.txt ]; then
+            wget -q "https://github.com/Strike48-public/pick/releases/download/$PICK_VERSION/SHA256SUMS.txt" -O SHA256SUMS.txt || true
+        fi
+        sum_line="$(awk '$2=="pick-agent-linux-x86_64.tar.gz"' SHA256SUMS.txt 2>/dev/null || true)"
+        if [ -z "$sum_line" ]; then
+            echo "ERROR: no SHA256 entry for pick-agent-linux-x86_64.tar.gz in pick $PICK_VERSION - refusing to bundle an unverified connector." >&2
+            exit 1
+        fi
+        if ! printf '%s\n' "$sum_line" | sha256sum -c -; then
+            echo "ERROR: SHA256 checksum mismatch for pick-agent-linux-x86_64.tar.gz." >&2
+            exit 1
+        fi
+        rm -f SHA256SUMS.txt
+        tar -xzf pick-agent-linux-x86_64.tar.gz
+        rm -f pick-agent-linux-x86_64.tar.gz
+        echo "✓ pentest-agent downloaded and checksum-verified"
     fi
 else
     echo "✓ pentest-agent already exists"
+fi
+
+# Fail loud rather than building an AppImage without the Pick connector: a bad
+# asset name or a failed download must not silently produce a broken bundle.
+if [ ! -f "pentest-agent" ]; then
+    echo "ERROR: pentest-agent binary missing - cannot bundle the Pick connector." >&2
+    echo "Ensure pick $PICK_VERSION publishes pick-agent-linux-x86_64.tar.gz." >&2
+    exit 1
 fi
 
 # Download ks-connector (KubeStudio connector)
@@ -83,6 +124,16 @@ if [ ! -f "ks-connector" ]; then
     fi
 else
     echo "✓ ks-connector already exists"
+fi
+
+# Fail loud rather than bundling an AppImage without the KubeStudio connector -
+# the same silent-failure class the pentest-agent guard above closes. (kubestudio
+# publishes no SHA256SUMS.txt for ks-connector, so there is no checksum to verify
+# here, unlike the pick archive above.)
+if [ ! -f "ks-connector" ]; then
+    echo "ERROR: ks-connector binary missing - cannot bundle the KubeStudio connector." >&2
+    echo "Ensure kubestudio $KUBESTUDIO_VERSION publishes ks-connector-linux-x86_64.tar.gz." >&2
+    exit 1
 fi
 
 # Check what we have
