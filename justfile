@@ -33,9 +33,38 @@ build-hub:
     cargo build --features desktop
     @echo "✓ strikehub updated"
 
-# Run StrikeHub: kill stale processes then launch (preserves credentials)
+# Promotes the Nix runtime libs + GL/EGL driver paths (exported under neutral
+# STRIKEHUB_* names by the dev shell so they don't poison host tools like
+# ssh/git; see flake.nix) to the real vars for this process only. Outside the
+# Nix shell (STRIKEHUB_RUNTIME_LIBS unset) the loader/GL env is left untouched.
+# Run StrikeHub in the Nix-scoped runtime env (kills stale processes first).
 run: kill
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${STRIKEHUB_RUNTIME_LIBS:-}" ]; then
+        export LD_LIBRARY_PATH="$STRIKEHUB_RUNTIME_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export GIO_EXTRA_MODULES="$STRIKEHUB_GIO_MODULES${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
+        export __EGL_VENDOR_LIBRARY_DIRS="${STRIKEHUB_EGL_VENDOR_DIRS:-}"
+        export GBM_BACKENDS_PATH="${STRIKEHUB_GBM_BACKENDS:-}"
+        export LIBGL_DRIVERS_PATH="${STRIKEHUB_LIBGL_DRIVERS:-}"
+    fi
     RUST_LOG=info cargo run --features desktop
+
+# Mirrors CI exactly (cargo test --workspace --no-default-features --features
+# desktop) and uses the same runtime-lib promotion as `run` so desktop test
+# binaries that dlopen WebKit can load their libs in the shell.
+# Run the workspace test suite in the Nix-scoped runtime env (mirrors CI).
+test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${STRIKEHUB_RUNTIME_LIBS:-}" ]; then
+        export LD_LIBRARY_PATH="$STRIKEHUB_RUNTIME_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export GIO_EXTRA_MODULES="$STRIKEHUB_GIO_MODULES${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
+        export __EGL_VENDOR_LIBRARY_DIRS="${STRIKEHUB_EGL_VENDOR_DIRS:-}"
+        export GBM_BACKENDS_PATH="${STRIKEHUB_GBM_BACKENDS:-}"
+        export LIBGL_DRIVERS_PATH="${STRIKEHUB_LIBGL_DRIVERS:-}"
+    fi
+    cargo test --workspace --no-default-features --features desktop {{args}}
 
 # Clean rebuild everything from scratch
 rebuild-all: clean-all build-all
@@ -138,6 +167,27 @@ build-appimage profile="release" version="0.0.0-dev": build-all
     BIN_DIR="$BIN_DIR" ./scripts/build-appimage.sh "{{version}}" "$ARCH"
     echo ""
     ls -lh StrikeHub-*.AppImage
+
+# The AppImage bundles its own GTK/WebKit, so we strip
+# LD_LIBRARY_PATH/GIO_EXTRA_MODULES defensively in case either is set in the
+# caller's env: Nix's glibc-2.42 libs force-loaded into AppImageLauncher
+# (system glibc 2.39) cause "GLIBC_ABI_* not found". Defaults to newest image.
+# Run a built AppImage in a clean environment (defaults to newest StrikeHub-*.AppImage).
+run-appimage image="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMG="{{image}}"
+    if [ -z "$IMG" ]; then
+        IMG="$(ls -1t StrikeHub-*.AppImage 2>/dev/null | head -1 || true)"
+    fi
+    if [ -z "$IMG" ] || [ ! -f "$IMG" ]; then
+        echo "No AppImage found. Build one with 'just build-appimage' or pass a path."
+        exit 1
+    fi
+    [[ "$IMG" == /* || "$IMG" == ./* ]] || IMG="./$IMG"
+    chmod +x "$IMG"
+    echo "→ Running $IMG in a clean environment..."
+    exec env -u LD_LIBRARY_PATH -u GIO_EXTRA_MODULES "$IMG"
 
 # Update connector-versions.env to the latest main HEAD of each connector repo
 pin:

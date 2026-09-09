@@ -56,6 +56,14 @@ This creates a portable AppImage that includes:
 - Pick connector (`pentest-agent`)
 - Default configuration for Strike48 API
 
+> **Running an AppImage from the Nix dev shell:** the dev shell keeps its Nix
+> runtime libs off the global `LD_LIBRARY_PATH` (see `flake.nix`), so AppImages
+> and host tools (`ssh`, `git`) are no longer force-loaded with glibc-2.42 libs.
+> The shell does still set `GIO_EXTRA_MODULES` (via glib-networking's Nix setup
+> hook), so prefer `just run-appimage` (defaults to the newest `StrikeHub-*.AppImage`,
+> or pass a path), which clears it for that one launch. Equivalent one-off:
+> `env -u LD_LIBRARY_PATH -u GIO_EXTRA_MODULES ./<image>.AppImage`.
+
 #### Windows
 
 Download the latest `strikehub-windows-x86_64.exe` from releases and double-click to run. Everything is bundled — no installation or configuration required.
@@ -72,6 +80,13 @@ cargo run --features desktop
 # Server UI mode (web-based liveview, accessible via browser)
 cargo run --bin strikehub-server --features server --no-default-features -p sh-ui
 ```
+
+> **Inside the Nix dev shell** (`nix develop` / direnv), run the desktop app and
+> tests via `just run` and `just test` instead of bare `cargo`. The shell keeps
+> its WebKit/EGL runtime libs off the global environment (so they don't break
+> `ssh`/`git`), and those recipes supply them to the app process only. With
+> system-installed dependencies (outside Nix), the `cargo run` commands above
+> work directly.
 
 ### Release Build
 
@@ -241,9 +256,13 @@ RUST_LOG=debug cargo run --features desktop
 # Run with Matrix auth
 STRIKE48_API_URL=https://studio.strike48.test cargo run --features desktop
 
-# Run tests
-cargo test --workspace
+# Run tests (matches CI)
+cargo test --workspace --no-default-features --features desktop
 ```
+
+Inside the Nix dev shell, use `just run` and `just test` (see the note under
+[Build from Source](#build-from-source)); pass extra env inline, e.g.
+`STRIKE48_API_URL=https://studio.strike48.test just run`.
 
 See `PRD.md` and `PRD-IPC.md` for detailed requirements and IPC architecture.
 
