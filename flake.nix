@@ -82,14 +82,20 @@
           # tools built against glibc 2.39 -> "GLIBC_ABI_DT_X86_64_PLT not found"
           # (breaks ssh, scp, curl, and so `git push` and `just remote-build`).
           #
-          # Instead export them under neutral names the loader ignores; the just
-          # recipes that actually execute the desktop binary (`run`, `test`)
-          # promote them to the real vars for that one process. Connectors the
-          # app launches inherit LD_LIBRARY_PATH from the app's env, so they
-          # still resolve their libs.
+          # Instead export them under neutral names the loader/GL stack ignore;
+          # the just recipes that actually execute the desktop binary (`run`,
+          # `test`) promote them to the real vars for that one process.
+          # Connectors the app launches inherit LD_LIBRARY_PATH from the app's
+          # env, so they still resolve their libs.
           export STRIKEHUB_RUNTIME_LIBS="${pkgs.lib.makeLibraryPath desktopLibs}"
           export STRIKEHUB_GIO_MODULES="${pkgs.glib-networking}/lib/gio/modules"
 
+          # The GL/EGL driver paths below are scoped the same way: a global
+          # GBM_BACKENDS_PATH / LIBGL_DRIVERS_PATH pointing at Nix Mesa poisons
+          # host GL tools (glxinfo, browsers) launched from the repo shell with
+          # Nix drivers loaded against host glibc - the same ABI failure class.
+          # So they too are exported under neutral names and promoted per-recipe.
+          #
           # libglvnd dispatches to a vendor EGL named by these JSON manifests;
           # GBM_BACKENDS_PATH and LIBGL_DRIVERS_PATH replace Mesa's NixOS-only
           # /run/opengl-driver default, which does not exist on a non-NixOS host
@@ -101,9 +107,9 @@
           # ships 10_nvidia.json there) would otherwise be left with a Mesa EGL
           # that cannot drive it. Mesa stays first, so Mesa-backed GPUs (Intel,
           # AMD via radeonsi, nouveau) keep the path verified here.
-          export __EGL_VENDOR_LIBRARY_DIRS="${pkgs.mesa}/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d:/etc/glvnd/egl_vendor.d"
-          export GBM_BACKENDS_PATH="${pkgs.mesa}/lib/gbm"
-          export LIBGL_DRIVERS_PATH="${pkgs.mesa}/lib/dri"
+          export STRIKEHUB_EGL_VENDOR_DIRS="${pkgs.mesa}/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d:/etc/glvnd/egl_vendor.d"
+          export STRIKEHUB_GBM_BACKENDS="${pkgs.mesa}/lib/gbm"
+          export STRIKEHUB_LIBGL_DRIVERS="${pkgs.mesa}/lib/dri"
         '';
       };
 

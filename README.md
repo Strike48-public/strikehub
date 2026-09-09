@@ -256,8 +256,8 @@ RUST_LOG=debug cargo run --features desktop
 # Run with Matrix auth
 STRIKE48_API_URL=https://studio.strike48.test cargo run --features desktop
 
-# Run tests
-cargo test --workspace
+# Run tests (matches CI)
+cargo test --workspace --no-default-features --features desktop
 ```
 
 Inside the Nix dev shell, use `just run` and `just test` (see the note under
