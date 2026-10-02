@@ -100,7 +100,8 @@ pub fn PreflightOverlay(
     let skip_failures = skip_warning(&device_groups);
     let needs_skip_confirm = skip_failures.is_some();
     let mut confirm_skip = use_signal(|| false);
-    // A Re-check can clear the failures while the prompt is open.
+    // A Re-check that was already running can clear the failures while the
+    // prompt is open; the prompt then disappears.
     let confirming_skip = *confirm_skip.read() && needs_skip_confirm;
     let skip_lines: Vec<String> = if confirming_skip {
         skip_failures.unwrap_or_default()
