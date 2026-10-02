@@ -214,8 +214,21 @@ pub struct PreflightCheck {
     /// Shown when the check fails — tells the user how to fix it.
     pub install_hint: String,
     /// Optional shell command the UI can run to install the dependency.
-    /// When set, the preflight UI shows an "Install" button.
+    /// When set, the preflight UI shows an "Install" button ("Start" when
+    /// [`PreflightCheck::is_start_action`] is true).
     pub install_command: Option<String>,
+}
+
+/// Description suffix for a dependency that is installed but whose daemon is
+/// not running. Its `install_command` starts the daemon rather than installing.
+const DAEMON_NOT_RUNNING: &str = "(daemon not running)";
+
+impl PreflightCheck {
+    /// True when `install_command` starts an already-installed dependency, so
+    /// the UI should offer "Start" rather than "Install".
+    pub fn is_start_action(&self) -> bool {
+        self.description.ends_with(DAEMON_NOT_RUNNING)
+    }
 }
 
 /// Result of running all preflight checks for a connector.
@@ -650,7 +663,7 @@ fn check_docker_cli() -> PreflightCheck {
                     };
                     PreflightCheck {
                         name,
-                        description: format!("{} (daemon not running)", version),
+                        description: format!("{} {}", version, DAEMON_NOT_RUNNING),
                         status: CheckStatus::Failed,
                         install_hint: hint.into(),
                         install_command: cmd,
@@ -683,5 +696,34 @@ sudo sh get-docker.sh",
                 install_command: cmd,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(description: &str) -> PreflightCheck {
+        PreflightCheck {
+            name: "Docker CLI".into(),
+            description: description.into(),
+            status: CheckStatus::Failed,
+            install_hint: String::new(),
+            install_command: Some("cmd".into()),
+        }
+    }
+
+    #[test]
+    fn is_start_action_true_when_daemon_not_running() {
+        let desc = format!(
+            "Docker version 29.8.1, build 4a63305 {}",
+            DAEMON_NOT_RUNNING
+        );
+        assert!(check(&desc).is_start_action());
+    }
+
+    #[test]
+    fn is_start_action_false_when_dependency_missing() {
+        assert!(!check("Docker CLI not found").is_start_action());
     }
 }
