@@ -80,7 +80,7 @@ async fn handle_connector(
 async fn main() {
     // Initialize Sentry before tracing so panics are captured.
     #[cfg(feature = "sentry")]
-    let _sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Server);
+    let sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Server);
 
     // Build the tracing subscriber with optional Sentry layer
     #[cfg(feature = "sentry")]
@@ -182,6 +182,13 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+
+    // Graceful shutdown (SIGINT/SIGTERM): end the Release Health session and
+    // flush pending data (including the final session update) before the
+    // guard is dropped. A killed process never gets this far, which is why
+    // explicit end-and-flush on the graceful path matters for release health.
+    #[cfg(feature = "sentry")]
+    sh_core::sentry_init::shutdown_sentry(sentry_guard.as_ref(), std::time::Duration::from_secs(5));
 
     // Axum has stopped accepting connections. The Dioxus component tree
     // will be torn down, dropping IpcConnectorRunner handles which kill
