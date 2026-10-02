@@ -126,6 +126,13 @@ pub fn init_sentry(mode: AppMode) -> Option<ClientInitGuard> {
 /// `_exit` from a signal handler, forced quit) never gets that far, so this
 /// explicit end-and-flush is what guarantees a clean run reports a session.
 ///
+/// The flush is synchronous: `guard.flush(Some(timeout))` blocks the calling
+/// thread until the transport queue is drained or `timeout` elapses. The
+/// desktop binary calls this on the UI thread, so in the worst case (a hung
+/// or very slow transport) the UI thread stalls for up to the timeout
+/// (currently 5s at the call sites) before the process exits. That stall is
+/// accepted as the cost of guaranteeing the final session update is sent.
+///
 /// Returns `true` if the transport queue was drained within the timeout,
 /// or if Sentry is not enabled; `false` on timeout.
 pub fn shutdown_sentry(guard: Option<&ClientInitGuard>, timeout: Duration) -> bool {
@@ -303,6 +310,10 @@ mod tests {
     }
 
     impl CaptureTransport {
+        fn envelopes(&self) -> Vec<Envelope> {
+            self.envelopes.lock().unwrap().clone()
+        }
+
         fn session_updates(&self) -> Vec<SessionUpdate<'static>> {
             self.envelopes
                 .lock()
@@ -393,5 +404,47 @@ mod tests {
     fn shutdown_sentry_without_guard_is_noop() {
         let _lock = TEST_LOCK.lock().unwrap();
         assert!(shutdown_sentry(None, Duration::from_secs(1)));
+    }
+
+    /// An unhandled panic must be reported as an event, and in Application
+    /// mode the (now crashed) session update must ride in the *same*
+    /// envelope, so a panicking run counts toward crash-free sessions. This
+    /// is the offline half of issue #73 acceptance #2: it proves the
+    /// crashed session is attached to the panic event, without a network.
+    ///
+    /// sentry's panic hook (installed once per process by the default
+    /// `PanicIntegration` during `sentry::init`) captures on the currently
+    /// bound client and flushes before returning, so by the time
+    /// `catch_unwind` returns the envelope is already in the capture
+    /// transport (the transport sends synchronously; the hook's
+    /// `client.flush(None)` is a no-op for it).
+    #[test]
+    fn crashed_session_rides_panic_envelope() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let transport = Arc::new(CaptureTransport::default());
+        let guard = init_with_capture_transport(transport.clone());
+        assert!(guard.is_enabled());
+
+        // Trigger an unhandled panic on this thread. The sentry hook runs
+        // during unwinding (before `catch_unwind` catches the payload);
+        // the previously installed default hook then runs and prints to
+        // stderr, which is expected test noise.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("offline test panic for crashed-session envelope");
+        }));
+
+        let envelopes = transport.envelopes();
+        assert!(
+            envelopes.iter().any(|envelope| {
+                let items: Vec<_> = envelope.items().collect();
+                items.iter().any(|item| matches!(item, EnvelopeItem::Event(_)))
+                    && items.iter().any(|item| {
+                        matches!(item, EnvelopeItem::SessionUpdate(s) if s.status == SessionStatus::Crashed)
+                    })
+            }),
+            "expected a panic event envelope carrying a Crashed session update, got {envelopes:?}"
+        );
+
+        drop(guard);
     }
 }
