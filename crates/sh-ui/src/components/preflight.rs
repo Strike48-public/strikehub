@@ -83,7 +83,7 @@ pub fn PreflightOverlay(
     // is keyed on it with `use_reactive!`; `live_step` lets the loop see later
     // step changes.
     let mut live_step = use_signal(move || current_step);
-    use_effect(use_reactive!(|(current_step,)| {
+    use_effect(use_reactive!(|current_step| {
         live_step.set(current_step);
         if current_step == WizardStep::Registration {
             let on_recheck = on_recheck;
