@@ -152,25 +152,50 @@ const EVENT_DEDUPE_WINDOW: Duration = Duration::from_secs(60);
 /// unbounded message variety cannot grow it without limit.
 const EVENT_DEDUPE_MAX_TRACKED: usize = 1024;
 
-/// Process-wide cache of recently forwarded event messages (dedupe defense).
+/// Process-wide cache of recently forwarded event dedupe keys (dedupe
+/// defense). Keyed on (level, message), see [`dedupe_key`].
 fn dedupe_cache() -> &'static std::sync::Mutex<HashMap<String, Instant>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Decide whether an event carrying the given message key should be forwarded.
+/// Build the dedupe key for an event: its level and formatted message.
 ///
-/// Keeps the first occurrence of a key and suppresses repeats while less than
-/// `window` has elapsed since the kept occurrence. The window is anchored at
-/// the kept occurrence (duplicates do not refresh it), so a key becomes
-/// forwardable again exactly `window` after its last forward.
+/// Keying on the message alone would let one occurrence suppress a
+/// genuinely distinct one that happens to share the formatted text at a
+/// different severity — static-message `error!` sites exist in this code
+/// base (e.g. OAuth callback failures), and two different severities are
+/// different signals, so both must be forwardable. Remaining collision
+/// semantics: two events that truly share both level and message text
+/// within the window are indistinguishable here and the second is dropped
+/// (the sentry-tracing layer populates only the message text, not the
+/// source location).
+fn dedupe_key(level: sentry::Level, message: &str) -> String {
+    format!("{level}|{message}")
+}
+
+/// Decide whether an event carrying the given dedupe key should be
+/// forwarded.
 ///
-/// The cache is also bounded: expired entries are evicted on every call, and
-/// if more than `max_tracked` live entries remain, the oldest are dropped.
+/// Keeps the first occurrence of a key and suppresses repeats while less
+/// than `window` has elapsed since the kept occurrence. The window is
+/// anchored at the kept occurrence (duplicates do not refresh it), so a
+/// key becomes forwardable again exactly `window` after its last forward.
 ///
-/// Pure with respect to its arguments (no globals, `now` is injected) so the
-/// window behavior is unit-testable.
+/// Note: the key is recorded when this function *decides to forward*, i.e.
+/// suppression anchors on the forward-decision, not on transport delivery.
+/// If the SDK later discards the forwarded copy client-side (e.g. under
+/// rate limiting), siblings sharing the key stay suppressed for the full
+/// window regardless. That is acceptable for this defense-in-depth: the
+/// goal is bounding event volume from hot loops, not lossless delivery.
+///
+/// The cache is also bounded: expired entries are evicted on every call,
+/// and if more than `max_tracked` live entries remain, the oldest are
+/// dropped.
+///
+/// Pure with respect to its arguments (no globals, `now` is injected) so
+/// the window behavior is unit-testable.
 fn should_forward_message(
     cache: &mut HashMap<String, Instant>,
     key: &str,
@@ -217,11 +242,19 @@ fn should_forward_message(
 /// - `authorization` headers
 /// - Fields containing `token` in the name
 ///
-/// Dedupes: drops an event whose formatted message was already forwarded
-/// within [`EVENT_DEDUPE_WINDOW`]. This is defense in depth against hot
-/// logging loops (a single `tracing::error!` on a re-entrant path can emit
-/// millions of identical events; see strikehub issue #71). Events without a
-/// message (panics, captures with exceptions only) are never deduped.
+/// Dedupes: drops an event whose (level, message) key — see [`dedupe_key`] —
+/// was already forwarded within [`EVENT_DEDUPE_WINDOW`]. This is defense in
+/// depth against hot logging loops (a single `tracing::error!` on a
+/// re-entrant path can emit millions of identical events; see strikehub
+/// issue #71). Events without a message (panics, captures with exceptions
+/// only) are never deduped.
+///
+/// Suppression anchors on this forward-decision, not on transport delivery:
+/// the cache entry is written when `before_send` returns the event, so if
+/// the SDK subsequently discards the copy client-side (e.g. rate limiting),
+/// sibling events sharing the key remain suppressed for the full window.
+/// That trade-off is acceptable: the purpose is bounding event volume from
+/// hot loops, not guaranteeing delivery of any particular occurrence.
 fn before_send(
     mut event: sentry::protocol::Event<'static>,
 ) -> Option<sentry::protocol::Event<'static>> {
@@ -243,8 +276,8 @@ fn before_send(
     }
 
     // Dedupe repeated message events (see above).
-    if let Some(key) = event.message.as_deref().filter(|m| !m.is_empty()) {
-        let key = key.to_string();
+    if let Some(message) = event.message.as_deref().filter(|m| !m.is_empty()) {
+        let key = dedupe_key(event.level, message);
         let mut cache = dedupe_cache()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -468,6 +501,55 @@ mod tests {
             MAX_TRACKED
         ));
         assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn differing_level_is_kept_for_the_same_message() {
+        // The dedupe key is (level, message), not message alone: the same
+        // formatted text at a different severity is a different signal and
+        // must not be suppressed by the other occurrence.
+        let mut cache = HashMap::new();
+        let t0 = Instant::now();
+        let key_error = dedupe_key(sentry::Level::Error, "no access_token in token response");
+        let key_warning = dedupe_key(sentry::Level::Warning, "no access_token in token response");
+        assert_ne!(key_error, key_warning);
+
+        assert!(should_forward_message(
+            &mut cache,
+            &key_error,
+            t0,
+            WINDOW,
+            MAX_TRACKED
+        ));
+
+        // Same message text, different level: different key, kept.
+        let t1 = future_at(t0, Duration::from_secs(1));
+        assert!(should_forward_message(
+            &mut cache,
+            &key_warning,
+            t1,
+            WINDOW,
+            MAX_TRACKED
+        ));
+
+        // Duplicate of the first (level, message) pair within the window:
+        // dropped.
+        let t2 = future_at(t0, Duration::from_secs(2));
+        assert!(!should_forward_message(
+            &mut cache,
+            &key_error,
+            t2,
+            WINDOW,
+            MAX_TRACKED
+        ));
+        // ...and so is a duplicate of the second pair.
+        assert!(!should_forward_message(
+            &mut cache,
+            &key_warning,
+            t2,
+            WINDOW,
+            MAX_TRACKED
+        ));
     }
 
     #[test]
