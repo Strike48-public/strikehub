@@ -107,6 +107,76 @@ fn clear_auth_failure_warned(id: &str) {
     }
 }
 
+/// How long a connector that failed to authenticate (no saved credentials
+/// and OTT mint unavailable) is skipped for OTT minting before the next
+/// re-fire attempts the mint again.
+///
+/// Without this backoff, the 3s health-check tick re-fires the
+/// connector-start effect unconditionally (it re-sets the `connectors`
+/// signal without an equality check), so a broken gateway OTT endpoint was
+/// re-polled with one failed HTTP POST per tick per connector — the Sep
+/// 24-28 OTT outage turned that into ~20 failed POSTs/min/connector
+/// (~28.8k/day). A 5-minute window bounds that to one attempt per 5 minutes
+/// while keeping reconnect latency acceptable: when the gateway recovers, a
+/// connector starts on the next re-fire after the window elapses (worst
+/// case ~5 minutes late, versus a re-attempt every 3 seconds before).
+const OTT_MINT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Connector ID → timestamp of its last failed start attempt (the one that
+/// left it unable to authenticate). Process-level static: a component
+/// remount must not reset the backoff. Bounded by the number of distinct
+/// connector IDs (small, manifest-driven), so no eviction is needed.
+fn ott_mint_cooldowns()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static COOLDOWNS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    COOLDOWNS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Decide whether an OTT mint may be attempted for connector `id` at `now`.
+///
+/// Returns `false` (skip the mint) only when a failure for `id` was
+/// recorded less than `cooldown` ago; the window is anchored at the
+/// recorded failure time and is not refreshed by re-checks. A connector
+/// with no recorded failure is always mintable. The window is re-armed
+/// only by a fresh recorded failure (see [`record_ott_failure`]) and is
+/// cleared when the connector starts successfully (see
+/// [`clear_ott_failure`]).
+///
+/// Pure with respect to its arguments (no globals, `now` is injected) so
+/// the window behavior is unit-testable.
+fn ott_mint_allowed(
+    cooldowns: &mut std::collections::HashMap<String, std::time::Instant>,
+    id: &str,
+    now: std::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    match cooldowns.get(id) {
+        Some(last_failure) => now
+            .checked_duration_since(*last_failure)
+            .is_some_and(|elapsed| elapsed >= cooldown),
+        // No recorded failure (or a future timestamp, which cannot happen
+        // with a monotonic clock): allow the attempt.
+        None => true,
+    }
+}
+
+/// Record a failed start attempt for `id`, arming its OTT-mint cooldown.
+fn record_ott_failure(id: &str, at: std::time::Instant) {
+    if let Ok(mut cooldowns) = ott_mint_cooldowns().lock() {
+        cooldowns.insert(id.to_string(), at);
+    }
+}
+
+/// Clear the recorded failure for `id` (called when the connector starts
+/// successfully, so a later failure episode backs off from scratch).
+fn clear_ott_failure(id: &str) {
+    if let Ok(mut cooldowns) = ott_mint_cooldowns().lock() {
+        cooldowns.remove(id);
+    }
+}
+
 /// Thread-safe overrides for connector env values that are resolved at runtime
 /// (dynamic transport URL, custom Studio URL). Previously these were written to
 /// the process-global environment via `unsafe std::env::set_var`, which is UB on
@@ -950,45 +1020,75 @@ pub fn App() -> Element {
                 if !has_saved && let Some(ref auth) = *auth_manager.peek() {
                     let jwt = auth.token();
                     if !jwt.is_empty() {
-                        let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
-                        match sh_core::ott::create_pre_approved_token(
-                            auth.matrix_url(),
-                            &jwt,
-                            auth.tls_insecure(),
-                            sdk_type,
-                        )
-                        .await
-                        {
-                            Ok(ott) => {
-                                can_authenticate = true;
-                                tracing::info!(
-                                    "[connector-start] OTT created for '{}' auto-registration (tenant_id={:?})",
-                                    conn.id,
-                                    ott.tenant_id
-                                );
-                                // Prefer the authoritative personal tenant from
-                                // the pre-approve response over the separately
-                                // queried fetch_tenant_id value, so connectors
-                                // register under the correct PLG tenant.
-                                if let Some(tenant) = ott.tenant_id.as_deref() {
-                                    // Scope the tenant to THIS connector's env only.
-                                    // (No global set_var: it was both unsound on the
-                                    // multi-threaded runtime and would leak the last
-                                    // connector's tenant into every later connector.)
-                                    conn_env.retain(|(k, _)| {
-                                        k != "STRIKE48_TENANT" && k != "TENANT_ID"
-                                    });
-                                    conn_env.push(("STRIKE48_TENANT".into(), tenant.to_string()));
-                                    conn_env.push(("TENANT_ID".into(), tenant.to_string()));
+                        // Per-connector failure cooldown (issue #71): if a
+                        // recent start attempt for this connector failed to
+                        // mint an OTT, skip the mint for the rest of the
+                        // window. The health-check effect re-sets the
+                        // `connectors` signal every 3s unconditionally and
+                        // re-fires this effect, so without the gate a broken
+                        // gateway OTT endpoint would take one failed POST
+                        // per tick per connector. The failure is recorded on
+                        // a failed mint and cleared on a successful start, so
+                        // healthy connectors are never suppressed.
+                        let mint_due = {
+                            let mut cooldowns = ott_mint_cooldowns()
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            ott_mint_allowed(
+                                &mut cooldowns,
+                                &conn.id,
+                                std::time::Instant::now(),
+                                OTT_MINT_COOLDOWN,
+                            )
+                        };
+                        if mint_due {
+                            let sdk_type = sh_core::ott::sdk_connector_type(&conn.id);
+                            match sh_core::ott::create_pre_approved_token(
+                                auth.matrix_url(),
+                                &jwt,
+                                auth.tls_insecure(),
+                                sdk_type,
+                            )
+                            .await
+                            {
+                                Ok(ott) => {
+                                    can_authenticate = true;
+                                    tracing::info!(
+                                        "[connector-start] OTT created for '{}' auto-registration (tenant_id={:?})",
+                                        conn.id,
+                                        ott.tenant_id
+                                    );
+                                    // Prefer the authoritative personal tenant from
+                                    // the pre-approve response over the separately
+                                    // queried fetch_tenant_id value, so connectors
+                                    // register under the correct PLG tenant.
+                                    if let Some(tenant) = ott.tenant_id.as_deref() {
+                                        // Scope the tenant to THIS connector's env only.
+                                        // (No global set_var: it was both unsound on the
+                                        // multi-threaded runtime and would leak the last
+                                        // connector's tenant into every later connector.)
+                                        conn_env.retain(|(k, _)| {
+                                            k != "STRIKE48_TENANT" && k != "TENANT_ID"
+                                        });
+                                        conn_env
+                                            .push(("STRIKE48_TENANT".into(), tenant.to_string()));
+                                        conn_env.push(("TENANT_ID".into(), tenant.to_string()));
+                                    }
+                                    conn_env.push((
+                                        "STRIKE48_REGISTRATION_TOKEN".into(),
+                                        ott.token_json,
+                                    ));
                                 }
-                                conn_env
-                                    .push(("STRIKE48_REGISTRATION_TOKEN".into(), ott.token_json));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[connector-start] Failed to create OTT for '{}': {e}",
-                                    conn.id
-                                );
+                                Err(e) => {
+                                    // Arm the per-connector cooldown: the next
+                                    // re-fires skip the mint until it elapses.
+                                    record_ott_failure(&conn.id, std::time::Instant::now());
+                                    tracing::warn!(
+                                        "[connector-start] Failed to create OTT for '{}': {e} (retrying after {}s cooldown)",
+                                        conn.id,
+                                        OTT_MINT_COOLDOWN.as_secs()
+                                    );
+                                }
                             }
                         }
                     }
@@ -1001,8 +1101,9 @@ pub fn App() -> Element {
                 //
                 // This path re-enters on every effect re-fire (any subscribed
                 // signal change, including the 3s health-check tick that
-                // re-sets the connectors signal unconditionally), so two guards
-                // keep it from becoming an event/log storm (issue #71):
+                // re-sets the connectors signal unconditionally), so three
+                // guards keep it from becoming an event/log/network storm
+                // (issue #71):
                 //
                 // 1. The warning fires once per failure episode (until the
                 // connector starts successfully again), and at warn! level —
@@ -1013,6 +1114,15 @@ pub fn App() -> Element {
                 // no longer re-trigger the effect through its own subscription
                 // (the old unconditional set() on every re-entry was what
                 // turned a broken auth state into the feedback loop).
+                // 3. The OTT mint above is gated by a per-connector failure
+                // cooldown ([`OTT_MINT_COOLDOWN`]): after a failed mint,
+                // re-entries skip the HTTP POST entirely for the window, so a
+                // broken gateway endpoint is polled at most once per cooldown
+                // instead of once per 3s tick.
+                //
+                // Steady state during the cooldown is therefore: no Sentry
+                // event, no warn, no signal write, no OTT POST — the re-entry
+                // is a cheap status check only.
                 if !can_authenticate {
                     let status_changed = {
                         let current = connectors.read();
@@ -1024,12 +1134,11 @@ pub fn App() -> Element {
                             conn.id
                         );
                         mark_auth_failure_warned(&conn.id);
-                    } else {
-                        tracing::debug!(
-                            "[connector-start] '{}' still cannot authenticate (already reported for this failure episode)",
-                            conn.id
-                        );
                     }
+                    // Re-entries within the episode are deliberately silent:
+                    // the effect-level "effect fired" info line already gives
+                    // per-tick observability, and a per-re-entry log line here
+                    // re-spammed debug builds every 3s (issue #71).
                     if status_changed {
                         let mut updated = connectors.read().clone();
                         if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
@@ -1050,8 +1159,12 @@ pub fn App() -> Element {
                 match IpcConnectorRunner::start(&conn.id, &binary_path, &conn_env).await {
                     Ok(runner) => {
                         // Auth recovered: reset the failure-episode flag so a
-                        // later cannot-authenticate episode warns again.
+                        // later cannot-authenticate episode warns again, and
+                        // clear the recorded failure so a later episode backs
+                        // off from scratch instead of inheriting a stale
+                        // cooldown.
                         clear_auth_failure_warned(&conn.id);
+                        clear_ott_failure(&conn.id);
                         tracing::info!(
                             "started IPC connector '{}' → {}",
                             conn.id,
@@ -2520,6 +2633,127 @@ mod tests {
             &connectors,
             "kubestudio",
             ConnectorStatus::Offline
+        ));
+    }
+
+    fn at(base: std::time::Instant, offset: std::time::Duration) -> std::time::Instant {
+        base.checked_add(offset)
+            .expect("checked_add within test bounds")
+    }
+
+    #[test]
+    fn ott_mint_allowed_without_recorded_failure() {
+        // A connector that never failed (or whose failure was cleared on a
+        // successful start) is always mintable.
+        let mut cooldowns = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        assert!(ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            t0,
+            OTT_MINT_COOLDOWN
+        ));
+        // The check is pure: it does not record anything.
+        assert!(cooldowns.is_empty());
+    }
+
+    #[test]
+    fn ott_mint_skipped_while_cooldown_active() {
+        let mut cooldowns = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        cooldowns.insert("pick".to_string(), t0);
+
+        // Well inside the window: skip.
+        assert!(!ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            at(t0, std::time::Duration::from_secs(10)),
+            OTT_MINT_COOLDOWN
+        ));
+        // Just inside the window (299s < 300s): still skip.
+        assert!(!ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            at(
+                t0,
+                std::time::Duration::from_secs(OTT_MINT_COOLDOWN.as_secs() - 1)
+            ),
+            OTT_MINT_COOLDOWN
+        ));
+        // Re-checks do not refresh the window (the helper is a pure check;
+        // the anchor stays at the recorded failure).
+        assert_eq!(cooldowns.get("pick"), Some(&t0));
+    }
+
+    #[test]
+    fn ott_mint_allowed_after_cooldown_elapses() {
+        let mut cooldowns = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        cooldowns.insert("pick".to_string(), t0);
+
+        // Exactly at the boundary the cooldown has elapsed (age >= cooldown)
+        // and the mint is allowed again.
+        assert!(ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            at(t0, OTT_MINT_COOLDOWN),
+            OTT_MINT_COOLDOWN
+        ));
+        assert!(ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            at(t0, OTT_MINT_COOLDOWN + std::time::Duration::from_secs(1)),
+            OTT_MINT_COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn successful_start_clears_the_cooldown() {
+        let mut cooldowns = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        // A failure was recorded and is inside the window.
+        cooldowns.insert("pick".to_string(), t0);
+        let t1 = at(t0, std::time::Duration::from_secs(10));
+        assert!(!ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            t1,
+            OTT_MINT_COOLDOWN
+        ));
+
+        // A successful start clears the recorded failure (clear_ott_failure
+        // removes the entry from this same map), so the connector is
+        // immediately mintable again even though the original window has not
+        // elapsed.
+        cooldowns.remove("pick");
+        assert!(ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            t1,
+            OTT_MINT_COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn cooldowns_are_independent_per_connector() {
+        let mut cooldowns = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        cooldowns.insert("pick".to_string(), t0);
+
+        let t1 = at(t0, std::time::Duration::from_secs(10));
+        // The failed connector is in cooldown...
+        assert!(!ott_mint_allowed(
+            &mut cooldowns,
+            "pick",
+            t1,
+            OTT_MINT_COOLDOWN
+        ));
+        // ...but a sibling connector with no recorded failure is unaffected.
+        assert!(ott_mint_allowed(
+            &mut cooldowns,
+            "kubestudio",
+            t1,
+            OTT_MINT_COOLDOWN
         ));
     }
 }
