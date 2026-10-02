@@ -56,6 +56,57 @@ fn is_managed_active_connector(id: &str, easy_on: bool) -> bool {
     !(id.starts_with("ipc-") || easy_on && is_advanced_connector(id))
 }
 
+/// True if setting connector `id`'s status to `next` would actually change the
+/// connector list.
+///
+/// The connector-start effect reads the `connectors` signal, so any
+/// `connectors.set()` re-fires the effect even when the value is unchanged
+/// (Dioxus `set` has no equality check). Callers use this predicate to skip
+/// no-op writes so the failure path converges instead of re-triggering itself
+/// on every re-entry (issue #71: the unconditional set turned a broken auth
+/// state into an effect feedback loop and a multi-hundred-million-event
+/// Sentry storm).
+fn status_will_change(connectors: &[ConnectorConfig], id: &str, next: ConnectorStatus) -> bool {
+    connectors
+        .iter()
+        .find(|c| c.id == id)
+        .is_some_and(|c| c.status != next)
+}
+
+/// Connector IDs for which the "cannot authenticate" warning has already been
+/// emitted in the current failure episode. Process-level static: a component
+/// remount (e.g. browser refresh in server mode) must not re-warn about the
+/// same ongoing failure. The flag is cleared when the connector starts
+/// successfully, so a later failure episode warns again.
+fn auth_failure_warned() -> &'static std::sync::Mutex<HashSet<String>> {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    WARNED.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// True if the cannot-authenticate warning for `id` has not been emitted yet
+/// in this failure episode.
+fn auth_failure_warn_due(id: &str) -> bool {
+    auth_failure_warned()
+        .lock()
+        .is_ok_and(|warned| !warned.contains(id))
+}
+
+/// Record that the cannot-authenticate warning was emitted for `id`.
+fn mark_auth_failure_warned(id: &str) {
+    if let Ok(mut warned) = auth_failure_warned().lock() {
+        warned.insert(id.to_string());
+    }
+}
+
+/// Clear the failure-episode flag for `id` (called when the connector starts
+/// successfully, so the next failure episode warns again).
+fn clear_auth_failure_warned(id: &str) {
+    if let Ok(mut warned) = auth_failure_warned().lock() {
+        warned.remove(id);
+    }
+}
+
 /// Thread-safe overrides for connector env values that are resolved at runtime
 /// (dynamic transport URL, custom Studio URL). Previously these were written to
 /// the process-global environment via `unsafe std::env::set_var`, which is UB on
@@ -947,16 +998,45 @@ pub fn App() -> Element {
                 // nor register via a fresh OTT — it can't authenticate, so treat
                 // this as a hard start failure (surface it, free the lock) rather
                 // than launching a process that silently can't reach the gateway.
+                //
+                // This path re-enters on every effect re-fire (any subscribed
+                // signal change, including the 3s health-check tick that
+                // re-sets the connectors signal unconditionally), so two guards
+                // keep it from becoming an event/log storm (issue #71):
+                //
+                // 1. The warning fires once per failure episode (until the
+                // connector starts successfully again), and at warn! level —
+                // the sentry-tracing layer only captures error! and above as
+                // Sentry events, so the steady state produces none at all.
+                // 2. The signal update is idempotent: connectors.set() is only
+                // called when the status actually changes, so this path can
+                // no longer re-trigger the effect through its own subscription
+                // (the old unconditional set() on every re-entry was what
+                // turned a broken auth state into the feedback loop).
                 if !can_authenticate {
-                    tracing::error!(
-                        "[connector-start] '{}' cannot authenticate (no saved credentials and OTT unavailable) — not starting",
-                        conn.id
-                    );
-                    let mut updated = connectors.read().clone();
-                    if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
-                        c.status = ConnectorStatus::Offline;
+                    let status_changed = {
+                        let current = connectors.read();
+                        status_will_change(&current, &conn.id, ConnectorStatus::Offline)
+                    };
+                    if auth_failure_warn_due(&conn.id) {
+                        tracing::warn!(
+                            "[connector-start] '{}' cannot authenticate (no saved credentials and OTT unavailable) — not starting",
+                            conn.id
+                        );
+                        mark_auth_failure_warned(&conn.id);
+                    } else {
+                        tracing::debug!(
+                            "[connector-start] '{}' still cannot authenticate (already reported for this failure episode)",
+                            conn.id
+                        );
                     }
-                    connectors.set(updated);
+                    if status_changed {
+                        let mut updated = connectors.read().clone();
+                        if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
+                            c.status = ConnectorStatus::Offline;
+                        }
+                        connectors.set(updated);
+                    }
                     let mut starting = lock.lock().await;
                     starting.remove(&conn.id);
                     continue;
@@ -969,6 +1049,9 @@ pub fn App() -> Element {
                 );
                 match IpcConnectorRunner::start(&conn.id, &binary_path, &conn_env).await {
                     Ok(runner) => {
+                        // Auth recovered: reset the failure-episode flag so a
+                        // later cannot-authenticate episode warns again.
+                        clear_auth_failure_warned(&conn.id);
                         tracing::info!(
                             "started IPC connector '{}' → {}",
                             conn.id,
@@ -2336,6 +2419,22 @@ async fn check_health_ipc(addr: &sh_core::IpcAddr) -> bool {
 mod tests {
     use super::*;
 
+    fn test_connector(id: &str, status: ConnectorStatus) -> ConnectorConfig {
+        ConnectorConfig {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            binary: None,
+            port: 0,
+            icon: "app".into(),
+            auto_start: true,
+            status,
+            transport: ConnectorTransport::Ipc,
+            explicit_socket: None,
+            matrix_app_address: None,
+            instance_id: String::new(),
+        }
+    }
+
     #[test]
     fn is_advanced_connector_matches_the_registered_advanced_list() {
         // The list is small on purpose: touching it changes what is hidden in
@@ -2371,5 +2470,56 @@ mod tests {
         // preflight effect must re-run and now include it.
         assert!(is_managed_active_connector("kubestudio", false));
         assert!(is_managed_active_connector("pick", false));
+    }
+
+    #[test]
+    fn status_will_change_true_when_status_differs() {
+        let connectors = vec![test_connector("pick", ConnectorStatus::Online)];
+        assert!(status_will_change(
+            &connectors,
+            "pick",
+            ConnectorStatus::Offline
+        ));
+    }
+
+    #[test]
+    fn status_will_change_false_when_status_same() {
+        // The idempotency guard: re-marking an already-Offline connector must
+        // be reported as a no-op so the caller skips connectors.set() (which
+        // would re-trigger the start effect for nothing).
+        let connectors = vec![test_connector("pick", ConnectorStatus::Offline)];
+        assert!(!status_will_change(
+            &connectors,
+            "pick",
+            ConnectorStatus::Offline
+        ));
+    }
+
+    #[test]
+    fn status_will_change_false_for_unknown_connector() {
+        let connectors = vec![test_connector("pick", ConnectorStatus::Online)];
+        assert!(!status_will_change(
+            &connectors,
+            "kubestudio",
+            ConnectorStatus::Offline
+        ));
+    }
+
+    #[test]
+    fn status_will_change_checks_the_right_connector() {
+        let connectors = vec![
+            test_connector("pick", ConnectorStatus::Offline),
+            test_connector("kubestudio", ConnectorStatus::Online),
+        ];
+        assert!(!status_will_change(
+            &connectors,
+            "pick",
+            ConnectorStatus::Offline
+        ));
+        assert!(status_will_change(
+            &connectors,
+            "kubestudio",
+            ConnectorStatus::Offline
+        ));
     }
 }

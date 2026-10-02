@@ -92,6 +92,10 @@ async fn main() {
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
             )
             .with(tracing_subscriber::fmt::layer())
+            // Default event_filter maps only error! records to Sentry events;
+            // add `.event_filter(...)` here alongside the span allow-list if
+            // warn-level capture is ever needed. Captured events are also
+            // message-deduped in sh_core::sentry_init::before_send (#71).
             .with(
                 sentry_tracing::layer().span_filter(sh_core::sentry_init::instrumented_spans_only),
             )
