@@ -178,6 +178,23 @@ impl AuthManager {
             .map(String::from)
     }
 
+    /// Extract the opaque, stable account identifier from the current JWT
+    /// (the OIDC `sub` claim), decoded transiently.
+    ///
+    /// This is a pseudonymous identifier issued by the identity provider:
+    /// it contains no email or display name, and it is stable across
+    /// sessions, which makes it suitable for Sentry's `user.id` without
+    /// attaching PII to telemetry.
+    /// Returns `None` if not authenticated or if the claim is missing.
+    pub fn user_subject(&self) -> Option<String> {
+        let token = self.token();
+        if token.is_empty() {
+            return None;
+        }
+        let claims = parse_jwt_claims(&token)?;
+        claims.get("sub").and_then(|v| v.as_str()).map(String::from)
+    }
+
     /// Get the sandbox token for Matrix API calls.
     /// Returns empty string if not yet bootstrapped.
     pub fn sandbox_token(&self) -> String {

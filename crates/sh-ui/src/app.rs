@@ -1609,17 +1609,16 @@ pub fn App() -> Element {
                 is_signed_in.set(true);
                 tracing::info!("Sign-in completed, connectors may now start");
 
-                // Set Sentry user context for error attribution and track sign-in
+                // Set Sentry user context for error attribution and track sign-in.
+                // Only the opaque account id (OIDC `sub` claim) is attached: email
+                // and display name are deliberately excluded from telemetry so no
+                // end-user PII rides along on subsequent events or spans.
                 #[cfg(feature = "sentry")]
                 {
                     sh_core::sentry_init::track_action("action.sign_in");
                     let am = auth_manager.read();
                     if let Some(ref auth) = *am {
-                        sh_core::sentry_init::set_user_context(
-                            None,
-                            auth.user_email().as_deref(),
-                            auth.user_display_name().as_deref(),
-                        );
+                        sh_core::sentry_init::set_user_context(auth.user_subject().as_deref());
                     }
                 }
 
