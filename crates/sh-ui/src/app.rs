@@ -2560,6 +2560,7 @@ mod tests {
             explicit_socket: None,
             matrix_app_address: None,
             instance_id: String::new(),
+            start_failure: None,
         }
     }
 
