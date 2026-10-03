@@ -437,7 +437,8 @@ async fn gql_post_with_retry(
                 );
                 last = Some(e);
                 if attempt < attempts {
-                    tokio::time::sleep(std::time::Duration::from_millis(700 * attempt as u64)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(700 * attempt as u64))
+                        .await;
                 }
             }
         }
