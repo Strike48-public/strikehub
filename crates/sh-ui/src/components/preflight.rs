@@ -292,7 +292,7 @@ pub fn PreflightOverlay(
                                         }
                                     }
                                 } else {
-                                    p { class: "preflight-hint-title", "Connector not running" }
+                                    p { class: "preflight-hint-title", "Connector not ready" }
                                     ol { class: "preflight-hint-steps",
                                         li { "Fix the failing checks above" }
                                         li { "Click ",
@@ -515,6 +515,15 @@ mod tests {
     #[test]
     fn approval_not_plausible_when_connector_is_not_running() {
         let groups = [reg_group(CheckStatus::Failed, CheckStatus::Failed)];
+        assert!(!approval_plausible(&groups));
+    }
+
+    #[test]
+    fn approval_not_plausible_when_the_running_connector_is_already_registered() {
+        let groups = [
+            reg_group(CheckStatus::Passed, CheckStatus::Passed),
+            reg_group(CheckStatus::Failed, CheckStatus::Failed),
+        ];
         assert!(!approval_plausible(&groups));
     }
 }
