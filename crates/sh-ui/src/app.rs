@@ -62,6 +62,14 @@ fn is_managed_active_connector(id: &str, easy_on: bool) -> bool {
 /// the multi-threaded tokio runtime StrikeHub actually uses (concurrent getenv
 /// on worker threads). We keep them in a locked map instead and overlay them in
 /// `matrix_env_vars()`, so no global env mutation is needed.
+fn runtime_env_overrides() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>>
+{
+    static OVERRIDES: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    OVERRIDES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
 /// Snapshot the managed connectors' runtime state for the preflight checks.
 fn connector_runtimes(
     connectors: &[ConnectorConfig],
@@ -79,14 +87,6 @@ fn connector_runtimes(
             start_failure: c.start_failure.clone(),
         })
         .collect()
-}
-
-fn runtime_env_overrides() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>>
-{
-    static OVERRIDES: std::sync::OnceLock<
-        std::sync::RwLock<std::collections::HashMap<String, String>>,
-    > = std::sync::OnceLock::new();
-    OVERRIDES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
 /// Set a runtime env override (thread-safe; replaces the old `set_var`).
@@ -2222,7 +2222,8 @@ pub fn App() -> Element {
                                 .map(|m| m.id.to_string())
                                 .collect();
                             spawn(async move {
-                                let runtimes: Vec<ConnectorRuntime> = connector_runtimes(&connectors.read(), &runners.read(), easy_on);
+                                let runtimes: Vec<ConnectorRuntime> =
+                                    connector_runtimes(&connectors.read(), &runners.read(), easy_on);
                                 let ws = ws_client_signal.read().clone();
                                 let result = if let Some(ref auth) = auth {
                                     run_preflight_full(&ids, auth, ws.as_deref(), &runtimes).await

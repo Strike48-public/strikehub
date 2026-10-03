@@ -282,7 +282,8 @@ pub struct ConnectorRuntime {
     pub id: String,
     pub name: String,
     pub status: ConnectorStatus,
-    /// True when StrikeHub has a live process for this connector.
+    /// True when StrikeHub holds a runner for this connector. A process that
+    /// exited keeps its runner until the health check evicts it.
     pub process_running: bool,
     /// Why StrikeHub could not start the connector, when known.
     pub start_failure: Option<StartFailure>,
@@ -361,7 +362,7 @@ pub async fn run_preflight_full(
                         name: "Process".into(),
                         description: format!("{} connector binary not found", display_name),
                         status: CheckStatus::Failed,
-                        install_hint: hint,
+                        install_hint: with_logs(&hint, &logs),
                         install_command: None,
                     }
                 }
@@ -418,6 +419,11 @@ fn logs_hint(dir: &std::path::Path, connector_id: &str) -> String {
     }
 }
 
+/// A failing check's hint followed by the logs line, if there is one.
+fn with_logs(hint: &str, logs: &str) -> String {
+    format!("{hint}\n{logs}").trim_end().to_string()
+}
+
 /// The step-2 "Process" check for a connector StrikeHub manages.
 ///
 /// Each way a connector can fail to be Online gets its own message, so the
@@ -432,7 +438,7 @@ fn process_check(
         name: "Process".into(),
         description,
         status: CheckStatus::Failed,
-        install_hint: format!("{hint}\n{logs}").trim_end().to_string(),
+        install_hint: with_logs(&hint, logs),
         install_command: None,
     };
     if rt.status == ConnectorStatus::Online {

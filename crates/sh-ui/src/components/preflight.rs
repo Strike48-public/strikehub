@@ -58,6 +58,14 @@ pub fn PreflightOverlay(
     let device_checking = checking && !has_device;
     let reg_checking = checking && !has_reg;
 
+    // Only the desktop app can open a folder for the user; in server mode
+    // `open::that` would run on the server.
+    let open_logs_dir = if cfg!(feature = "desktop") {
+        sh_core::log_dir()
+    } else {
+        None
+    };
+
     // Auto-poll every 5s on the registration step until all pass.
     use_effect(move || {
         let on_reg = *step.read() == WizardStep::Registration;
@@ -266,7 +274,7 @@ pub fn PreflightOverlay(
                                         " below to refresh the status"
                                     }
                                 }
-                                if let Some(dir) = sh_core::log_dir() {
+                                if let Some(dir) = open_logs_dir.clone() {
                                     button {
                                         class: "preflight-btn-recheck preflight-btn-logs",
                                         onclick: move |_| {
