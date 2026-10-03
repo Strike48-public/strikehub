@@ -10,6 +10,21 @@ enum WizardStep {
     Registration,
 }
 
+/// True when some connector is running but unregistered, the only state in
+/// which approving a pending registration on the Gateways page can help.
+fn approval_plausible(reg_groups: &[PreflightResult]) -> bool {
+    let status_of = |g: &PreflightResult, name: &str| {
+        g.checks
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.status.clone())
+    };
+    reg_groups.iter().any(|g| {
+        status_of(g, "Process") == Some(CheckStatus::Passed)
+            && status_of(g, "Registration") != Some(CheckStatus::Passed)
+    })
+}
+
 #[component]
 pub fn PreflightOverlay(
     result: AggregatePreflightResult,
@@ -47,6 +62,7 @@ pub fn PreflightOverlay(
     let device_all_passed = device_groups.iter().all(|g| g.all_passed());
     let reg_all_passed = !reg_groups.is_empty() && reg_groups.iter().all(|g| g.all_passed());
     let has_reg = !reg_groups.is_empty();
+    let show_approval_steps = approval_plausible(&reg_groups);
     let has_device = !device_groups.is_empty();
     let all_passed = device_all_passed && reg_all_passed;
 
@@ -262,16 +278,27 @@ pub fn PreflightOverlay(
                         // Only show troubleshooting hint if checks are failing
                         if has_reg && !reg_all_passed {
                             div { class: "preflight-hint-box",
-                                p { class: "preflight-hint-title", "Not seeing your connectors?" }
-                                ol { class: "preflight-hint-steps",
-                                    li { "Go to the ",
-                                        strong { "Gateways" }
-                                        " page in Strike48 Studio"
+                                if show_approval_steps {
+                                    p { class: "preflight-hint-title", "Not seeing your connectors?" }
+                                    ol { class: "preflight-hint-steps",
+                                        li { "Go to the ",
+                                            strong { "Gateways" }
+                                            " page in Strike48 Studio"
+                                        }
+                                        li { "Approve any pending connector registrations" }
+                                        li { "Click ",
+                                            strong { "Re-check" }
+                                            " below to refresh the status"
+                                        }
                                     }
-                                    li { "Approve any pending connector registrations" }
-                                    li { "Click ",
-                                        strong { "Re-check" }
-                                        " below to refresh the status"
+                                } else {
+                                    p { class: "preflight-hint-title", "Connector not running" }
+                                    ol { class: "preflight-hint-steps",
+                                        li { "Fix the failing checks above" }
+                                        li { "Click ",
+                                            strong { "Re-check" }
+                                            " below to refresh the status"
+                                        }
                                     }
                                 }
                                 if let Some(dir) = open_logs_dir.clone() {
@@ -454,5 +481,40 @@ async fn run_install_command(command: &str) -> String {
         }
         Ok(Err(e)) => format!("Failed to run command: {}", e),
         Err(e) => format!("Failed to run command: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reg_group(process: CheckStatus, registration: CheckStatus) -> PreflightResult {
+        let check = |name: &str, status: CheckStatus| PreflightCheck {
+            name: name.into(),
+            description: String::new(),
+            status,
+            install_hint: String::new(),
+            install_command: None,
+        };
+        PreflightResult {
+            connector_id: "reg-pick".into(),
+            connector_name: "Pick".into(),
+            checks: vec![
+                check("Process", process),
+                check("Registration", registration),
+            ],
+        }
+    }
+
+    #[test]
+    fn approval_plausible_when_running_connector_is_unregistered() {
+        let groups = [reg_group(CheckStatus::Passed, CheckStatus::Failed)];
+        assert!(approval_plausible(&groups));
+    }
+
+    #[test]
+    fn approval_not_plausible_when_connector_is_not_running() {
+        let groups = [reg_group(CheckStatus::Failed, CheckStatus::Failed)];
+        assert!(!approval_plausible(&groups));
     }
 }
