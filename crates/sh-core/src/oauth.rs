@@ -406,6 +406,50 @@ struct OidcEndpoints {
     token_endpoint: String,
 }
 
+/// POST a GraphQL query with retry + linear backoff.
+///
+/// Transient connect/DNS/TLS failures ("error sending request") previously
+/// aborted the whole sign-in flow after a single attempt, dumping the user
+/// back on the sign-in screen. Retry a few times before giving up.
+async fn gql_post_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    query: &serde_json::Value,
+    attempts: u32,
+) -> anyhow::Result<reqwest::Response> {
+    let mut last: Option<reqwest::Error> = None;
+    for attempt in 1..=attempts {
+        match client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .json(query)
+            .send()
+            .await
+        {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                tracing::warn!(
+                    "GraphQL POST to {} failed (attempt {}/{}): {}",
+                    url,
+                    attempt,
+                    attempts,
+                    e
+                );
+                last = Some(e);
+                if attempt < attempts {
+                    tokio::time::sleep(std::time::Duration::from_millis(700 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "request failed after {} attempts: {}",
+        attempts,
+        last.map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    ))
+}
+
 async fn discover_keycloak(
     client: &reqwest::Client,
     matrix_base: &str,
@@ -415,12 +459,7 @@ async fn discover_keycloak(
         "query": "query { publicConfig { keycloak { url realm clientId } } }"
     });
 
-    let resp = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&query)
-        .send()
-        .await?;
+    let resp = gql_post_with_retry(client, &url, &query, 4).await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
