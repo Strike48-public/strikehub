@@ -10,7 +10,7 @@ use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, CheckStatus, ConnectorConfig, ConnectorProxy,
     ConnectorRuntime, ConnectorStatus, ConnectorTransport, DEFAULT_CONNECTOR_ID, HubConfig,
-    IpcConnectorRunner, MatrixWsClient, WsRelay, all_manifests, detect_transport,
+    IpcConnectorRunner, MatrixWsClient, StartFailure, WsRelay, all_manifests, detect_transport,
     fetch_connector_apps, fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full,
     start_oauth_flow_with,
 };
@@ -189,6 +189,25 @@ fn runtime_env_overrides() -> &'static std::sync::RwLock<std::collections::HashM
         std::sync::RwLock<std::collections::HashMap<String, String>>,
     > = std::sync::OnceLock::new();
     OVERRIDES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Snapshot the managed connectors' runtime state for the preflight checks.
+fn connector_runtimes(
+    connectors: &[ConnectorConfig],
+    runners: &HashMap<String, IpcConnectorRunner>,
+    easy_on: bool,
+) -> Vec<ConnectorRuntime> {
+    connectors
+        .iter()
+        .filter(|c| is_managed_active_connector(&c.id, easy_on))
+        .map(|c| ConnectorRuntime {
+            id: c.id.clone(),
+            name: c.display_name.clone(),
+            status: c.status,
+            process_running: runners.contains_key(&c.id),
+            start_failure: c.start_failure.clone(),
+        })
+        .collect()
 }
 
 /// Set a runtime env override (thread-safe; replaces the old `set_var`).
@@ -384,6 +403,7 @@ fn sync_config(
     for conn in new_connectors.iter_mut() {
         if let Some(prev) = existing.get(&conn.id) {
             conn.status = prev.status;
+            conn.start_failure = prev.start_failure.clone();
             conn.display_name = prev.display_name.clone();
             conn.icon = prev.icon.clone();
         }
@@ -1110,10 +1130,11 @@ pub fn App() -> Element {
                 // the sentry-tracing layer only captures error! and above as
                 // Sentry events, so the steady state produces none at all.
                 // 2. The signal update is idempotent: connectors.set() is only
-                // called when the status actually changes, so this path can
-                // no longer re-trigger the effect through its own subscription
-                // (the old unconditional set() on every re-entry was what
-                // turned a broken auth state into the feedback loop).
+                // called when the status or the recorded start-cause actually
+                // changes, so this path can no longer re-trigger the effect
+                // through its own subscription (the old unconditional set() on
+                // every re-entry was what turned a broken auth state into the
+                // feedback loop).
                 // 3. The OTT mint above is gated by a per-connector failure
                 // cooldown ([`OTT_MINT_COOLDOWN`]): after a failed mint,
                 // re-entries skip the HTTP POST entirely for the window, so a
@@ -1124,9 +1145,19 @@ pub fn App() -> Element {
                 // event, no warn, no signal write, no OTT POST — the re-entry
                 // is a cheap status check only.
                 if !can_authenticate {
-                    let status_changed = {
+                    let (status_changed, failure_changed) = {
                         let current = connectors.read();
-                        status_will_change(&current, &conn.id, ConnectorStatus::Offline)
+                        let status_changed =
+                            status_will_change(&current, &conn.id, ConnectorStatus::Offline);
+                        // The recorded start-cause matters too: a connector
+                        // that never started is already Offline, so a
+                        // status-only gate would never surface the
+                        // no-credentials cause (issue #87).
+                        let failure_changed =
+                            current.iter().find(|c| c.id == conn.id).is_some_and(|c| {
+                                c.start_failure.as_ref() != Some(&StartFailure::NoCredentials)
+                            });
+                        (status_changed, failure_changed)
                     };
                     if auth_failure_warn_due(&conn.id) {
                         tracing::warn!(
@@ -1139,10 +1170,11 @@ pub fn App() -> Element {
                     // the effect-level "effect fired" info line already gives
                     // per-tick observability, and a per-re-entry log line here
                     // re-spammed debug builds every 3s (issue #71).
-                    if status_changed {
+                    if status_changed || failure_changed {
                         let mut updated = connectors.read().clone();
                         if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
                             c.status = ConnectorStatus::Offline;
+                            c.start_failure = Some(StartFailure::NoCredentials);
                         }
                         connectors.set(updated);
                     }
@@ -1181,6 +1213,7 @@ pub fn App() -> Element {
                         // Fetch info
                         let mut updated = connectors.read().clone();
                         if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
+                            c.start_failure = None;
                             if runner.health_check().await {
                                 c.status = ConnectorStatus::Online;
                             }
@@ -1206,6 +1239,12 @@ pub fn App() -> Element {
                     }
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
+                        let mut updated = connectors.read().clone();
+                        if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
+                            c.status = ConnectorStatus::Offline;
+                            c.start_failure = Some(StartFailure::SpawnFailed(e.to_string()));
+                        }
+                        connectors.set(updated);
                         // Keep the connector in the starting set so subsequent
                         // re-fires of this effect do not re-attempt the spawn
                         // (which would create new OTTs on every retry).
@@ -1899,16 +1938,8 @@ pub fn App() -> Element {
                 }
 
                 // Build runtime info from current connector state.
-                let runtimes: Vec<ConnectorRuntime> = connectors
-                    .read()
-                    .iter()
-                    .filter(|c| is_managed_active_connector(&c.id, easy_on))
-                    .map(|c| ConnectorRuntime {
-                        id: c.id.clone(),
-                        name: c.display_name.clone(),
-                        status: c.status,
-                    })
-                    .collect();
+                let runtimes: Vec<ConnectorRuntime> =
+                    connector_runtimes(&connectors.read(), &runners.read(), easy_on);
 
                 let ws = ws_client_signal.read().clone();
                 let mut result = if let Some(ref auth) = auth {
@@ -1941,16 +1972,8 @@ pub fn App() -> Element {
 
                     // Refresh runtime info — connectors may have come Online
                     // since the initial snapshot.
-                    let runtimes: Vec<ConnectorRuntime> = connectors
-                        .read()
-                        .iter()
-                        .filter(|c| is_managed_active_connector(&c.id, easy_on))
-                        .map(|c| ConnectorRuntime {
-                            id: c.id.clone(),
-                            name: c.display_name.clone(),
-                            status: c.status,
-                        })
-                        .collect();
+                    let runtimes: Vec<ConnectorRuntime> =
+                        connector_runtimes(&connectors.read(), &runners.read(), easy_on);
 
                     let ws = ws_client_signal.read().clone();
                     result = if let Some(ref auth) = auth {
@@ -2406,16 +2429,8 @@ pub fn App() -> Element {
                                 .map(|m| m.id.to_string())
                                 .collect();
                             spawn(async move {
-                                let runtimes: Vec<ConnectorRuntime> = connectors
-                                    .read()
-                                    .iter()
-                                    .filter(|c| is_managed_active_connector(&c.id, easy_on))
-                                    .map(|c| ConnectorRuntime {
-                                        id: c.id.clone(),
-                                        name: c.display_name.clone(),
-                                        status: c.status,
-                                    })
-                                    .collect();
+                                let runtimes: Vec<ConnectorRuntime> =
+                                    connector_runtimes(&connectors.read(), &runners.read(), easy_on);
                                 let ws = ws_client_signal.read().clone();
                                 let result = if let Some(ref auth) = auth {
                                     run_preflight_full(&ids, auth, ws.as_deref(), &runtimes).await
@@ -2545,6 +2560,7 @@ mod tests {
             explicit_socket: None,
             matrix_app_address: None,
             instance_id: String::new(),
+            start_failure: None,
         }
     }
 

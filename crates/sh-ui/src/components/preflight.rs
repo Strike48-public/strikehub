@@ -35,6 +35,29 @@ fn resolve_step(chosen: Option<WizardStep>, results: &[PreflightResult]) -> Wiza
     }
 }
 
+/// True when some connector is running but unregistered, the only state in
+/// which approving a pending registration on the Gateways page can help.
+fn approval_plausible(reg_groups: &[PreflightResult]) -> bool {
+    let status_of = |g: &PreflightResult, name: &str| {
+        g.checks
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.status.clone())
+    };
+    reg_groups.iter().any(|g| {
+        status_of(g, "Process") == Some(CheckStatus::Passed)
+            && status_of(g, "Registration") != Some(CheckStatus::Passed)
+    })
+}
+
+/// True when some step-2 check failed, as opposed to only still checking.
+fn any_check_failed(reg_groups: &[PreflightResult]) -> bool {
+    reg_groups
+        .iter()
+        .flat_map(|g| g.checks.iter())
+        .any(|c| c.status == CheckStatus::Failed)
+}
+
 /// The device checks a user would skip past, as "Connector: Check" lines, or
 /// `None` when every check passed and no confirmation is needed.
 fn skip_warning(device_groups: &[PreflightResult]) -> Option<Vec<String>> {
@@ -86,6 +109,8 @@ pub fn PreflightOverlay(
     let device_all_passed = device_groups.iter().all(|g| g.all_passed());
     let reg_all_passed = !reg_groups.is_empty() && reg_groups.iter().all(|g| g.all_passed());
     let has_reg = !reg_groups.is_empty();
+    let show_approval_steps = approval_plausible(&reg_groups);
+    let reg_any_failed = any_check_failed(&reg_groups);
     let has_device = !device_groups.is_empty();
     let all_passed = device_all_passed && reg_all_passed;
 
@@ -111,6 +136,14 @@ pub fn PreflightOverlay(
         Vec::new()
     };
     let reg_checking = checking && !has_reg;
+
+    // Only the desktop app can open a folder for the user; in server mode
+    // `open::that` would run on the server.
+    let open_logs_dir = if cfg!(feature = "desktop") {
+        sh_core::log_dir()
+    } else {
+        None
+    };
 
     // Auto-poll every 5s on the registration step until all pass.
     // `current_step` is derived from props as well as signals, so the effect
@@ -359,16 +392,42 @@ pub fn PreflightOverlay(
                         // Only show troubleshooting hint if checks are failing
                         if has_reg && !reg_all_passed {
                             div { class: "preflight-hint-box",
-                                p { class: "preflight-hint-title", "Not seeing your connectors?" }
-                                ol { class: "preflight-hint-steps",
-                                    li { "Go to the ",
-                                        strong { "Gateways" }
-                                        " page in Strike48 Studio"
+                                if show_approval_steps {
+                                    p { class: "preflight-hint-title", "Not seeing your connectors?" }
+                                    ol { class: "preflight-hint-steps",
+                                        li { "Go to the ",
+                                            strong { "Gateways" }
+                                            " page in Strike48 Studio"
+                                        }
+                                        li { "Approve any pending connector registrations" }
+                                        li { "Click ",
+                                            strong { "Re-check" }
+                                            " below to refresh the status"
+                                        }
                                     }
-                                    li { "Approve any pending connector registrations" }
-                                    li { "Click ",
-                                        strong { "Re-check" }
-                                        " below to refresh the status"
+                                } else {
+                                    p { class: "preflight-hint-title", "Connector not ready" }
+                                    ol { class: "preflight-hint-steps",
+                                        if reg_any_failed {
+                                            li { "Fix the failing checks above" }
+                                        } else {
+                                            li { "Wait for the connectors to finish starting" }
+                                        }
+                                        li { "Click ",
+                                            strong { "Re-check" }
+                                            " below to refresh the status"
+                                        }
+                                    }
+                                }
+                                if let Some(dir) = open_logs_dir.clone() {
+                                    button {
+                                        class: "preflight-btn-recheck preflight-btn-logs",
+                                        onclick: move |_| {
+                                            if let Err(e) = open::that(&dir) {
+                                                tracing::warn!("could not open logs folder {}: {e}", dir.display());
+                                            }
+                                        },
+                                        "Open logs folder"
                                     }
                                 }
                             }
@@ -552,12 +611,66 @@ async fn run_install_command(command: &str) -> String {
 mod tests {
     use super::*;
 
+    fn reg_group(process: CheckStatus, registration: CheckStatus) -> PreflightResult {
+        let check = |name: &str, status: CheckStatus| PreflightCheck {
+            name: name.into(),
+            description: String::new(),
+            status,
+            install_hint: String::new(),
+            install_command: None,
+        };
+        PreflightResult {
+            connector_id: "reg-pick".into(),
+            connector_name: "Pick".into(),
+            checks: vec![
+                check("Process", process),
+                check("Registration", registration),
+            ],
+        }
+    }
+
     fn group(connector_id: &str) -> PreflightResult {
         PreflightResult {
             connector_id: connector_id.into(),
             connector_name: connector_id.into(),
             checks: vec![],
         }
+    }
+
+    #[test]
+    fn approval_plausible_when_running_connector_is_unregistered() {
+        let groups = [reg_group(CheckStatus::Passed, CheckStatus::Failed)];
+        assert!(approval_plausible(&groups));
+    }
+
+    #[test]
+    fn approval_not_plausible_when_connector_is_not_running() {
+        let groups = [reg_group(CheckStatus::Failed, CheckStatus::Failed)];
+        assert!(!approval_plausible(&groups));
+    }
+
+    #[test]
+    fn any_check_failed_is_false_while_connectors_are_only_starting() {
+        let groups = [reg_group(CheckStatus::Checking, CheckStatus::Checking)];
+        assert!(!any_check_failed(&groups));
+    }
+
+    #[test]
+    fn any_check_failed_is_true_when_a_check_failed() {
+        let groups = [
+            reg_group(CheckStatus::Checking, CheckStatus::Checking),
+            reg_group(CheckStatus::Failed, CheckStatus::Failed),
+        ];
+        assert!(any_check_failed(&groups));
+    }
+
+    #[test]
+    fn approval_not_plausible_when_the_running_connector_is_already_registered() {
+        let groups = [
+            reg_group(CheckStatus::Passed, CheckStatus::Passed),
+            reg_group(CheckStatus::Failed, CheckStatus::Failed),
+        ];
+        assert!(!approval_plausible(&groups));
     }
 
     #[test]

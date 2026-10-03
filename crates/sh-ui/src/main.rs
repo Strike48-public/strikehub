@@ -11,11 +11,8 @@ fn main() {
     // console (Windows GUI).  Logs are written to:
     //   Windows: %LOCALAPPDATA%\StrikeHub\logs\
     //   macOS:   ~/Library/Application Support/StrikeHub/logs/
-    //   Linux:   ~/.local/share/strikehub/logs/
-    let log_dir = dirs::data_local_dir()
-        .expect("could not determine local app-data directory")
-        .join("StrikeHub")
-        .join("logs");
+    //   Linux:   ~/.local/share/StrikeHub/logs/
+    let log_dir = sh_core::log_dir().expect("could not determine local app-data directory");
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "strikehub.log");
 
