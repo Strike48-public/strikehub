@@ -742,3 +742,95 @@ fn parse_tenant_id(raw: &str) -> Option<String> {
     };
     details.pointer("/domain/id")?.as_str().map(String::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a structurally valid JWT (`header.payload.signature`) around the
+    /// given payload JSON. [`parse_jwt_claims`] never verifies the signature,
+    /// so a placeholder signature is sufficient for these tests.
+    fn make_jwt(payload_json: &str) -> String {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = b64.encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = b64.encode(payload_json.as_bytes());
+        format!("{header}.{payload}.sig")
+    }
+
+    /// An [`AuthManager`] whose Keycloak JWT is `token` (offline: no network
+    /// calls are made by the claim readers).
+    fn manager_with_token(token: &str) -> AuthManager {
+        let am = AuthManager::new("https://studio.example.test".into(), false)
+            .expect("reqwest client must build without network access");
+        am.set_token(
+            token.to_string(),
+            None,
+            "https://idp.example.test/token".into(),
+            "strikehub".into(),
+        );
+        am
+    }
+
+    /// A valid JWT carrying a `sub` claim must return exactly that claim —
+    /// the opaque account id Sentry's `user.id` is allowed to hold.
+    #[test]
+    fn user_subject_returns_sub_claim() {
+        let jwt = make_jwt(
+            r#"{"sub":"00000000-0000-4000-8000-000000000042","email":"user@example.test","name":"Test User","preferred_username":"test-user"}"#,
+        );
+        let am = manager_with_token(&jwt);
+        assert_eq!(
+            am.user_subject().as_deref(),
+            Some("00000000-0000-4000-8000-000000000042")
+        );
+    }
+
+    /// Not authenticated (empty token) → `None`, per the doc contract.
+    #[test]
+    fn user_subject_is_none_without_token() {
+        let am = AuthManager::new("https://studio.example.test".into(), false)
+            .expect("reqwest client must build without network access");
+        assert!(am.user_subject().is_none());
+    }
+
+    /// Authenticated but the `sub` claim is missing → `None` (callers must
+    /// fall back to anonymous attribution rather than guessing an id).
+    #[test]
+    fn user_subject_is_none_when_sub_claim_missing() {
+        let jwt = make_jwt(r#"{"email":"user@example.test","name":"Test User"}"#);
+        let am = manager_with_token(&jwt);
+        assert!(am.user_subject().is_none());
+    }
+
+    /// Defensive: a well-formed JWT whose `sub` is not a JSON string (e.g.
+    /// a numeric) must not be coerced into an account id.
+    #[test]
+    fn user_subject_is_none_when_sub_is_not_a_string() {
+        let jwt = make_jwt(r#"{"sub":12345}"#);
+        let am = manager_with_token(&jwt);
+        assert!(am.user_subject().is_none());
+    }
+
+    /// Malformed tokens (wrong part count, bad base64, non-JSON payload)
+    /// must all yield `None`, never a panic.
+    #[test]
+    fn user_subject_is_none_for_malformed_tokens() {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        // Not three dot-separated parts.
+        let am = manager_with_token("not-a-jwt");
+        assert!(am.user_subject().is_none());
+
+        // Three parts, but the payload is not valid base64.
+        let am = manager_with_token("aaa.!!!.sig");
+        assert!(am.user_subject().is_none());
+
+        // Three parts, base64 payload, but the payload is not JSON.
+        let am = manager_with_token(&format!(
+            "{}.{}.sig",
+            b64.encode(b"{}"),
+            b64.encode(b"no-json")
+        ));
+        assert!(am.user_subject().is_none());
+    }
+}

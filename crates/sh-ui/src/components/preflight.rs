@@ -10,6 +10,73 @@ enum WizardStep {
     Registration,
 }
 
+/// Registration groups are distinguished from device-posture groups by an
+/// ID prefix.
+fn is_registration_group(group: &PreflightResult) -> bool {
+    group.connector_id.starts_with("reg-")
+}
+
+/// Decide which wizard step to show.
+///
+/// An explicit user choice always wins. Otherwise the step follows the
+/// current results on every render, so the wizard never commits to a step
+/// before the device checks report: the overlay mounts with empty results
+/// while checks are still running, and must stay on Device Posture until
+/// results show there are no device-posture groups to display.
+fn resolve_step(chosen: Option<WizardStep>, results: &[PreflightResult]) -> WizardStep {
+    if let Some(step) = chosen {
+        return step;
+    }
+    let has_device = results.iter().any(|r| !is_registration_group(r));
+    if results.is_empty() || has_device {
+        WizardStep::DevicePosture
+    } else {
+        WizardStep::Registration
+    }
+}
+
+/// True when some connector is running but unregistered, the only state in
+/// which approving a pending registration on the Gateways page can help.
+fn approval_plausible(reg_groups: &[PreflightResult]) -> bool {
+    let status_of = |g: &PreflightResult, name: &str| {
+        g.checks
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.status.clone())
+    };
+    reg_groups.iter().any(|g| {
+        status_of(g, "Process") == Some(CheckStatus::Passed)
+            && status_of(g, "Registration") != Some(CheckStatus::Passed)
+    })
+}
+
+/// True when some step-2 check failed, as opposed to only still checking.
+fn any_check_failed(reg_groups: &[PreflightResult]) -> bool {
+    reg_groups
+        .iter()
+        .flat_map(|g| g.checks.iter())
+        .any(|c| c.status == CheckStatus::Failed)
+}
+
+/// The device checks a user would skip past, as "Connector: Check" lines, or
+/// `None` when every check passed and no confirmation is needed.
+fn skip_warning(device_groups: &[PreflightResult]) -> Option<Vec<String>> {
+    let failing: Vec<String> = device_groups
+        .iter()
+        .flat_map(|g| g.checks.iter().map(move |c| (g, c)))
+        .filter(|(_, c)| c.status != CheckStatus::Passed)
+        .map(|(g, c)| {
+            let suffix = if c.status == CheckStatus::Checking {
+                " (still checking)"
+            } else {
+                ""
+            };
+            format!("{}: {}{}", g.connector_name, c.name, suffix)
+        })
+        .collect();
+    (!failing.is_empty()).then_some(failing)
+}
+
 #[component]
 pub fn PreflightOverlay(
     result: AggregatePreflightResult,
@@ -21,32 +88,29 @@ pub fn PreflightOverlay(
     let device_groups: Vec<PreflightResult> = result
         .results
         .iter()
-        .filter(|r| !r.connector_id.starts_with("reg-"))
+        .filter(|r| !is_registration_group(r))
         .cloned()
         .collect();
     let reg_groups: Vec<PreflightResult> = result
         .results
         .iter()
-        .filter(|r| r.connector_id.starts_with("reg-"))
+        .filter(|r| is_registration_group(r))
         .cloned()
         .collect();
 
-    // When there are no device-posture groups (e.g. on Windows), skip straight
-    // to the registration step.
-    let initial_step = if device_groups.is_empty() {
-        WizardStep::Registration
-    } else {
-        WizardStep::DevicePosture
-    };
-    let mut step = use_signal(move || initial_step);
+    // Only the user's explicit navigation is stored; otherwise the step is
+    // derived from the latest results (see `resolve_step`).
+    let mut step: Signal<Option<WizardStep>> = use_signal(|| None);
     // Tracks groups whose collapsed state has been manually toggled by the user.
     let mut toggled: Signal<Vec<String>> = use_signal(Vec::new);
 
-    let current_step = *step.read();
+    let current_step = resolve_step(*step.read(), &result.results);
 
     let device_all_passed = device_groups.iter().all(|g| g.all_passed());
     let reg_all_passed = !reg_groups.is_empty() && reg_groups.iter().all(|g| g.all_passed());
     let has_reg = !reg_groups.is_empty();
+    let show_approval_steps = approval_plausible(&reg_groups);
+    let reg_any_failed = any_check_failed(&reg_groups);
     let has_device = !device_groups.is_empty();
     let all_passed = device_all_passed && reg_all_passed;
 
@@ -56,28 +120,55 @@ pub fn PreflightOverlay(
     // Per-step checking state: step 1 shows spinner when checking and no device results yet,
     // step 2 shows spinner when checking and no reg results yet.
     let device_checking = checking && !has_device;
+
+    // Leaving step 1 while device checks fail needs an explicit confirmation.
+    let skip_failures = skip_warning(&device_groups);
+    let needs_skip_confirm = skip_failures.is_some();
+    let mut confirm_skip = use_signal(|| false);
+    // A Re-check that was already running can clear the failures while the
+    // prompt is open; the prompt then disappears. `confirm_skip` stays set in
+    // that case, so Re-check and returning to step 1 clear it; otherwise a later
+    // failure would reopen the prompt without the user asking to skip.
+    let confirming_skip = *confirm_skip.read() && needs_skip_confirm;
+    let skip_lines: Vec<String> = if confirming_skip {
+        skip_failures.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let reg_checking = checking && !has_reg;
 
+    // Only the desktop app can open a folder for the user; in server mode
+    // `open::that` would run on the server.
+    let open_logs_dir = if cfg!(feature = "desktop") {
+        sh_core::log_dir()
+    } else {
+        None
+    };
+
     // Auto-poll every 5s on the registration step until all pass.
-    use_effect(move || {
-        let on_reg = *step.read() == WizardStep::Registration;
-        if on_reg {
+    // `current_step` is derived from props as well as signals, so the effect
+    // is keyed on it with `use_reactive!`; `live_step` lets the loop see later
+    // step changes.
+    let mut live_step = use_signal(move || current_step);
+    use_effect(use_reactive!(|current_step| {
+        live_step.set(current_step);
+        if current_step == WizardStep::Registration {
             let on_recheck = on_recheck;
             spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    if *step.peek() != WizardStep::Registration {
+                    if *live_step.peek() != WizardStep::Registration {
                         break;
                     }
                     on_recheck.call(());
                 }
             });
         }
-    });
+    }));
 
     // Auto-continue when all registration checks pass.
     let mut auto_continued = use_signal(|| false);
-    if *step.read() == WizardStep::Registration && reg_all_passed && !*auto_continued.peek() {
+    if current_step == WizardStep::Registration && reg_all_passed && !*auto_continued.peek() {
         auto_continued.set(true);
         spawn(async move {
             on_continue.call(());
@@ -135,13 +226,23 @@ pub fn PreflightOverlay(
                 div { class: "preflight-steps",
                     button {
                         class: pill1_class,
-                        onclick: move |_| step.set(WizardStep::DevicePosture),
+                        onclick: move |_| {
+                            confirm_skip.set(false);
+                            step.set(Some(WizardStep::DevicePosture));
+                        },
                         "1"
                     }
                     div { class: "step-connector" }
                     button {
                         class: pill2_class,
-                        onclick: move |_| step.set(WizardStep::Registration),
+                        disabled: is_device_step && device_checking,
+                        onclick: move |_| {
+                            if is_device_step && needs_skip_confirm {
+                                confirm_skip.set(true);
+                            } else {
+                                step.set(Some(WizardStep::Registration));
+                            }
+                        },
                         "2"
                     }
                 }
@@ -187,23 +288,60 @@ pub fn PreflightOverlay(
                                 }
                             }
                         }
+                        if !skip_lines.is_empty() {
+                            div { class: "preflight-hint-box",
+                                p { class: "preflight-hint-title",
+                                    "Skip with failing checks? These connectors will not work until they pass:"
+                                }
+                                ul { class: "preflight-hint-steps",
+                                    for line in skip_lines.iter() {
+                                        li { "{line}" }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 div { class: "preflight-footer",
                     div { class: "preflight-buttons",
-                        button {
-                            class: "preflight-btn-recheck",
-                            disabled: checking,
-                            onclick: move |_| on_recheck.call(()),
-                            if checking { "Checking\u{2026}" } else { "Re-check" }
-                        }
-                        button {
-                            class: if device_all_passed { "preflight-btn-continue" } else { "preflight-btn-skip" },
-                            onclick: move |_| {
-                                step.set(WizardStep::Registration);
-                                on_recheck.call(());
-                            },
-                            if device_all_passed { "Next" } else { "Skip" }
+                        if confirming_skip {
+                            button {
+                                class: "preflight-btn-recheck",
+                                onclick: move |_| confirm_skip.set(false),
+                                "Go back"
+                            }
+                            button {
+                                class: "preflight-btn-skip",
+                                onclick: move |_| {
+                                    confirm_skip.set(false);
+                                    step.set(Some(WizardStep::Registration));
+                                    on_recheck.call(());
+                                },
+                                "Skip anyway"
+                            }
+                        } else {
+                            button {
+                                class: "preflight-btn-recheck",
+                                disabled: checking,
+                                onclick: move |_| {
+                                    confirm_skip.set(false);
+                                    on_recheck.call(());
+                                },
+                                if checking { "Checking\u{2026}" } else { "Re-check" }
+                            }
+                            button {
+                                class: if device_all_passed { "preflight-btn-continue" } else { "preflight-btn-skip" },
+                                disabled: device_checking,
+                                onclick: move |_| {
+                                    if needs_skip_confirm {
+                                        confirm_skip.set(true);
+                                    } else {
+                                        step.set(Some(WizardStep::Registration));
+                                        on_recheck.call(());
+                                    }
+                                },
+                                if device_all_passed { "Next" } else { "Skip" }
+                            }
                         }
                     }
                 }
@@ -254,16 +392,42 @@ pub fn PreflightOverlay(
                         // Only show troubleshooting hint if checks are failing
                         if has_reg && !reg_all_passed {
                             div { class: "preflight-hint-box",
-                                p { class: "preflight-hint-title", "Not seeing your connectors?" }
-                                ol { class: "preflight-hint-steps",
-                                    li { "Go to the ",
-                                        strong { "Gateways" }
-                                        " page in Strike48 Studio"
+                                if show_approval_steps {
+                                    p { class: "preflight-hint-title", "Not seeing your connectors?" }
+                                    ol { class: "preflight-hint-steps",
+                                        li { "Go to the ",
+                                            strong { "Gateways" }
+                                            " page in Strike48 Studio"
+                                        }
+                                        li { "Approve any pending connector registrations" }
+                                        li { "Click ",
+                                            strong { "Re-check" }
+                                            " below to refresh the status"
+                                        }
                                     }
-                                    li { "Approve any pending connector registrations" }
-                                    li { "Click ",
-                                        strong { "Re-check" }
-                                        " below to refresh the status"
+                                } else {
+                                    p { class: "preflight-hint-title", "Connector not ready" }
+                                    ol { class: "preflight-hint-steps",
+                                        if reg_any_failed {
+                                            li { "Fix the failing checks above" }
+                                        } else {
+                                            li { "Wait for the connectors to finish starting" }
+                                        }
+                                        li { "Click ",
+                                            strong { "Re-check" }
+                                            " below to refresh the status"
+                                        }
+                                    }
+                                }
+                                if let Some(dir) = open_logs_dir.clone() {
+                                    button {
+                                        class: "preflight-btn-recheck preflight-btn-logs",
+                                        onclick: move |_| {
+                                            if let Err(e) = open::that(&dir) {
+                                                tracing::warn!("could not open logs folder {}: {e}", dir.display());
+                                            }
+                                        },
+                                        "Open logs folder"
                                     }
                                 }
                             }
@@ -346,6 +510,11 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
 
     let has_install_cmd = check.install_command.is_some();
     let install_cmd = check.install_command.clone();
+    let (action_label, action_progress) = if check.is_start_action() {
+        ("Start", "Starting\u{2026}")
+    } else {
+        ("Install", "Installing\u{2026}")
+    };
 
     rsx! {
         div { class: "preflight-check-item {status_class}",
@@ -375,9 +544,9 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
                             },
                             if *installing.read() {
                                 span { class: "preflight-spinner" }
-                                "Installing\u{2026}"
+                                "{action_progress}"
                             } else {
-                                "Install"
+                                "{action_label}"
                             }
                         }
                     }
@@ -435,5 +604,148 @@ async fn run_install_command(command: &str) -> String {
         }
         Ok(Err(e)) => format!("Failed to run command: {}", e),
         Err(e) => format!("Failed to run command: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reg_group(process: CheckStatus, registration: CheckStatus) -> PreflightResult {
+        let check = |name: &str, status: CheckStatus| PreflightCheck {
+            name: name.into(),
+            description: String::new(),
+            status,
+            install_hint: String::new(),
+            install_command: None,
+        };
+        PreflightResult {
+            connector_id: "reg-pick".into(),
+            connector_name: "Pick".into(),
+            checks: vec![
+                check("Process", process),
+                check("Registration", registration),
+            ],
+        }
+    }
+
+    fn group(connector_id: &str) -> PreflightResult {
+        PreflightResult {
+            connector_id: connector_id.into(),
+            connector_name: connector_id.into(),
+            checks: vec![],
+        }
+    }
+
+    #[test]
+    fn approval_plausible_when_running_connector_is_unregistered() {
+        let groups = [reg_group(CheckStatus::Passed, CheckStatus::Failed)];
+        assert!(approval_plausible(&groups));
+    }
+
+    #[test]
+    fn approval_not_plausible_when_connector_is_not_running() {
+        let groups = [reg_group(CheckStatus::Failed, CheckStatus::Failed)];
+        assert!(!approval_plausible(&groups));
+    }
+
+    #[test]
+    fn any_check_failed_is_false_while_connectors_are_only_starting() {
+        let groups = [reg_group(CheckStatus::Checking, CheckStatus::Checking)];
+        assert!(!any_check_failed(&groups));
+    }
+
+    #[test]
+    fn any_check_failed_is_true_when_a_check_failed() {
+        let groups = [
+            reg_group(CheckStatus::Checking, CheckStatus::Checking),
+            reg_group(CheckStatus::Failed, CheckStatus::Failed),
+        ];
+        assert!(any_check_failed(&groups));
+    }
+
+    #[test]
+    fn approval_not_plausible_when_the_running_connector_is_already_registered() {
+        let groups = [
+            reg_group(CheckStatus::Passed, CheckStatus::Passed),
+            reg_group(CheckStatus::Failed, CheckStatus::Failed),
+        ];
+        assert!(!approval_plausible(&groups));
+    }
+
+    #[test]
+    fn resolve_step_stays_on_device_posture_while_results_are_empty() {
+        // The overlay mounts before any check has reported. Jumping to
+        // Registration here hid a failing Docker check on Windows.
+        assert_eq!(resolve_step(None, &[]), WizardStep::DevicePosture);
+    }
+
+    #[test]
+    fn resolve_step_shows_device_posture_once_device_results_arrive() {
+        let results = [group("pick"), group("reg-pick")];
+        assert_eq!(resolve_step(None, &results), WizardStep::DevicePosture);
+    }
+
+    #[test]
+    fn resolve_step_skips_to_registration_when_only_registration_groups_exist() {
+        let results = [group("reg-pick")];
+        assert_eq!(resolve_step(None, &results), WizardStep::Registration);
+    }
+
+    fn group_with(connector_name: &str, checks: &[(&str, CheckStatus)]) -> PreflightResult {
+        PreflightResult {
+            connector_id: connector_name.to_lowercase(),
+            connector_name: connector_name.into(),
+            checks: checks
+                .iter()
+                .map(|(name, status)| PreflightCheck {
+                    name: (*name).into(),
+                    description: String::new(),
+                    status: status.clone(),
+                    install_hint: String::new(),
+                    install_command: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn skip_warning_is_none_when_all_device_checks_pass() {
+        let groups = [group_with("Pick", &[("Docker CLI", CheckStatus::Passed)])];
+        assert_eq!(skip_warning(&groups), None);
+    }
+
+    #[test]
+    fn skip_warning_lists_each_failing_check_with_its_connector() {
+        let groups = [
+            group_with(
+                "Pick",
+                &[
+                    ("Docker CLI", CheckStatus::Failed),
+                    ("Other", CheckStatus::Passed),
+                ],
+            ),
+            group_with("KubeStudio", &[("kubectl", CheckStatus::Checking)]),
+        ];
+        assert_eq!(
+            skip_warning(&groups),
+            Some(vec![
+                "Pick: Docker CLI".to_string(),
+                "KubeStudio: kubectl (still checking)".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn resolve_step_keeps_an_explicit_user_choice() {
+        let results = [group("pick")];
+        assert_eq!(
+            resolve_step(Some(WizardStep::Registration), &results),
+            WizardStep::Registration
+        );
+        assert_eq!(
+            resolve_step(Some(WizardStep::DevicePosture), &[group("reg-pick")]),
+            WizardStep::DevicePosture
+        );
     }
 }

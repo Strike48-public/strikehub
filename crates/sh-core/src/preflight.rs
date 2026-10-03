@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use crate::auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps};
-use crate::config::ConnectorStatus;
+use crate::config::{ConnectorStatus, StartFailure, log_dir};
 use crate::matrix_ws::MatrixWsClient;
 
 /// Create a `Command` that won't open a visible console window on Windows.
@@ -214,8 +214,21 @@ pub struct PreflightCheck {
     /// Shown when the check fails — tells the user how to fix it.
     pub install_hint: String,
     /// Optional shell command the UI can run to install the dependency.
-    /// When set, the preflight UI shows an "Install" button.
+    /// When set, the preflight UI shows an "Install" button ("Start" when
+    /// [`PreflightCheck::is_start_action`] is true).
     pub install_command: Option<String>,
+}
+
+/// Description suffix for a dependency that is installed but whose daemon is
+/// not running. Its `install_command` starts the daemon rather than installing.
+const DAEMON_NOT_RUNNING: &str = "(daemon not running)";
+
+impl PreflightCheck {
+    /// True when `install_command` starts an already-installed dependency, so
+    /// the UI should offer "Start" rather than "Install".
+    pub fn is_start_action(&self) -> bool {
+        self.description.ends_with(DAEMON_NOT_RUNNING)
+    }
 }
 
 /// Result of running all preflight checks for a connector.
@@ -282,6 +295,11 @@ pub struct ConnectorRuntime {
     pub id: String,
     pub name: String,
     pub status: ConnectorStatus,
+    /// True when StrikeHub holds a runner for this connector. A process that
+    /// exited keeps its runner until the health check evicts it.
+    pub process_running: bool,
+    /// Why StrikeHub could not start the connector, when known.
+    pub start_failure: Option<StartFailure>,
 }
 
 /// Run the full preflight: local prerequisites + connector registration checks.
@@ -309,29 +327,18 @@ pub async fn run_preflight_full(
     // from device-posture groups in the UI wizard).
     for id in connector_ids {
         let display_name = connector_display_name(id);
+        let logs = log_dir().map(|dir| logs_hint(&dir, id)).unwrap_or_default();
         let mut checks = Vec::new();
 
         // Check 1: connector process is running
         let runtime = runtimes.iter().find(|r| r.id == *id);
         checks.push(match runtime {
-            Some(rt) if rt.status == ConnectorStatus::Online => PreflightCheck {
-                name: "Process".into(),
-                description: format!("{} connector is running", display_name),
-                status: CheckStatus::Passed,
-                install_hint: String::new(),
-                install_command: None,
-            },
-            Some(_) => PreflightCheck {
-                name: "Process".into(),
-                description: format!("{} connector is not responding", display_name),
-                status: CheckStatus::Failed,
-                install_hint: format!(
-                    "The {} connector process started but is not healthy.\n\
-                     Check the application logs for errors.",
-                    display_name
-                ),
-                install_command: None,
-            },
+            Some(rt) => process_check(
+                display_name,
+                rt,
+                &failed_prerequisites(&result.results, id),
+                &logs,
+            ),
             None => {
                 let binary_name = connector_binary_name(id);
                 // Check if the binary actually exists on disk before
@@ -368,7 +375,7 @@ pub async fn run_preflight_full(
                         name: "Process".into(),
                         description: format!("{} connector binary not found", display_name),
                         status: CheckStatus::Failed,
-                        install_hint: hint,
+                        install_hint: with_logs(&hint, &logs),
                         install_command: None,
                     }
                 }
@@ -377,30 +384,15 @@ pub async fn run_preflight_full(
 
         // Check 2: registered with Matrix
         let registered = is_connector_registered(id, &apps);
-        checks.push(if registered {
-            PreflightCheck {
-                name: "Registration".into(),
-                description: format!("{} is registered with Strike48", display_name),
-                status: CheckStatus::Passed,
-                install_hint: String::new(),
-                install_command: None,
-            }
-        } else {
-            PreflightCheck {
-                name: "Registration".into(),
-                description: format!("{} is not yet registered with Strike48", display_name),
-                status: CheckStatus::Failed,
-                install_hint: format!(
-                    "The {} connector has not registered with the Strike48 platform.\n\
-                     This usually means:\n\
-                     \u{2022} The connector is still starting up (try Re-check)\n\
-                     \u{2022} The connector needs approval in the Strike48 dashboard\n\
-                     \u{2022} The STRIKE48_URL or TENANT_ID environment is misconfigured",
-                    display_name
-                ),
-                install_command: None,
-            }
-        });
+        let process_status = checks
+            .iter()
+            .find(|c| c.name == "Process")
+            .map_or(CheckStatus::Failed, |c| c.status.clone());
+        checks.push(registration_check(
+            display_name,
+            registered,
+            &process_status,
+        ));
 
         result.results.push(PreflightResult {
             connector_id: format!("reg-{}", id),
@@ -410,6 +402,173 @@ pub async fn run_preflight_full(
     }
 
     result
+}
+
+/// One line telling the user where to find the logs for a connector.
+fn logs_hint(dir: &std::path::Path, connector_id: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!(
+            "Logs: {} (strikehub.log.*, connector-{}.log)",
+            dir.display(),
+            connector_id
+        )
+    } else {
+        format!("Logs: {} (strikehub.log.*)", dir.display())
+    }
+}
+
+/// A failing check's hint followed by the logs line, if there is one.
+fn with_logs(hint: &str, logs: &str) -> String {
+    format!("{hint}\n{logs}").trim_end().to_string()
+}
+
+/// The step-2 "Process" check for a connector StrikeHub manages.
+///
+/// Each way a connector can fail to be Online gets its own message, so the
+/// hint never claims the process started when StrikeHub never launched it.
+fn process_check(
+    display_name: &str,
+    rt: &ConnectorRuntime,
+    failed_prereqs: &[String],
+    logs: &str,
+) -> PreflightCheck {
+    let failed = |description: String, hint: String| PreflightCheck {
+        name: "Process".into(),
+        description,
+        status: CheckStatus::Failed,
+        install_hint: with_logs(&hint, logs),
+        install_command: None,
+    };
+    if rt.status == ConnectorStatus::Online {
+        return PreflightCheck {
+            name: "Process".into(),
+            description: format!("{} connector is running", display_name),
+            status: CheckStatus::Passed,
+            install_hint: String::new(),
+            install_command: None,
+        };
+    }
+    match &rt.start_failure {
+        Some(StartFailure::NoCredentials) => failed(
+            format!("{} connector was not started", display_name),
+            format!(
+                "StrikeHub could not get credentials for the {} connector: there are no \
+                 saved credentials and a registration token could not be created, so it \
+                 was not launched.\nSign out, sign back in, then Re-check. If it persists, \
+                 share the logs below.",
+                display_name
+            ),
+        ),
+        Some(StartFailure::SpawnFailed(err)) => failed(
+            format!("{} connector failed to launch", display_name),
+            format!(
+                "StrikeHub could not launch the {} connector: {}",
+                display_name, err
+            ),
+        ),
+        None if rt.process_running => {
+            let check = unhealthy_process_check(display_name, failed_prereqs);
+            failed(check.description, check.install_hint)
+        }
+        None => PreflightCheck {
+            name: "Process".into(),
+            description: format!("{} connector is starting", display_name),
+            status: CheckStatus::Checking,
+            install_hint: String::new(),
+            install_command: None,
+        },
+    }
+}
+
+/// The step-2 "Registration" check.
+///
+/// A connector can only register once it is running, so the approval and
+/// configuration advice is shown only when the Process check passed.
+/// Otherwise the hint points back at the Process check.
+fn registration_check(
+    display_name: &str,
+    registered: bool,
+    process_status: &CheckStatus,
+) -> PreflightCheck {
+    let check = |description: String, status: CheckStatus, install_hint: String| PreflightCheck {
+        name: "Registration".into(),
+        description,
+        status,
+        install_hint,
+        install_command: None,
+    };
+    if registered {
+        return check(
+            format!("{} is registered with Strike48", display_name),
+            CheckStatus::Passed,
+            String::new(),
+        );
+    }
+    let not_registered = format!("{} is not yet registered with Strike48", display_name);
+    match process_status {
+        CheckStatus::Passed => check(
+            not_registered,
+            CheckStatus::Failed,
+            format!(
+                "The {} connector is running but has not registered with the Strike48 platform.\n\
+                 This usually means:\n\
+                 \u{2022} The connector is still connecting (try Re-check)\n\
+                 \u{2022} The connector needs approval in the Strike48 dashboard\n\
+                 \u{2022} The STRIKE48_URL or TENANT_ID environment is misconfigured",
+                display_name
+            ),
+        ),
+        CheckStatus::Checking => check(not_registered, CheckStatus::Checking, String::new()),
+        CheckStatus::Failed => check(
+            not_registered,
+            CheckStatus::Failed,
+            format!(
+                "The {} connector cannot register until it is running.\n\
+                 Fix the Process check above first.",
+                display_name
+            ),
+        ),
+    }
+}
+
+/// Names of the failed step-1 (device-posture) checks for a connector.
+fn failed_prerequisites(results: &[PreflightResult], connector_id: &str) -> Vec<String> {
+    results
+        .iter()
+        .filter(|r| r.connector_id == connector_id)
+        .flat_map(|r| &r.checks)
+        .filter(|c| c.status == CheckStatus::Failed)
+        .map(|c| c.name.clone())
+        .collect()
+}
+
+/// The "Process" check for a connector that is running but not healthy.
+///
+/// When a step-1 prerequisite failed (for Pick, Docker), that is the likely
+/// cause, so name it instead of sending the user to the application logs.
+fn unhealthy_process_check(display_name: &str, failed_prereqs: &[String]) -> PreflightCheck {
+    let install_hint = if failed_prereqs.is_empty() {
+        format!(
+            "The {} connector process started but is not healthy.\n\
+             Check the application logs for errors.",
+            display_name
+        )
+    } else {
+        format!(
+            "The {} connector process started but is not healthy.\n\
+             Likely cause: a required prerequisite failed ({}).\n\
+             Go back to step 1 (Device Posture), fix it, then Re-check.",
+            display_name,
+            failed_prereqs.join(", ")
+        )
+    };
+    PreflightCheck {
+        name: "Process".into(),
+        description: format!("{} connector is not responding", display_name),
+        status: CheckStatus::Failed,
+        install_hint,
+        install_command: None,
+    }
 }
 
 /// Check if a connector appears in the Matrix connector apps list.
@@ -650,7 +809,7 @@ fn check_docker_cli() -> PreflightCheck {
                     };
                     PreflightCheck {
                         name,
-                        description: format!("{} (daemon not running)", version),
+                        description: format!("{} {}", version, DAEMON_NOT_RUNNING),
                         status: CheckStatus::Failed,
                         install_hint: hint.into(),
                         install_command: cmd,
@@ -683,5 +842,218 @@ sudo sh get-docker.sh",
                 install_command: cmd,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(name: &str, status: CheckStatus) -> PreflightCheck {
+        PreflightCheck {
+            name: name.into(),
+            description: String::new(),
+            status,
+            install_hint: String::new(),
+            install_command: None,
+        }
+    }
+
+    fn check_with_description(description: &str) -> PreflightCheck {
+        PreflightCheck {
+            name: "Docker CLI".into(),
+            description: description.into(),
+            status: CheckStatus::Failed,
+            install_hint: String::new(),
+            install_command: Some("cmd".into()),
+        }
+    }
+
+    fn group(connector_id: &str, checks: Vec<PreflightCheck>) -> PreflightResult {
+        PreflightResult {
+            connector_id: connector_id.into(),
+            connector_name: connector_id.into(),
+            checks,
+        }
+    }
+
+    const LOGS: &str = "Logs: /tmp/StrikeHub/logs";
+
+    fn runtime(
+        status: ConnectorStatus,
+        process_running: bool,
+        start_failure: Option<StartFailure>,
+    ) -> ConnectorRuntime {
+        ConnectorRuntime {
+            id: "pick".into(),
+            name: "Pick".into(),
+            status,
+            process_running,
+            start_failure,
+        }
+    }
+
+    #[test]
+    fn process_check_passes_when_online() {
+        let c = process_check(
+            "Pick",
+            &runtime(ConnectorStatus::Online, true, None),
+            &[],
+            LOGS,
+        );
+        assert_eq!(c.status, CheckStatus::Passed);
+    }
+
+    #[test]
+    fn process_check_says_not_started_when_credentials_missing() {
+        let rt = runtime(
+            ConnectorStatus::Offline,
+            false,
+            Some(StartFailure::NoCredentials),
+        );
+        let c = process_check("Pick", &rt, &[], LOGS);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector was not started");
+        assert!(c.install_hint.contains("credentials"), "{}", c.install_hint);
+        assert!(
+            !c.install_hint.contains("process started"),
+            "{}",
+            c.install_hint
+        );
+        assert!(c.install_hint.contains(LOGS), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn process_check_reports_spawn_error() {
+        let rt = runtime(
+            ConnectorStatus::Offline,
+            false,
+            Some(StartFailure::SpawnFailed("access denied".into())),
+        );
+        let c = process_check("Pick", &rt, &[], LOGS);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector failed to launch");
+        assert!(
+            c.install_hint.contains("access denied"),
+            "{}",
+            c.install_hint
+        );
+        assert!(c.install_hint.contains(LOGS), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn process_check_running_but_unhealthy_keeps_health_hint_and_adds_logs() {
+        let rt = runtime(ConnectorStatus::Offline, true, None);
+        let c = process_check("Pick", &rt, &["Docker CLI".to_string()], LOGS);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector is not responding");
+        assert!(c.install_hint.contains("Docker CLI"), "{}", c.install_hint);
+        assert!(c.install_hint.contains(LOGS), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn process_check_not_running_without_failure_is_still_starting() {
+        let rt = runtime(ConnectorStatus::Offline, false, None);
+        let c = process_check("Pick", &rt, &[], LOGS);
+        assert_eq!(c.status, CheckStatus::Checking);
+        assert_eq!(c.description, "Pick connector is starting");
+    }
+
+    #[test]
+    fn logs_hint_names_the_log_directory() {
+        let hint = logs_hint(std::path::Path::new("/x/StrikeHub/logs"), "pick");
+        assert!(hint.contains("/x/StrikeHub/logs"), "{hint}");
+        assert!(hint.contains("strikehub.log"), "{hint}");
+    }
+
+    #[test]
+    fn registration_check_passes_when_registered() {
+        let c = registration_check("Pick", true, &CheckStatus::Passed);
+        assert_eq!(c.status, CheckStatus::Passed);
+    }
+
+    #[test]
+    fn registration_check_suggests_approval_only_when_process_is_running() {
+        let c = registration_check("Pick", false, &CheckStatus::Passed);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert!(c.install_hint.contains("approval"), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn registration_check_points_at_process_when_process_failed() {
+        let c = registration_check("Pick", false, &CheckStatus::Failed);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert!(!c.install_hint.contains("approval"), "{}", c.install_hint);
+        assert!(c.install_hint.contains("Process"), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn registration_check_waits_while_process_is_starting() {
+        let c = registration_check("Pick", false, &CheckStatus::Checking);
+        assert_eq!(c.status, CheckStatus::Checking);
+        assert!(!c.install_hint.contains("approval"), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn is_start_action_true_when_daemon_not_running() {
+        let desc = format!(
+            "Docker version 29.8.1, build 4a63305 {}",
+            DAEMON_NOT_RUNNING
+        );
+        assert!(check_with_description(&desc).is_start_action());
+    }
+
+    #[test]
+    fn is_start_action_false_when_dependency_missing() {
+        assert!(!check_with_description("Docker CLI not found").is_start_action());
+    }
+
+    #[test]
+    fn failed_prerequisites_lists_only_failed_checks_for_that_connector() {
+        let results = [
+            group(
+                "pick",
+                vec![
+                    check("Docker CLI", CheckStatus::Failed),
+                    check("Other", CheckStatus::Passed),
+                ],
+            ),
+            group("kubestudio", vec![check("kubectl", CheckStatus::Failed)]),
+        ];
+        assert_eq!(failed_prerequisites(&results, "pick"), vec!["Docker CLI"]);
+    }
+
+    #[test]
+    fn failed_prerequisites_ignores_registration_groups() {
+        let results = [group(
+            "reg-pick",
+            vec![check("Process", CheckStatus::Failed)],
+        )];
+        assert!(failed_prerequisites(&results, "pick").is_empty());
+    }
+
+    #[test]
+    fn unhealthy_process_check_names_failed_prerequisite_as_cause() {
+        let c = unhealthy_process_check("Pick", &["Docker CLI".to_string()]);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert!(c.install_hint.contains("Docker CLI"), "{}", c.install_hint);
+        assert!(c.install_hint.contains("step 1"), "{}", c.install_hint);
+        assert!(
+            !c.install_hint.contains("application logs"),
+            "{}",
+            c.install_hint
+        );
+    }
+
+    #[test]
+    fn unhealthy_process_check_keeps_generic_hint_when_prerequisites_pass() {
+        let c = unhealthy_process_check("Pick", &[]);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector is not responding");
+        assert_eq!(
+            c.install_hint,
+            "The Pick connector process started but is not healthy.\n\
+             Check the application logs for errors."
+        );
     }
 }

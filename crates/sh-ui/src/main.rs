@@ -5,17 +5,14 @@
 fn main() {
     // Initialize Sentry before tracing so panics are captured.
     #[cfg(feature = "sentry")]
-    let _sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Desktop);
+    let sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Desktop);
 
     // Set up file logging so diagnostics are available even when there is no
     // console (Windows GUI).  Logs are written to:
     //   Windows: %LOCALAPPDATA%\StrikeHub\logs\
     //   macOS:   ~/Library/Application Support/StrikeHub/logs/
-    //   Linux:   ~/.local/share/strikehub/logs/
-    let log_dir = dirs::data_local_dir()
-        .expect("could not determine local app-data directory")
-        .join("StrikeHub")
-        .join("logs");
+    //   Linux:   ~/.local/share/StrikeHub/logs/
+    let log_dir = sh_core::log_dir().expect("could not determine local app-data directory");
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "strikehub.log");
 
@@ -30,6 +27,13 @@ fn main() {
         )
         .with(fmt::layer().with_writer(file_appender))
         .with(fmt::layer().with_writer(std::io::stderr))
+        // The layer's default event_filter already maps only error! records to
+        // Sentry events (warn!/info! become breadcrumbs only), and
+        // span_filter keeps Dioxus/library spans out. If we ever need to
+        // capture warn-level events as Sentry events, add `.event_filter(...)`
+        // here alongside the span allow-list. Whatever does get captured is
+        // additionally deduped by message in sh_core::sentry_init::before_send
+        // (issue #71).
         .with(sentry_tracing::layer().span_filter(sh_core::sentry_init::instrumented_spans_only));
 
     #[cfg(not(feature = "sentry"))]
@@ -128,6 +132,13 @@ fn main() {
             },
         ))
         .launch(sh_ui::App);
+
+    // Window close: end the Release Health session and flush pending data
+    // (including the final session update) before the guard is dropped. A
+    // killed process never gets this far, which is why explicit end-and-
+    // flush on the graceful path matters for release health.
+    #[cfg(feature = "sentry")]
+    sh_core::sentry_init::shutdown_sentry(sentry_guard.as_ref(), std::time::Duration::from_secs(5));
 }
 
 #[cfg(feature = "desktop")]

@@ -919,6 +919,10 @@ pub fn app_css() -> &'static str {
             border-color: var(--status-resolved);
             color: var(--status-resolved);
         }
+        .step-pill:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
 
         .step-connector {
             width: 20px;
@@ -1130,6 +1134,9 @@ pub fn app_css() -> &'static str {
         .preflight-hint-steps strong {
             color: var(--ink-200);
         }
+        .preflight-btn-logs {
+            margin-top: 12px;
+        }
 
         /* Fixed footer */
         .preflight-footer {
@@ -1196,6 +1203,11 @@ pub fn app_css() -> &'static str {
         .preflight-btn-skip:hover {
             background: var(--ink-750);
             color: var(--ink-200);
+        }
+        .preflight-btn-continue:disabled,
+        .preflight-btn-skip:disabled {
+            opacity: 0.5;
+            cursor: default;
         }
 
         .preflight-btn-recheck {

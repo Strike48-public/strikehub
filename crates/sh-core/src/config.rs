@@ -157,6 +157,22 @@ pub enum ConnectorStatus {
     Checking,
 }
 
+/// Why StrikeHub did not get a managed connector running, when it knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartFailure {
+    /// No saved credentials and no registration token could be created, so
+    /// the connector was deliberately not launched.
+    NoCredentials,
+    /// Launching the connector process failed with this error.
+    SpawnFailed(String),
+}
+
+/// Directory holding StrikeHub's own logs and, on Windows, each managed
+/// connector's `connector-<id>.log`.
+pub fn log_dir() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("StrikeHub").join("logs"))
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectorConfig {
     pub id: String,
@@ -175,6 +191,9 @@ pub struct ConnectorConfig {
     pub matrix_app_address: Option<String>,
     /// Stable per-connector instance ID (persisted in config).
     pub instance_id: String,
+    /// Set when StrikeHub could not start this connector; cleared on a
+    /// successful start.
+    pub start_failure: Option<StartFailure>,
 }
 
 impl ConnectorConfig {
@@ -195,6 +214,7 @@ impl ConnectorConfig {
             explicit_socket: Some(socket_path),
             matrix_app_address: None,
             instance_id,
+            start_failure: None,
         }
     }
 
@@ -383,6 +403,7 @@ impl HubConfig {
                     explicit_socket: entry.socket_path.clone(),
                     matrix_app_address: None,
                     instance_id,
+                    start_failure: None,
                 }
             })
             .collect()

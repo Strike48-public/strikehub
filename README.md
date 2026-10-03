@@ -190,6 +190,10 @@ sources = [
 
 Builtin connectors (compiled into StrikeHub) always bypass the allowlist.
 
+### Log Files
+
+StrikeHub's logs live in the directory returned by `sh_core::log_dir()` — `%LOCALAPPDATA%\StrikeHub\logs` on Windows, `~/Library/Application Support/StrikeHub/logs` on macOS, and `~/.local/share/StrikeHub/logs` on Linux — and contain the daily-rotated `strikehub.log` plus, on Windows, one `connector-<id>.log` per managed connector.
+
 ## Architecture
 
 ```
@@ -221,6 +225,20 @@ strikehub/
 4. HTML response rewritten (auth token, API URL, WebSocket URL injected)
 5. Response returned to the webview
 6. WebSocket traffic routed through the WsRelay bridge
+
+### Preflight Checks
+
+Before a connector starts, `sh-core` runs device prerequisite checks (Docker,
+kubectl, etc.). Each `PreflightCheck` may carry an `install_command` the UI can run
+to fix a failed check; `PreflightCheck::is_start_action()` is true when that command
+starts an already-installed dependency whose daemon is stopped, so the wizard offers
+a "Start" button instead of "Install". See `crates/sh-core/src/preflight.rs`.
+
+### Observability
+
+Sentry is initialized at startup with a compile-time DSN (`sentry_init::init_sentry`, a no-op when no DSN is set) and tracks one Release Health session per app run. On the graceful shutdown paths (window close, server drain), both binaries call `sentry_init::shutdown_sentry` before dropping the init guard: it ends the current session and synchronously flushes the transport queue (5 s timeout), so a clean run always reports its final session — a killed process never does.
+
+Telemetry keeps identity pseudonymous: after sign-in, `sentry_init::set_user_context` is called with only the opaque account id (the OIDC `sub` claim, read via `AuthManager::user_subject` in `sh_core::auth`) — its signature deliberately accepts no email or display name — and as defense in depth the `before_send` hook strips `user.email`/`user.username` from every event before it is sent.
 
 ## Customization
 
