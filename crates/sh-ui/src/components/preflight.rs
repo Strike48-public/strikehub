@@ -10,6 +10,31 @@ enum WizardStep {
     Registration,
 }
 
+/// Registration groups are distinguished from device-posture groups by an
+/// ID prefix.
+fn is_registration_group(group: &PreflightResult) -> bool {
+    group.connector_id.starts_with("reg-")
+}
+
+/// Decide which wizard step to show.
+///
+/// An explicit user choice always wins. Otherwise the step follows the
+/// current results on every render, so the wizard never commits to a step
+/// before the device checks report: the overlay mounts with empty results
+/// while checks are still running, and must stay on Device Posture until
+/// results show there are no device-posture groups to display.
+fn resolve_step(chosen: Option<WizardStep>, results: &[PreflightResult]) -> WizardStep {
+    if let Some(step) = chosen {
+        return step;
+    }
+    let has_device = results.iter().any(|r| !is_registration_group(r));
+    if results.is_empty() || has_device {
+        WizardStep::DevicePosture
+    } else {
+        WizardStep::Registration
+    }
+}
+
 /// True when some connector is running but unregistered, the only state in
 /// which approving a pending registration on the Gateways page can help.
 fn approval_plausible(reg_groups: &[PreflightResult]) -> bool {
@@ -44,28 +69,23 @@ pub fn PreflightOverlay(
     let device_groups: Vec<PreflightResult> = result
         .results
         .iter()
-        .filter(|r| !r.connector_id.starts_with("reg-"))
+        .filter(|r| !is_registration_group(r))
         .cloned()
         .collect();
     let reg_groups: Vec<PreflightResult> = result
         .results
         .iter()
-        .filter(|r| r.connector_id.starts_with("reg-"))
+        .filter(|r| is_registration_group(r))
         .cloned()
         .collect();
 
-    // When there are no device-posture groups (e.g. on Windows), skip straight
-    // to the registration step.
-    let initial_step = if device_groups.is_empty() {
-        WizardStep::Registration
-    } else {
-        WizardStep::DevicePosture
-    };
-    let mut step = use_signal(move || initial_step);
+    // Only the user's explicit navigation is stored; otherwise the step is
+    // derived from the latest results (see `resolve_step`).
+    let mut step: Signal<Option<WizardStep>> = use_signal(|| None);
     // Tracks groups whose collapsed state has been manually toggled by the user.
     let mut toggled: Signal<Vec<String>> = use_signal(Vec::new);
 
-    let current_step = *step.read();
+    let current_step = resolve_step(*step.read(), &result.results);
 
     let device_all_passed = device_groups.iter().all(|g| g.all_passed());
     let reg_all_passed = !reg_groups.is_empty() && reg_groups.iter().all(|g| g.all_passed());
@@ -92,25 +112,29 @@ pub fn PreflightOverlay(
     };
 
     // Auto-poll every 5s on the registration step until all pass.
-    use_effect(move || {
-        let on_reg = *step.read() == WizardStep::Registration;
-        if on_reg {
+    // `current_step` is derived from props as well as signals, so the effect
+    // is keyed on it with `use_reactive!`; `live_step` lets the loop see later
+    // step changes.
+    let mut live_step = use_signal(move || current_step);
+    use_effect(use_reactive!(|current_step| {
+        live_step.set(current_step);
+        if current_step == WizardStep::Registration {
             let on_recheck = on_recheck;
             spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    if *step.peek() != WizardStep::Registration {
+                    if *live_step.peek() != WizardStep::Registration {
                         break;
                     }
                     on_recheck.call(());
                 }
             });
         }
-    });
+    }));
 
     // Auto-continue when all registration checks pass.
     let mut auto_continued = use_signal(|| false);
-    if *step.read() == WizardStep::Registration && reg_all_passed && !*auto_continued.peek() {
+    if current_step == WizardStep::Registration && reg_all_passed && !*auto_continued.peek() {
         auto_continued.set(true);
         spawn(async move {
             on_continue.call(());
@@ -168,13 +192,13 @@ pub fn PreflightOverlay(
                 div { class: "preflight-steps",
                     button {
                         class: pill1_class,
-                        onclick: move |_| step.set(WizardStep::DevicePosture),
+                        onclick: move |_| step.set(Some(WizardStep::DevicePosture)),
                         "1"
                     }
                     div { class: "step-connector" }
                     button {
                         class: pill2_class,
-                        onclick: move |_| step.set(WizardStep::Registration),
+                        onclick: move |_| step.set(Some(WizardStep::Registration)),
                         "2"
                     }
                 }
@@ -233,7 +257,7 @@ pub fn PreflightOverlay(
                         button {
                             class: if device_all_passed { "preflight-btn-continue" } else { "preflight-btn-skip" },
                             onclick: move |_| {
-                                step.set(WizardStep::Registration);
+                                step.set(Some(WizardStep::Registration));
                                 on_recheck.call(());
                             },
                             if device_all_passed { "Next" } else { "Skip" }
@@ -405,6 +429,11 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
 
     let has_install_cmd = check.install_command.is_some();
     let install_cmd = check.install_command.clone();
+    let (action_label, action_progress) = if check.is_start_action() {
+        ("Start", "Starting\u{2026}")
+    } else {
+        ("Install", "Installing\u{2026}")
+    };
 
     rsx! {
         div { class: "preflight-check-item {status_class}",
@@ -434,9 +463,9 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
                             },
                             if *installing.read() {
                                 span { class: "preflight-spinner" }
-                                "Installing\u{2026}"
+                                "{action_progress}"
                             } else {
-                                "Install"
+                                "{action_label}"
                             }
                         }
                     }
@@ -519,6 +548,14 @@ mod tests {
         }
     }
 
+    fn group(connector_id: &str) -> PreflightResult {
+        PreflightResult {
+            connector_id: connector_id.into(),
+            connector_name: connector_id.into(),
+            checks: vec![],
+        }
+    }
+
     #[test]
     fn approval_plausible_when_running_connector_is_unregistered() {
         let groups = [reg_group(CheckStatus::Passed, CheckStatus::Failed)];
@@ -553,5 +590,37 @@ mod tests {
             reg_group(CheckStatus::Failed, CheckStatus::Failed),
         ];
         assert!(!approval_plausible(&groups));
+    }
+
+    #[test]
+    fn resolve_step_stays_on_device_posture_while_results_are_empty() {
+        // The overlay mounts before any check has reported. Jumping to
+        // Registration here hid a failing Docker check on Windows.
+        assert_eq!(resolve_step(None, &[]), WizardStep::DevicePosture);
+    }
+
+    #[test]
+    fn resolve_step_shows_device_posture_once_device_results_arrive() {
+        let results = [group("pick"), group("reg-pick")];
+        assert_eq!(resolve_step(None, &results), WizardStep::DevicePosture);
+    }
+
+    #[test]
+    fn resolve_step_skips_to_registration_when_only_registration_groups_exist() {
+        let results = [group("reg-pick")];
+        assert_eq!(resolve_step(None, &results), WizardStep::Registration);
+    }
+
+    #[test]
+    fn resolve_step_keeps_an_explicit_user_choice() {
+        let results = [group("pick")];
+        assert_eq!(
+            resolve_step(Some(WizardStep::Registration), &results),
+            WizardStep::Registration
+        );
+        assert_eq!(
+            resolve_step(Some(WizardStep::DevicePosture), &[group("reg-pick")]),
+            WizardStep::DevicePosture
+        );
     }
 }
