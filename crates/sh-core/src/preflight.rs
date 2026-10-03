@@ -371,30 +371,15 @@ pub async fn run_preflight_full(
 
         // Check 2: registered with Matrix
         let registered = is_connector_registered(id, &apps);
-        checks.push(if registered {
-            PreflightCheck {
-                name: "Registration".into(),
-                description: format!("{} is registered with Strike48", display_name),
-                status: CheckStatus::Passed,
-                install_hint: String::new(),
-                install_command: None,
-            }
-        } else {
-            PreflightCheck {
-                name: "Registration".into(),
-                description: format!("{} is not yet registered with Strike48", display_name),
-                status: CheckStatus::Failed,
-                install_hint: format!(
-                    "The {} connector has not registered with the Strike48 platform.\n\
-                     This usually means:\n\
-                     \u{2022} The connector is still starting up (try Re-check)\n\
-                     \u{2022} The connector needs approval in the Strike48 dashboard\n\
-                     \u{2022} The STRIKE48_URL or TENANT_ID environment is misconfigured",
-                    display_name
-                ),
-                install_command: None,
-            }
-        });
+        let process_status = checks
+            .iter()
+            .find(|c| c.name == "Process")
+            .map_or(CheckStatus::Failed, |c| c.status.clone());
+        checks.push(registration_check(
+            display_name,
+            registered,
+            &process_status,
+        ));
 
         result.results.push(PreflightResult {
             connector_id: format!("reg-{}", id),
@@ -479,6 +464,57 @@ fn process_check(
             install_hint: String::new(),
             install_command: None,
         },
+    }
+}
+
+/// The step-2 "Registration" check.
+///
+/// A connector can only register once it is running, so the approval and
+/// configuration advice is shown only when the Process check passed.
+/// Otherwise the hint points back at the Process check.
+fn registration_check(
+    display_name: &str,
+    registered: bool,
+    process_status: &CheckStatus,
+) -> PreflightCheck {
+    let check = |description: String, status: CheckStatus, install_hint: String| PreflightCheck {
+        name: "Registration".into(),
+        description,
+        status,
+        install_hint,
+        install_command: None,
+    };
+    if registered {
+        return check(
+            format!("{} is registered with Strike48", display_name),
+            CheckStatus::Passed,
+            String::new(),
+        );
+    }
+    let not_registered = format!("{} is not yet registered with Strike48", display_name);
+    match process_status {
+        CheckStatus::Passed => check(
+            not_registered,
+            CheckStatus::Failed,
+            format!(
+                "The {} connector is running but has not registered with the Strike48 platform.\n\
+                 This usually means:\n\
+                 \u{2022} The connector is still connecting (try Re-check)\n\
+                 \u{2022} The connector needs approval in the Strike48 dashboard\n\
+                 \u{2022} The STRIKE48_URL or TENANT_ID environment is misconfigured",
+                display_name
+            ),
+        ),
+        CheckStatus::Checking => check(not_registered, CheckStatus::Checking, String::new()),
+        CheckStatus::Failed => check(
+            not_registered,
+            CheckStatus::Failed,
+            format!(
+                "The {} connector cannot register until it is running.\n\
+                 Fix the Process check above first.",
+                display_name
+            ),
+        ),
     }
 }
 
@@ -905,6 +941,34 @@ mod tests {
         let hint = logs_hint(std::path::Path::new("/x/StrikeHub/logs"), "pick");
         assert!(hint.contains("/x/StrikeHub/logs"), "{hint}");
         assert!(hint.contains("strikehub.log"), "{hint}");
+    }
+
+    #[test]
+    fn registration_check_passes_when_registered() {
+        let c = registration_check("Pick", true, &CheckStatus::Passed);
+        assert_eq!(c.status, CheckStatus::Passed);
+    }
+
+    #[test]
+    fn registration_check_suggests_approval_only_when_process_is_running() {
+        let c = registration_check("Pick", false, &CheckStatus::Passed);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert!(c.install_hint.contains("approval"), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn registration_check_points_at_process_when_process_failed() {
+        let c = registration_check("Pick", false, &CheckStatus::Failed);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert!(!c.install_hint.contains("approval"), "{}", c.install_hint);
+        assert!(c.install_hint.contains("Process"), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn registration_check_waits_while_process_is_starting() {
+        let c = registration_check("Pick", false, &CheckStatus::Checking);
+        assert_eq!(c.status, CheckStatus::Checking);
+        assert!(!c.install_hint.contains("approval"), "{}", c.install_hint);
     }
 
     #[test]
