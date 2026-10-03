@@ -101,7 +101,9 @@ pub fn PreflightOverlay(
     let needs_skip_confirm = skip_failures.is_some();
     let mut confirm_skip = use_signal(|| false);
     // A Re-check that was already running can clear the failures while the
-    // prompt is open; the prompt then disappears.
+    // prompt is open; the prompt then disappears. `confirm_skip` stays set in
+    // that case, so Re-check and returning to step 1 clear it; otherwise a later
+    // failure would reopen the prompt without the user asking to skip.
     let confirming_skip = *confirm_skip.read() && needs_skip_confirm;
     let skip_lines: Vec<String> = if confirming_skip {
         skip_failures.unwrap_or_default()
@@ -191,7 +193,10 @@ pub fn PreflightOverlay(
                 div { class: "preflight-steps",
                     button {
                         class: pill1_class,
-                        onclick: move |_| step.set(Some(WizardStep::DevicePosture)),
+                        onclick: move |_| {
+                            confirm_skip.set(false);
+                            step.set(Some(WizardStep::DevicePosture));
+                        },
                         "1"
                     }
                     div { class: "step-connector" }
@@ -285,7 +290,10 @@ pub fn PreflightOverlay(
                             button {
                                 class: "preflight-btn-recheck",
                                 disabled: checking,
-                                onclick: move |_| on_recheck.call(()),
+                                onclick: move |_| {
+                                    confirm_skip.set(false);
+                                    on_recheck.call(());
+                                },
                                 if checking { "Checking\u{2026}" } else { "Re-check" }
                             }
                             button {
