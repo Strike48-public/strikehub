@@ -30,6 +30,13 @@ fn main() {
         )
         .with(fmt::layer().with_writer(file_appender))
         .with(fmt::layer().with_writer(std::io::stderr))
+        // The layer's default event_filter already maps only error! records to
+        // Sentry events (warn!/info! become breadcrumbs only), and
+        // span_filter keeps Dioxus/library spans out. If we ever need to
+        // capture warn-level events as Sentry events, add `.event_filter(...)`
+        // here alongside the span allow-list. Whatever does get captured is
+        // additionally deduped by message in sh_core::sentry_init::before_send
+        // (issue #71).
         .with(sentry_tracing::layer().span_filter(sh_core::sentry_init::instrumented_spans_only));
 
     #[cfg(not(feature = "sentry"))]
