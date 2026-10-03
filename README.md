@@ -222,6 +222,10 @@ strikehub/
 5. Response returned to the webview
 6. WebSocket traffic routed through the WsRelay bridge
 
+### Observability
+
+Sentry is initialized at startup with a compile-time DSN (`sentry_init::init_sentry`, a no-op when no DSN is set) and tracks one Release Health session per app run. On the graceful shutdown paths (window close, server drain), both binaries call `sentry_init::shutdown_sentry` before dropping the init guard: it ends the current session and synchronously flushes the transport queue (5 s timeout), so a clean run always reports its final session — a killed process never does.
+
 ## Customization
 
 ### Default Connector
