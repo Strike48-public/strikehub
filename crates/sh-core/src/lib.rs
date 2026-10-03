@@ -12,6 +12,7 @@ pub mod ipc_runner;
 pub mod matrix_ws;
 pub mod oauth;
 pub mod ott;
+pub mod platform;
 pub mod preflight;
 pub mod proxy;
 pub mod registry;

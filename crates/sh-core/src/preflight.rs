@@ -5,7 +5,7 @@ use crate::config::{ConnectorStatus, StartFailure, log_dir};
 use crate::matrix_ws::MatrixWsClient;
 
 /// Create a `Command` that won't open a visible console window on Windows.
-fn hidden_command(program: &str) -> Command {
+pub(crate) fn hidden_command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
@@ -203,6 +203,8 @@ pub enum CheckStatus {
     Checking,
     Passed,
     Failed,
+    /// Not a pass, but not something the user can fix; they may continue.
+    Warning,
 }
 
 /// A single prerequisite check result.
@@ -283,10 +285,45 @@ pub async fn run_preflight(connector_id: &str) -> PreflightResult {
 ///
 /// Checks run in parallel across connectors.
 pub async fn run_preflight_all(connector_ids: &[String]) -> AggregatePreflightResult {
+    let platform = tokio::task::spawn_blocking(crate::platform::native_arch)
+        .await
+        .ok()
+        .and_then(|arch| platform_result(std::env::consts::OS, arch));
     let futures: Vec<_> = connector_ids.iter().map(|id| run_preflight(id)).collect();
     let all = futures::future::join_all(futures).await;
-    let results = all.into_iter().filter(|r| !r.checks.is_empty()).collect();
+    let results = platform
+        .into_iter()
+        .chain(all.into_iter().filter(|r| !r.checks.is_empty()))
+        .collect();
     AggregatePreflightResult { results }
+}
+
+/// A step-1 "Platform" warning when StrikeHub does not ship a build for this
+/// OS and CPU, or `None` on a supported platform so nothing extra is shown.
+fn platform_result(os: &str, arch: &str) -> Option<PreflightResult> {
+    if crate::platform::is_supported(os, arch) {
+        return None;
+    }
+    let supported = crate::platform::SUPPORTED_PLATFORMS
+        .iter()
+        .map(|(os, arch)| format!("{os} {arch}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(PreflightResult {
+        connector_id: "platform".into(),
+        connector_name: "StrikeHub".into(),
+        checks: vec![PreflightCheck {
+            name: "Platform".into(),
+            description: format!("{os} {arch} is not supported"),
+            status: CheckStatus::Warning,
+            install_hint: format!(
+                "StrikeHub is not built or tested for this platform. You can continue \
+                 at your own risk, but connectors may fail with errors that do not \
+                 mention the platform.\n\nSupported: {supported}."
+            ),
+            install_command: None,
+        }],
+    })
 }
 
 /// Info about a connector's runtime state for registration checks.
@@ -519,7 +556,7 @@ fn registration_check(
             ),
         ),
         CheckStatus::Checking => check(not_registered, CheckStatus::Checking, String::new()),
-        CheckStatus::Failed => check(
+        CheckStatus::Failed | CheckStatus::Warning => check(
             not_registered,
             CheckStatus::Failed,
             format!(
@@ -1055,5 +1092,27 @@ mod tests {
             "The Pick connector process started but is not healthy.\n\
              Check the application logs for errors."
         );
+    }
+
+    #[test]
+    fn platform_result_is_none_on_a_supported_platform() {
+        assert_eq!(platform_result("windows", "x86_64"), None);
+        assert_eq!(platform_result("macos", "aarch64"), None);
+    }
+
+    #[test]
+    fn platform_result_warns_on_windows_arm64() {
+        let r = platform_result("windows", "aarch64").expect("unsupported platform");
+        assert!(!r.connector_id.starts_with("reg-"));
+        let c = &r.checks[0];
+        assert_eq!(c.name, "Platform");
+        assert_eq!(c.status, CheckStatus::Warning);
+        assert_eq!(c.description, "windows aarch64 is not supported");
+        assert!(
+            c.install_hint.contains("windows x86_64"),
+            "{}",
+            c.install_hint
+        );
+        assert_eq!(c.install_command, None);
     }
 }

@@ -1041,6 +1041,7 @@ pub fn app_css() -> &'static str {
         .preflight-check-item.passed .preflight-check-status { color: var(--status-resolved); }
         .preflight-check-item.failed .preflight-check-status { color: var(--status-critical); }
         .preflight-check-item.checking .preflight-check-status { color: var(--status-in-progress); }
+        .preflight-check-item.warning .preflight-check-status { color: var(--status-high); }
 
         .preflight-check-content { flex: 1; min-width: 0; }
 
