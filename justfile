@@ -41,12 +41,24 @@ build-hub:
 run: kill
     #!/usr/bin/env bash
     set -euo pipefail
+    # Each promotion fires only when its neutral var is non-empty, and appends
+    # to any pre-existing value: outside the Nix shell nothing here is
+    # exported (an empty LD_LIBRARY_PATH entry would make glibc search CWD,
+    # and a bare export would clobber the developer's own value).
     if [ -n "${STRIKEHUB_RUNTIME_LIBS:-}" ]; then
         export LD_LIBRARY_PATH="$STRIKEHUB_RUNTIME_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+    if [ -n "${STRIKEHUB_GIO_MODULES:-}" ]; then
         export GIO_EXTRA_MODULES="$STRIKEHUB_GIO_MODULES${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
-        export __EGL_VENDOR_LIBRARY_DIRS="${STRIKEHUB_EGL_VENDOR_DIRS:-}"
-        export GBM_BACKENDS_PATH="${STRIKEHUB_GBM_BACKENDS:-}"
-        export LIBGL_DRIVERS_PATH="${STRIKEHUB_LIBGL_DRIVERS:-}"
+    fi
+    if [ -n "${STRIKEHUB_EGL_VENDOR_DIRS:-}" ]; then
+        export __EGL_VENDOR_LIBRARY_DIRS="$STRIKEHUB_EGL_VENDOR_DIRS${__EGL_VENDOR_LIBRARY_DIRS:+:$__EGL_VENDOR_LIBRARY_DIRS}"
+    fi
+    if [ -n "${STRIKEHUB_GBM_BACKENDS:-}" ]; then
+        export GBM_BACKENDS_PATH="$STRIKEHUB_GBM_BACKENDS${GBM_BACKENDS_PATH:+:$GBM_BACKENDS_PATH}"
+    fi
+    if [ -n "${STRIKEHUB_LIBGL_DRIVERS:-}" ]; then
+        export LIBGL_DRIVERS_PATH="$STRIKEHUB_LIBGL_DRIVERS${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
     fi
     RUST_LOG=info cargo run --features desktop
 
@@ -57,12 +69,22 @@ run: kill
 test *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Same per-var conditional promotion as `run` (non-empty neutral var
+    # only, append to pre-existing values, export nothing otherwise).
     if [ -n "${STRIKEHUB_RUNTIME_LIBS:-}" ]; then
         export LD_LIBRARY_PATH="$STRIKEHUB_RUNTIME_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+    if [ -n "${STRIKEHUB_GIO_MODULES:-}" ]; then
         export GIO_EXTRA_MODULES="$STRIKEHUB_GIO_MODULES${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
-        export __EGL_VENDOR_LIBRARY_DIRS="${STRIKEHUB_EGL_VENDOR_DIRS:-}"
-        export GBM_BACKENDS_PATH="${STRIKEHUB_GBM_BACKENDS:-}"
-        export LIBGL_DRIVERS_PATH="${STRIKEHUB_LIBGL_DRIVERS:-}"
+    fi
+    if [ -n "${STRIKEHUB_EGL_VENDOR_DIRS:-}" ]; then
+        export __EGL_VENDOR_LIBRARY_DIRS="$STRIKEHUB_EGL_VENDOR_DIRS${__EGL_VENDOR_LIBRARY_DIRS:+:$__EGL_VENDOR_LIBRARY_DIRS}"
+    fi
+    if [ -n "${STRIKEHUB_GBM_BACKENDS:-}" ]; then
+        export GBM_BACKENDS_PATH="$STRIKEHUB_GBM_BACKENDS${GBM_BACKENDS_PATH:+:$GBM_BACKENDS_PATH}"
+    fi
+    if [ -n "${STRIKEHUB_LIBGL_DRIVERS:-}" ]; then
+        export LIBGL_DRIVERS_PATH="$STRIKEHUB_LIBGL_DRIVERS${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
     fi
     cargo test --workspace --no-default-features --features desktop {{args}}
 
