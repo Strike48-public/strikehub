@@ -58,6 +58,25 @@ fn any_check_failed(reg_groups: &[PreflightResult]) -> bool {
         .any(|c| c.status == CheckStatus::Failed)
 }
 
+/// The device checks a user would skip past, as "Connector: Check" lines, or
+/// `None` when every check passed and no confirmation is needed.
+fn skip_warning(device_groups: &[PreflightResult]) -> Option<Vec<String>> {
+    let failing: Vec<String> = device_groups
+        .iter()
+        .flat_map(|g| g.checks.iter().map(move |c| (g, c)))
+        .filter(|(_, c)| c.status != CheckStatus::Passed)
+        .map(|(g, c)| {
+            let suffix = if c.status == CheckStatus::Checking {
+                " (still checking)"
+            } else {
+                ""
+            };
+            format!("{}: {}{}", g.connector_name, c.name, suffix)
+        })
+        .collect();
+    (!failing.is_empty()).then_some(failing)
+}
+
 #[component]
 pub fn PreflightOverlay(
     result: AggregatePreflightResult,
@@ -101,6 +120,21 @@ pub fn PreflightOverlay(
     // Per-step checking state: step 1 shows spinner when checking and no device results yet,
     // step 2 shows spinner when checking and no reg results yet.
     let device_checking = checking && !has_device;
+
+    // Leaving step 1 while device checks fail needs an explicit confirmation.
+    let skip_failures = skip_warning(&device_groups);
+    let needs_skip_confirm = skip_failures.is_some();
+    let mut confirm_skip = use_signal(|| false);
+    // A Re-check that was already running can clear the failures while the
+    // prompt is open; the prompt then disappears. `confirm_skip` stays set in
+    // that case, so Re-check and returning to step 1 clear it; otherwise a later
+    // failure would reopen the prompt without the user asking to skip.
+    let confirming_skip = *confirm_skip.read() && needs_skip_confirm;
+    let skip_lines: Vec<String> = if confirming_skip {
+        skip_failures.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let reg_checking = checking && !has_reg;
 
     // Only the desktop app can open a folder for the user; in server mode
@@ -192,13 +226,23 @@ pub fn PreflightOverlay(
                 div { class: "preflight-steps",
                     button {
                         class: pill1_class,
-                        onclick: move |_| step.set(Some(WizardStep::DevicePosture)),
+                        onclick: move |_| {
+                            confirm_skip.set(false);
+                            step.set(Some(WizardStep::DevicePosture));
+                        },
                         "1"
                     }
                     div { class: "step-connector" }
                     button {
                         class: pill2_class,
-                        onclick: move |_| step.set(Some(WizardStep::Registration)),
+                        disabled: is_device_step && device_checking,
+                        onclick: move |_| {
+                            if is_device_step && needs_skip_confirm {
+                                confirm_skip.set(true);
+                            } else {
+                                step.set(Some(WizardStep::Registration));
+                            }
+                        },
                         "2"
                     }
                 }
@@ -244,23 +288,60 @@ pub fn PreflightOverlay(
                                 }
                             }
                         }
+                        if !skip_lines.is_empty() {
+                            div { class: "preflight-hint-box",
+                                p { class: "preflight-hint-title",
+                                    "Skip with failing checks? These connectors will not work until they pass:"
+                                }
+                                ul { class: "preflight-hint-steps",
+                                    for line in skip_lines.iter() {
+                                        li { "{line}" }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 div { class: "preflight-footer",
                     div { class: "preflight-buttons",
-                        button {
-                            class: "preflight-btn-recheck",
-                            disabled: checking,
-                            onclick: move |_| on_recheck.call(()),
-                            if checking { "Checking\u{2026}" } else { "Re-check" }
-                        }
-                        button {
-                            class: if device_all_passed { "preflight-btn-continue" } else { "preflight-btn-skip" },
-                            onclick: move |_| {
-                                step.set(Some(WizardStep::Registration));
-                                on_recheck.call(());
-                            },
-                            if device_all_passed { "Next" } else { "Skip" }
+                        if confirming_skip {
+                            button {
+                                class: "preflight-btn-recheck",
+                                onclick: move |_| confirm_skip.set(false),
+                                "Go back"
+                            }
+                            button {
+                                class: "preflight-btn-skip",
+                                onclick: move |_| {
+                                    confirm_skip.set(false);
+                                    step.set(Some(WizardStep::Registration));
+                                    on_recheck.call(());
+                                },
+                                "Skip anyway"
+                            }
+                        } else {
+                            button {
+                                class: "preflight-btn-recheck",
+                                disabled: checking,
+                                onclick: move |_| {
+                                    confirm_skip.set(false);
+                                    on_recheck.call(());
+                                },
+                                if checking { "Checking\u{2026}" } else { "Re-check" }
+                            }
+                            button {
+                                class: if device_all_passed { "preflight-btn-continue" } else { "preflight-btn-skip" },
+                                disabled: device_checking,
+                                onclick: move |_| {
+                                    if needs_skip_confirm {
+                                        confirm_skip.set(true);
+                                    } else {
+                                        step.set(Some(WizardStep::Registration));
+                                        on_recheck.call(());
+                                    }
+                                },
+                                if device_all_passed { "Next" } else { "Skip" }
+                            }
                         }
                     }
                 }
@@ -609,6 +690,50 @@ mod tests {
     fn resolve_step_skips_to_registration_when_only_registration_groups_exist() {
         let results = [group("reg-pick")];
         assert_eq!(resolve_step(None, &results), WizardStep::Registration);
+    }
+
+    fn group_with(connector_name: &str, checks: &[(&str, CheckStatus)]) -> PreflightResult {
+        PreflightResult {
+            connector_id: connector_name.to_lowercase(),
+            connector_name: connector_name.into(),
+            checks: checks
+                .iter()
+                .map(|(name, status)| PreflightCheck {
+                    name: (*name).into(),
+                    description: String::new(),
+                    status: status.clone(),
+                    install_hint: String::new(),
+                    install_command: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn skip_warning_is_none_when_all_device_checks_pass() {
+        let groups = [group_with("Pick", &[("Docker CLI", CheckStatus::Passed)])];
+        assert_eq!(skip_warning(&groups), None);
+    }
+
+    #[test]
+    fn skip_warning_lists_each_failing_check_with_its_connector() {
+        let groups = [
+            group_with(
+                "Pick",
+                &[
+                    ("Docker CLI", CheckStatus::Failed),
+                    ("Other", CheckStatus::Passed),
+                ],
+            ),
+            group_with("KubeStudio", &[("kubectl", CheckStatus::Checking)]),
+        ];
+        assert_eq!(
+            skip_warning(&groups),
+            Some(vec![
+                "Pick: Docker CLI".to_string(),
+                "KubeStudio: kubectl (still checking)".to_string(),
+            ])
+        );
     }
 
     #[test]
