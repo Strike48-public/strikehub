@@ -190,6 +190,10 @@ sources = [
 
 Builtin connectors (compiled into StrikeHub) always bypass the allowlist.
 
+### Log Files
+
+StrikeHub's logs live in the directory returned by `sh_core::log_dir()` — `%LOCALAPPDATA%\StrikeHub\logs` on Windows, `~/Library/Application Support/StrikeHub/logs` on macOS, and `~/.local/share/StrikeHub/logs` on Linux — and contain the daily-rotated `strikehub.log` plus, on Windows, one `connector-<id>.log` per managed connector.
+
 ## Architecture
 
 ```
