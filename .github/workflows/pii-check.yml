@@ -23,6 +23,13 @@ jobs:
   check-pii:
     name: Scan for customer names
     runs-on: ubuntu-latest
+    # Fork PRs: GitHub withholds repository secrets from pull_request runs
+    # triggered by a fork, so on a fork PR PII_NAMES is always empty and the
+    # fail-loud guard below (and the scanner's own empty-list check) can never
+    # pass - the check would go red on every fork PR no matter what it scans.
+    # Skip this whole job for fork PRs (the pii-scan-fork-notice job explains
+    # why) and keep it fully active, guard included, for runs from this repo.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     # The banned-name list is injected from a repository secret so the customer
     # names never live in this public repo. Configure it under Settings ->
     # Secrets and variables -> Actions -> PII_NAMES (newline- or comma-separated).
@@ -84,3 +91,14 @@ jobs:
               | grep -E '^\+[^+]' || true
           )"
           printf '%s\n' "$added" | scripts/check-pii.sh
+
+  # Notice-only companion to check-pii for fork PRs, where the job above is
+  # skipped because the PII_NAMES secret is withheld. It surfaces a clear
+  # reason in the check list instead of leaving the scan silently absent.
+  pii-scan-fork-notice:
+    name: PII scan skipped (fork PR)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Explain why the PII scan is skipped
+        run: echo "::notice::PII scan skipped — fork PR, secret unavailable"
