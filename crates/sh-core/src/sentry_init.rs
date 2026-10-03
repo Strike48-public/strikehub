@@ -494,7 +494,7 @@ mod tests {
 
         set_user_context(Some("00000000-0000-4000-8000-000000000001"));
         sentry::configure_scope(|scope| {
-            let user = scope.get_user().expect("scope user must be set");
+            let user = scope.user().expect("scope user must be set");
             assert_eq!(
                 user.id.as_deref(),
                 Some("00000000-0000-4000-8000-000000000001")
@@ -523,7 +523,7 @@ mod tests {
 
         set_user_context(None);
         sentry::configure_scope(|scope| {
-            let user = scope.get_user().expect("scope user must remain set");
+            let user = scope.user().expect("scope user must remain set");
             assert!(user.id.is_none());
             assert!(user.email.is_none());
             assert!(user.username.is_none());
