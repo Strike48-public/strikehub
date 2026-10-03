@@ -25,6 +25,14 @@ fn approval_plausible(reg_groups: &[PreflightResult]) -> bool {
     })
 }
 
+/// True when some step-2 check failed, as opposed to only still checking.
+fn any_check_failed(reg_groups: &[PreflightResult]) -> bool {
+    reg_groups
+        .iter()
+        .flat_map(|g| g.checks.iter())
+        .any(|c| c.status == CheckStatus::Failed)
+}
+
 #[component]
 pub fn PreflightOverlay(
     result: AggregatePreflightResult,
@@ -63,6 +71,7 @@ pub fn PreflightOverlay(
     let reg_all_passed = !reg_groups.is_empty() && reg_groups.iter().all(|g| g.all_passed());
     let has_reg = !reg_groups.is_empty();
     let show_approval_steps = approval_plausible(&reg_groups);
+    let reg_any_failed = any_check_failed(&reg_groups);
     let has_device = !device_groups.is_empty();
     let all_passed = device_all_passed && reg_all_passed;
 
@@ -294,7 +303,11 @@ pub fn PreflightOverlay(
                                 } else {
                                     p { class: "preflight-hint-title", "Connector not ready" }
                                     ol { class: "preflight-hint-steps",
-                                        li { "Fix the failing checks above" }
+                                        if reg_any_failed {
+                                            li { "Fix the failing checks above" }
+                                        } else {
+                                            li { "Wait for the connectors to finish starting" }
+                                        }
                                         li { "Click ",
                                             strong { "Re-check" }
                                             " below to refresh the status"
@@ -516,6 +529,21 @@ mod tests {
     fn approval_not_plausible_when_connector_is_not_running() {
         let groups = [reg_group(CheckStatus::Failed, CheckStatus::Failed)];
         assert!(!approval_plausible(&groups));
+    }
+
+    #[test]
+    fn any_check_failed_is_false_while_connectors_are_only_starting() {
+        let groups = [reg_group(CheckStatus::Checking, CheckStatus::Checking)];
+        assert!(!any_check_failed(&groups));
+    }
+
+    #[test]
+    fn any_check_failed_is_true_when_a_check_failed() {
+        let groups = [
+            reg_group(CheckStatus::Checking, CheckStatus::Checking),
+            reg_group(CheckStatus::Failed, CheckStatus::Failed),
+        ];
+        assert!(any_check_failed(&groups));
     }
 
     #[test]
