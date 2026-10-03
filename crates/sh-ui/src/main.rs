@@ -5,7 +5,7 @@
 fn main() {
     // Initialize Sentry before tracing so panics are captured.
     #[cfg(feature = "sentry")]
-    let _sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Desktop);
+    let sentry_guard = sh_core::sentry_init::init_sentry(sh_core::sentry_init::AppMode::Desktop);
 
     // Set up file logging so diagnostics are available even when there is no
     // console (Windows GUI).  Logs are written to:
@@ -132,6 +132,13 @@ fn main() {
             },
         ))
         .launch(sh_ui::App);
+
+    // Window close: end the Release Health session and flush pending data
+    // (including the final session update) before the guard is dropped. A
+    // killed process never gets this far, which is why explicit end-and-
+    // flush on the graceful path matters for release health.
+    #[cfg(feature = "sentry")]
+    sh_core::sentry_init::shutdown_sentry(sentry_guard.as_ref(), std::time::Duration::from_secs(5));
 }
 
 #[cfg(feature = "desktop")]

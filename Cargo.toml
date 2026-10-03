@@ -77,7 +77,13 @@ zip = "2"
 
 # Sentry observability
 sentry = { version = "0.48", default-features = false, features = [
-    "backtrace", "contexts", "panic", "debug-images", "reqwest", "rustls"
+    "backtrace", "contexts", "panic", "debug-images", "reqwest", "rustls",
+    # "release-health" is part of sentry's default feature set, so it must be
+    # re-enabled here after default-features = false. Without it, sentry-rust
+    # compiles out the entire session machinery: auto_session_tracking is
+    # silently ignored and no session envelopes are ever sent (zero DAU /
+    # crash-free data in Sentry).
+    "release-health"
 ] }
 sentry-tracing = "0.48"
 sentry-anyhow = "0.48"

@@ -234,6 +234,10 @@ to fix a failed check; `PreflightCheck::is_start_action()` is true when that com
 starts an already-installed dependency whose daemon is stopped, so the wizard offers
 a "Start" button instead of "Install". See `crates/sh-core/src/preflight.rs`.
 
+### Observability
+
+Sentry is initialized at startup with a compile-time DSN (`sentry_init::init_sentry`, a no-op when no DSN is set) and tracks one Release Health session per app run. On the graceful shutdown paths (window close, server drain), both binaries call `sentry_init::shutdown_sentry` before dropping the init guard: it ends the current session and synchronously flushes the transport queue (5 s timeout), so a clean run always reports its final session — a killed process never does.
+
 ## Customization
 
 ### Default Connector
