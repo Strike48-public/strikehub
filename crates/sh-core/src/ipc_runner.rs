@@ -218,7 +218,7 @@ impl Drop for IpcConnectorRunner {
 /// spawn so it reflects the current run rather than growing without bound.
 #[cfg(windows)]
 fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::process::Stdio)> {
-    let log_dir = dirs::data_local_dir()?.join("StrikeHub").join("logs");
+    let log_dir = crate::config::log_dir()?;
     std::fs::create_dir_all(&log_dir).ok()?;
 
     // Sanitize the connector id so it can't escape the directory or produce an

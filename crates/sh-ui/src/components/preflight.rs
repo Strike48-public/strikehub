@@ -266,6 +266,17 @@ pub fn PreflightOverlay(
                                         " below to refresh the status"
                                     }
                                 }
+                                if let Some(dir) = sh_core::log_dir() {
+                                    button {
+                                        class: "preflight-btn-recheck preflight-btn-logs",
+                                        onclick: move |_| {
+                                            if let Err(e) = open::that(&dir) {
+                                                tracing::warn!("could not open logs folder {}: {e}", dir.display());
+                                            }
+                                        },
+                                        "Open logs folder"
+                                    }
+                                }
                             }
                         }
                     }

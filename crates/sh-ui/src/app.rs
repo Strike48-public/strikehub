@@ -10,7 +10,7 @@ use sh_core::js_string_escape;
 use sh_core::{
     AggregatePreflightResult, AuthManager, CheckStatus, ConnectorConfig, ConnectorProxy,
     ConnectorRuntime, ConnectorStatus, ConnectorTransport, DEFAULT_CONNECTOR_ID, HubConfig,
-    IpcConnectorRunner, MatrixWsClient, WsRelay, all_manifests, detect_transport,
+    IpcConnectorRunner, MatrixWsClient, StartFailure, WsRelay, all_manifests, detect_transport,
     fetch_connector_apps, fetch_tenant_id, init_allowlist, run_preflight_all, run_preflight_full,
     start_oauth_flow_with,
 };
@@ -62,6 +62,25 @@ fn is_managed_active_connector(id: &str, easy_on: bool) -> bool {
 /// the multi-threaded tokio runtime StrikeHub actually uses (concurrent getenv
 /// on worker threads). We keep them in a locked map instead and overlay them in
 /// `matrix_env_vars()`, so no global env mutation is needed.
+/// Snapshot the managed connectors' runtime state for the preflight checks.
+fn connector_runtimes(
+    connectors: &[ConnectorConfig],
+    runners: &HashMap<String, IpcConnectorRunner>,
+    easy_on: bool,
+) -> Vec<ConnectorRuntime> {
+    connectors
+        .iter()
+        .filter(|c| is_managed_active_connector(&c.id, easy_on))
+        .map(|c| ConnectorRuntime {
+            id: c.id.clone(),
+            name: c.display_name.clone(),
+            status: c.status,
+            process_running: runners.contains_key(&c.id),
+            start_failure: c.start_failure.clone(),
+        })
+        .collect()
+}
+
 fn runtime_env_overrides() -> &'static std::sync::RwLock<std::collections::HashMap<String, String>>
 {
     static OVERRIDES: std::sync::OnceLock<
@@ -263,6 +282,7 @@ fn sync_config(
     for conn in new_connectors.iter_mut() {
         if let Some(prev) = existing.get(&conn.id) {
             conn.status = prev.status;
+            conn.start_failure = prev.start_failure.clone();
             conn.display_name = prev.display_name.clone();
             conn.icon = prev.icon.clone();
         }
@@ -955,6 +975,7 @@ pub fn App() -> Element {
                     let mut updated = connectors.read().clone();
                     if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
                         c.status = ConnectorStatus::Offline;
+                        c.start_failure = Some(StartFailure::NoCredentials);
                     }
                     connectors.set(updated);
                     let mut starting = lock.lock().await;
@@ -985,6 +1006,7 @@ pub fn App() -> Element {
                         // Fetch info
                         let mut updated = connectors.read().clone();
                         if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
+                            c.start_failure = None;
                             if runner.health_check().await {
                                 c.status = ConnectorStatus::Online;
                             }
@@ -1010,6 +1032,12 @@ pub fn App() -> Element {
                     }
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
+                        let mut updated = connectors.read().clone();
+                        if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
+                            c.status = ConnectorStatus::Offline;
+                            c.start_failure = Some(StartFailure::SpawnFailed(e.to_string()));
+                        }
+                        connectors.set(updated);
                         // Keep the connector in the starting set so subsequent
                         // re-fires of this effect do not re-attempt the spawn
                         // (which would create new OTTs on every retry).
@@ -1703,16 +1731,8 @@ pub fn App() -> Element {
                 }
 
                 // Build runtime info from current connector state.
-                let runtimes: Vec<ConnectorRuntime> = connectors
-                    .read()
-                    .iter()
-                    .filter(|c| is_managed_active_connector(&c.id, easy_on))
-                    .map(|c| ConnectorRuntime {
-                        id: c.id.clone(),
-                        name: c.display_name.clone(),
-                        status: c.status,
-                    })
-                    .collect();
+                let runtimes: Vec<ConnectorRuntime> =
+                    connector_runtimes(&connectors.read(), &runners.read(), easy_on);
 
                 let ws = ws_client_signal.read().clone();
                 let mut result = if let Some(ref auth) = auth {
@@ -1745,16 +1765,8 @@ pub fn App() -> Element {
 
                     // Refresh runtime info — connectors may have come Online
                     // since the initial snapshot.
-                    let runtimes: Vec<ConnectorRuntime> = connectors
-                        .read()
-                        .iter()
-                        .filter(|c| is_managed_active_connector(&c.id, easy_on))
-                        .map(|c| ConnectorRuntime {
-                            id: c.id.clone(),
-                            name: c.display_name.clone(),
-                            status: c.status,
-                        })
-                        .collect();
+                    let runtimes: Vec<ConnectorRuntime> =
+                        connector_runtimes(&connectors.read(), &runners.read(), easy_on);
 
                     let ws = ws_client_signal.read().clone();
                     result = if let Some(ref auth) = auth {
@@ -2210,16 +2222,7 @@ pub fn App() -> Element {
                                 .map(|m| m.id.to_string())
                                 .collect();
                             spawn(async move {
-                                let runtimes: Vec<ConnectorRuntime> = connectors
-                                    .read()
-                                    .iter()
-                                    .filter(|c| is_managed_active_connector(&c.id, easy_on))
-                                    .map(|c| ConnectorRuntime {
-                                        id: c.id.clone(),
-                                        name: c.display_name.clone(),
-                                        status: c.status,
-                                    })
-                                    .collect();
+                                let runtimes: Vec<ConnectorRuntime> = connector_runtimes(&connectors.read(), &runners.read(), easy_on);
                                 let ws = ws_client_signal.read().clone();
                                 let result = if let Some(ref auth) = auth {
                                     run_preflight_full(&ids, auth, ws.as_deref(), &runtimes).await

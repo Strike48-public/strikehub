@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use crate::auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps};
-use crate::config::ConnectorStatus;
+use crate::config::{ConnectorStatus, StartFailure, log_dir};
 use crate::matrix_ws::MatrixWsClient;
 
 /// Create a `Command` that won't open a visible console window on Windows.
@@ -282,6 +282,10 @@ pub struct ConnectorRuntime {
     pub id: String,
     pub name: String,
     pub status: ConnectorStatus,
+    /// True when StrikeHub has a live process for this connector.
+    pub process_running: bool,
+    /// Why StrikeHub could not start the connector, when known.
+    pub start_failure: Option<StartFailure>,
 }
 
 /// Run the full preflight: local prerequisites + connector registration checks.
@@ -309,21 +313,18 @@ pub async fn run_preflight_full(
     // from device-posture groups in the UI wizard).
     for id in connector_ids {
         let display_name = connector_display_name(id);
+        let logs = log_dir().map(|dir| logs_hint(&dir, id)).unwrap_or_default();
         let mut checks = Vec::new();
 
         // Check 1: connector process is running
         let runtime = runtimes.iter().find(|r| r.id == *id);
         checks.push(match runtime {
-            Some(rt) if rt.status == ConnectorStatus::Online => PreflightCheck {
-                name: "Process".into(),
-                description: format!("{} connector is running", display_name),
-                status: CheckStatus::Passed,
-                install_hint: String::new(),
-                install_command: None,
-            },
-            Some(_) => {
-                unhealthy_process_check(display_name, &failed_prerequisites(&result.results, id))
-            }
+            Some(rt) => process_check(
+                display_name,
+                rt,
+                &failed_prerequisites(&result.results, id),
+                &logs,
+            ),
             None => {
                 let binary_name = connector_binary_name(id);
                 // Check if the binary actually exists on disk before
@@ -402,6 +403,77 @@ pub async fn run_preflight_full(
     }
 
     result
+}
+
+/// One line telling the user where to find the logs for a connector.
+fn logs_hint(dir: &std::path::Path, connector_id: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!(
+            "Logs: {} (strikehub.log.*, connector-{}.log)",
+            dir.display(),
+            connector_id
+        )
+    } else {
+        format!("Logs: {} (strikehub.log.*)", dir.display())
+    }
+}
+
+/// The step-2 "Process" check for a connector StrikeHub manages.
+///
+/// Each way a connector can fail to be Online gets its own message, so the
+/// hint never claims the process started when StrikeHub never launched it.
+fn process_check(
+    display_name: &str,
+    rt: &ConnectorRuntime,
+    failed_prereqs: &[String],
+    logs: &str,
+) -> PreflightCheck {
+    let failed = |description: String, hint: String| PreflightCheck {
+        name: "Process".into(),
+        description,
+        status: CheckStatus::Failed,
+        install_hint: format!("{hint}\n{logs}").trim_end().to_string(),
+        install_command: None,
+    };
+    if rt.status == ConnectorStatus::Online {
+        return PreflightCheck {
+            name: "Process".into(),
+            description: format!("{} connector is running", display_name),
+            status: CheckStatus::Passed,
+            install_hint: String::new(),
+            install_command: None,
+        };
+    }
+    match &rt.start_failure {
+        Some(StartFailure::NoCredentials) => failed(
+            format!("{} connector was not started", display_name),
+            format!(
+                "StrikeHub could not get credentials for the {} connector: there are no \
+                 saved credentials and a registration token could not be created, so it \
+                 was not launched.\nSign out, sign back in, then Re-check. If it persists, \
+                 share the logs below.",
+                display_name
+            ),
+        ),
+        Some(StartFailure::SpawnFailed(err)) => failed(
+            format!("{} connector failed to launch", display_name),
+            format!(
+                "StrikeHub could not launch the {} connector: {}",
+                display_name, err
+            ),
+        ),
+        None if rt.process_running => {
+            let check = unhealthy_process_check(display_name, failed_prereqs);
+            failed(check.description, check.install_hint)
+        }
+        None => PreflightCheck {
+            name: "Process".into(),
+            description: format!("{} connector is starting", display_name),
+            status: CheckStatus::Checking,
+            install_hint: String::new(),
+            install_command: None,
+        },
+    }
 }
 
 /// Names of the failed step-1 (device-posture) checks for a connector.
@@ -738,6 +810,95 @@ mod tests {
             connector_name: connector_id.into(),
             checks,
         }
+    }
+
+    const LOGS: &str = "Logs: /tmp/StrikeHub/logs";
+
+    fn runtime(
+        status: ConnectorStatus,
+        process_running: bool,
+        start_failure: Option<StartFailure>,
+    ) -> ConnectorRuntime {
+        ConnectorRuntime {
+            id: "pick".into(),
+            name: "Pick".into(),
+            status,
+            process_running,
+            start_failure,
+        }
+    }
+
+    #[test]
+    fn process_check_passes_when_online() {
+        let c = process_check(
+            "Pick",
+            &runtime(ConnectorStatus::Online, true, None),
+            &[],
+            LOGS,
+        );
+        assert_eq!(c.status, CheckStatus::Passed);
+    }
+
+    #[test]
+    fn process_check_says_not_started_when_credentials_missing() {
+        let rt = runtime(
+            ConnectorStatus::Offline,
+            false,
+            Some(StartFailure::NoCredentials),
+        );
+        let c = process_check("Pick", &rt, &[], LOGS);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector was not started");
+        assert!(c.install_hint.contains("credentials"), "{}", c.install_hint);
+        assert!(
+            !c.install_hint.contains("process started"),
+            "{}",
+            c.install_hint
+        );
+        assert!(c.install_hint.contains(LOGS), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn process_check_reports_spawn_error() {
+        let rt = runtime(
+            ConnectorStatus::Offline,
+            false,
+            Some(StartFailure::SpawnFailed("access denied".into())),
+        );
+        let c = process_check("Pick", &rt, &[], LOGS);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector failed to launch");
+        assert!(
+            c.install_hint.contains("access denied"),
+            "{}",
+            c.install_hint
+        );
+        assert!(c.install_hint.contains(LOGS), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn process_check_running_but_unhealthy_keeps_health_hint_and_adds_logs() {
+        let rt = runtime(ConnectorStatus::Offline, true, None);
+        let c = process_check("Pick", &rt, &["Docker CLI".to_string()], LOGS);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector is not responding");
+        assert!(c.install_hint.contains("Docker CLI"), "{}", c.install_hint);
+        assert!(c.install_hint.contains(LOGS), "{}", c.install_hint);
+    }
+
+    #[test]
+    fn process_check_not_running_without_failure_is_still_starting() {
+        let rt = runtime(ConnectorStatus::Offline, false, None);
+        let c = process_check("Pick", &rt, &[], LOGS);
+        assert_eq!(c.status, CheckStatus::Checking);
+        assert_eq!(c.description, "Pick connector is starting");
+    }
+
+    #[test]
+    fn logs_hint_names_the_log_directory() {
+        let hint = logs_hint(std::path::Path::new("/x/StrikeHub/logs"), "pick");
+        assert!(hint.contains("/x/StrikeHub/logs"), "{hint}");
+        assert!(hint.contains("strikehub.log"), "{hint}");
     }
 
     #[test]
