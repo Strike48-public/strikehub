@@ -313,7 +313,7 @@ jobs:
       matrix:
         include:
           # Linux builds run on 22.04 to keep the glibc floor at 2.35 (glibc is
-          # not bundled). Checked by the "Verify glibc floor" step.
+          # not bundled). Checked by the "Verify glibc/libstdc++ floor" step.
           - os: ubuntu-22.04
             name: AppImage x86_64
             target: x86_64-unknown-linux-gnu
@@ -494,14 +494,14 @@ jobs:
           [ "$MISSING" -eq 0 ] || { echo "AppImage is NOT portable — runtime not bundled."; exit 1; }
           echo "AppImage bundles the GTK/WebKit runtime + keeps connector siblings ✓"
 
-      - name: Verify glibc floor
+      - name: Verify glibc/libstdc++ floor
         if: matrix.installer == 'appimage'
         run: |
           set -euo pipefail
           AI=$(ls StrikeHub-*.AppImage | head -1)
           export APPIMAGE_EXTRACT_AND_RUN=1
           ./"$AI" --appimage-extract >/dev/null
-          scripts/check-glibc-floor.sh squashfs-root 2.35
+          scripts/check-glibc-floor.sh squashfs-root 2.35 3.4.30
           rm -rf squashfs-root
 
       - name: Generate checksum (AppImage)
