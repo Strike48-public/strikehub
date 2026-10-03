@@ -1130,6 +1130,9 @@ pub fn app_css() -> &'static str {
         .preflight-hint-steps strong {
             color: var(--ink-200);
         }
+        .preflight-btn-logs {
+            margin-top: 12px;
+        }
 
         /* Fixed footer */
         .preflight-footer {
