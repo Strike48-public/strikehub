@@ -312,14 +312,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Linux builds run on 22.04 to keep the glibc floor at 2.35 (glibc is
+          # not bundled). Checked by the "Verify glibc floor" step.
+          - os: ubuntu-22.04
             name: AppImage x86_64
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             artifact: strikehub-appimage-x86_64
             installer: appimage
             binary_name: strikehub
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             name: AppImage aarch64
             target: aarch64-unknown-linux-gnu
             arch: aarch64
@@ -491,6 +493,16 @@ jobs:
           rm -rf squashfs-root
           [ "$MISSING" -eq 0 ] || { echo "AppImage is NOT portable — runtime not bundled."; exit 1; }
           echo "AppImage bundles the GTK/WebKit runtime + keeps connector siblings ✓"
+
+      - name: Verify glibc floor
+        if: matrix.installer == 'appimage'
+        run: |
+          set -euo pipefail
+          AI=$(ls StrikeHub-*.AppImage | head -1)
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./"$AI" --appimage-extract >/dev/null
+          scripts/check-glibc-floor.sh squashfs-root 2.35
+          rm -rf squashfs-root
 
       - name: Generate checksum (AppImage)
         if: matrix.installer == 'appimage'
