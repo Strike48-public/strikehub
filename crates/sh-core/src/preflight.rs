@@ -321,17 +321,9 @@ pub async fn run_preflight_full(
                 install_hint: String::new(),
                 install_command: None,
             },
-            Some(_) => PreflightCheck {
-                name: "Process".into(),
-                description: format!("{} connector is not responding", display_name),
-                status: CheckStatus::Failed,
-                install_hint: format!(
-                    "The {} connector process started but is not healthy.\n\
-                     Check the application logs for errors.",
-                    display_name
-                ),
-                install_command: None,
-            },
+            Some(_) => {
+                unhealthy_process_check(display_name, &failed_prerequisites(&result.results, id))
+            }
             None => {
                 let binary_name = connector_binary_name(id);
                 // Check if the binary actually exists on disk before
@@ -410,6 +402,46 @@ pub async fn run_preflight_full(
     }
 
     result
+}
+
+/// Names of the failed step-1 (device-posture) checks for a connector.
+fn failed_prerequisites(results: &[PreflightResult], connector_id: &str) -> Vec<String> {
+    results
+        .iter()
+        .filter(|r| r.connector_id == connector_id)
+        .flat_map(|r| &r.checks)
+        .filter(|c| c.status == CheckStatus::Failed)
+        .map(|c| c.name.clone())
+        .collect()
+}
+
+/// The "Process" check for a connector that is running but not healthy.
+///
+/// When a step-1 prerequisite failed (for Pick, Docker), that is the likely
+/// cause, so name it instead of sending the user to the application logs.
+fn unhealthy_process_check(display_name: &str, failed_prereqs: &[String]) -> PreflightCheck {
+    let install_hint = if failed_prereqs.is_empty() {
+        format!(
+            "The {} connector process started but is not healthy.\n\
+             Check the application logs for errors.",
+            display_name
+        )
+    } else {
+        format!(
+            "The {} connector process started but is not healthy.\n\
+             Likely cause: a required prerequisite failed ({}).\n\
+             Go back to step 1 (Device Posture), fix it, then Re-check.",
+            display_name,
+            failed_prereqs.join(", ")
+        )
+    };
+    PreflightCheck {
+        name: "Process".into(),
+        description: format!("{} connector is not responding", display_name),
+        status: CheckStatus::Failed,
+        install_hint,
+        install_command: None,
+    }
 }
 
 /// Check if a connector appears in the Matrix connector apps list.
@@ -683,5 +715,77 @@ sudo sh get-docker.sh",
                 install_command: cmd,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(name: &str, status: CheckStatus) -> PreflightCheck {
+        PreflightCheck {
+            name: name.into(),
+            description: String::new(),
+            status,
+            install_hint: String::new(),
+            install_command: None,
+        }
+    }
+
+    fn group(connector_id: &str, checks: Vec<PreflightCheck>) -> PreflightResult {
+        PreflightResult {
+            connector_id: connector_id.into(),
+            connector_name: connector_id.into(),
+            checks,
+        }
+    }
+
+    #[test]
+    fn failed_prerequisites_lists_only_failed_checks_for_that_connector() {
+        let results = [
+            group(
+                "pick",
+                vec![
+                    check("Docker CLI", CheckStatus::Failed),
+                    check("Other", CheckStatus::Passed),
+                ],
+            ),
+            group("kubestudio", vec![check("kubectl", CheckStatus::Failed)]),
+        ];
+        assert_eq!(failed_prerequisites(&results, "pick"), vec!["Docker CLI"]);
+    }
+
+    #[test]
+    fn failed_prerequisites_ignores_registration_groups() {
+        let results = [group(
+            "reg-pick",
+            vec![check("Process", CheckStatus::Failed)],
+        )];
+        assert!(failed_prerequisites(&results, "pick").is_empty());
+    }
+
+    #[test]
+    fn unhealthy_process_check_names_failed_prerequisite_as_cause() {
+        let c = unhealthy_process_check("Pick", &["Docker CLI".to_string()]);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert!(c.install_hint.contains("Docker CLI"), "{}", c.install_hint);
+        assert!(c.install_hint.contains("step 1"), "{}", c.install_hint);
+        assert!(
+            !c.install_hint.contains("application logs"),
+            "{}",
+            c.install_hint
+        );
+    }
+
+    #[test]
+    fn unhealthy_process_check_keeps_generic_hint_when_prerequisites_pass() {
+        let c = unhealthy_process_check("Pick", &[]);
+        assert_eq!(c.status, CheckStatus::Failed);
+        assert_eq!(c.description, "Pick connector is not responding");
+        assert_eq!(
+            c.install_hint,
+            "The Pick connector process started but is not healthy.\n\
+             Check the application logs for errors."
+        );
     }
 }
