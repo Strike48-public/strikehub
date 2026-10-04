@@ -4,7 +4,7 @@ use sh_core::{AggregatePreflightResult, CheckStatus, PreflightCheck, PreflightRe
 /// Wizard step in the preflight flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WizardStep {
-    /// Step 1: local device posture (Docker, kubectl, etc.)
+    /// Step 1: local device posture (kubectl, Docker on Windows, etc.)
     DevicePosture,
     /// Step 2: connector registration with StrikeHub / Strike48
     Registration,

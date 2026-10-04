@@ -263,7 +263,7 @@ pub async fn run_preflight(connector_id: &str) -> PreflightResult {
     refresh_path();
     let (name, checks) = match connector_id {
         "kubestudio" => ("KubeStudio", run_kubestudio_checks().await),
-        "pick" => ("Pick", run_pick_checks().await),
+        "pick" => ("Pick", run_pick_checks(HostOs::current()).await),
         _ => {
             return PreflightResult {
                 connector_id: connector_id.to_string(),
@@ -651,7 +651,28 @@ async fn run_kubestudio_checks() -> Vec<PreflightCheck> {
     })]
 }
 
-async fn run_pick_checks() -> Vec<PreflightCheck> {
+/// Whether the Pick connector requires the Docker CLI as a step-1
+/// (device-posture) prerequisite on the given host OS.
+///
+/// Pick's tools are Linux tools. On Windows they can only run inside a
+/// Linux sandbox (WSL 2 or Docker, per the release notes), so Docker is a
+/// hard prerequisite there. On macOS and Linux the connector runs natively
+/// when no sandbox backend is available (pick's `resolve_shell_mode`
+/// coerces Proot → Native), so Docker is an optional sandbox backend — not
+/// a prerequisite — and no failing check must be emitted for its absence.
+fn pick_requires_docker(os: HostOs) -> bool {
+    os == HostOs::Windows
+}
+
+/// Step-1 (device-posture) checks for the Pick connector.
+///
+/// On platforms where Pick does not require a Linux sandbox backend
+/// (macOS, Linux) there are no device prerequisites, so the returned group
+/// is empty and the wizard proceeds straight to registration.
+async fn run_pick_checks(os: HostOs) -> Vec<PreflightCheck> {
+    if !pick_requires_docker(os) {
+        return Vec::new();
+    }
     let docker_check = tokio::task::spawn_blocking(check_docker_cli).await;
     vec![docker_check.unwrap_or_else(|_| PreflightCheck {
         name: "Docker CLI".into(),
@@ -1055,5 +1076,24 @@ mod tests {
             "The Pick connector process started but is not healthy.\n\
              Check the application logs for errors."
         );
+    }
+
+    #[test]
+    fn pick_requires_docker_only_on_windows() {
+        // Windows is the only platform where Pick cannot run without a
+        // Linux sandbox backend (WSL 2 or Docker).
+        assert!(pick_requires_docker(HostOs::Windows));
+        assert!(!pick_requires_docker(HostOs::MacOs));
+        assert!(!pick_requires_docker(HostOs::Linux));
+    }
+
+    #[tokio::test]
+    async fn run_pick_checks_omits_docker_outside_windows() {
+        // macOS and Linux run Pick natively when no sandbox backend is
+        // available, so the step-1 group is empty — the wizard must not
+        // nag about Docker. These paths return before probing `docker`,
+        // so the test is side-effect free.
+        assert!(run_pick_checks(HostOs::MacOs).await.is_empty());
+        assert!(run_pick_checks(HostOs::Linux).await.is_empty());
     }
 }
