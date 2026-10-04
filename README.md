@@ -253,6 +253,8 @@ a "Start" button instead of "Install". See `crates/sh-core/src/preflight.rs`.
 
 Sentry is initialized at startup with a compile-time DSN (`sentry_init::init_sentry`, a no-op when no DSN is set) and tracks one Release Health session per app run. On the graceful shutdown paths (window close, server drain), both binaries call `sentry_init::shutdown_sentry` before dropping the init guard: it ends the current session and synchronously flushes the transport queue (5 s timeout), so a clean run always reports its final session — a killed process never does.
 
+Telemetry keeps identity pseudonymous: after sign-in, `sentry_init::set_user_context` is called with only the opaque account id (the OIDC `sub` claim, read via `AuthManager::user_subject` in `sh_core::auth`) — its signature deliberately accepts no email or display name — and as defense in depth the `before_send` hook strips `user.email`/`user.username` from every event before it is sent.
+
 ## Customization
 
 ### Default Connector

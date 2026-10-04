@@ -150,22 +150,24 @@ pub fn shutdown_sentry(guard: Option<&ClientInitGuard>, timeout: Duration) -> bo
 
 /// Set user context after successful OAuth sign-in.
 ///
-/// Call this after authentication completes to associate errors with the user.
-pub fn set_user_context(user_id: Option<&str>, email: Option<&str>, username: Option<&str>) {
+/// Only an opaque, stable account identifier (the identity provider's
+/// `sub` claim) may be set. Email addresses, display names, and any
+/// other PII are deliberately not accepted: the scope user is attached
+/// to every event, transaction, and span created after sign-in, so
+/// anything set here must stay non-identifying. This is the
+/// compile-time guarantee for the "anonymous/pseudonymous identity
+/// only" telemetry model.
+///
+/// Call this after authentication completes to associate errors with
+/// the account.
+pub fn set_user_context(account_id: Option<&str>) {
     sentry::configure_scope(|scope| {
         scope.set_user(Some(sentry::User {
-            id: user_id.map(String::from),
-            email: email.map(String::from),
-            username: username.map(String::from),
+            id: account_id.map(String::from),
             ..Default::default()
         }));
     });
-    tracing::debug!(
-        "Sentry user context set: id={:?}, email={:?}, username={:?}",
-        user_id,
-        email,
-        username
-    );
+    tracing::debug!("Sentry user context set: id={:?}", account_id);
 }
 
 /// Clear user context on sign-out.
@@ -283,6 +285,7 @@ fn should_forward_message(
 /// Redacts:
 /// - `authorization` headers
 /// - Fields containing `token` in the name
+/// - User PII (`email`, `username`, `name`); only the opaque `id` is kept
 ///
 /// Dedupes: drops an event whose (level, message) key — see [`dedupe_key`] —
 /// was already forwarded within [`EVENT_DEDUPE_WINDOW`]. This is defense in
@@ -300,6 +303,18 @@ fn should_forward_message(
 fn before_send(
     mut event: sentry::protocol::Event<'static>,
 ) -> Option<sentry::protocol::Event<'static>> {
+    // Defense in depth: strip identifying user fields so no event can
+    // carry an email or username, even if the scope user were ever
+    // misconfigured. The opaque account id is preserved for
+    // pseudonymous attribution. In the v7 protocol `name` is not a
+    // dedicated field; it arrives flattened into `other`, so remove it
+    // by key.
+    if let Some(user) = event.user.as_mut() {
+        user.email = None;
+        user.username = None;
+        user.other.remove("name");
+    }
+
     // Redact request headers
     if let Some(ref mut request) = event.request {
         for (key, value) in request.headers.iter_mut() {
@@ -418,6 +433,102 @@ mod tests {
     use super::*;
     use sentry::protocol::{Envelope, EnvelopeItem, SessionStatus, SessionUpdate};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn before_send_scrubs_user_pii_but_keeps_id() {
+        let mut event = sentry::protocol::Event::default();
+        let mut user = sentry::protocol::User {
+            id: Some("00000000-0000-4000-8000-000000000001".to_string()),
+            email: Some("user@example.test".to_string()),
+            username: Some("user@example.test".to_string()),
+            ..Default::default()
+        };
+        // In the v7 protocol `name` is flattened into `other`.
+        user.other.insert(
+            "name".to_string(),
+            serde_json::Value::String("Test User".to_string()),
+        );
+        event.user = Some(user);
+
+        let scrubbed = before_send(event).expect("before_send keeps the event");
+
+        let user = scrubbed.user.as_ref().expect("user id must be preserved");
+        assert_eq!(
+            user.id.as_deref(),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
+        assert!(user.email.is_none(), "email must be scrubbed");
+        assert!(user.username.is_none(), "username must be scrubbed");
+        assert!(!user.other.contains_key("name"), "name must be scrubbed");
+    }
+
+    #[test]
+    fn before_send_keeps_event_without_user() {
+        let event = sentry::protocol::Event::default();
+        let out = before_send(event).expect("event without a user must be kept");
+        assert!(out.user.is_none());
+    }
+
+    #[test]
+    fn before_send_keeps_token_redaction() {
+        let mut event = sentry::protocol::Event::default();
+        event.extra.insert(
+            "api_token".to_string(),
+            serde_json::Value::String("secret".to_string()),
+        );
+
+        let scrubbed = before_send(event).expect("before_send keeps the event");
+        assert_eq!(
+            scrubbed.extra.get("api_token"),
+            Some(&serde_json::Value::String("[REDACTED]".to_string()))
+        );
+    }
+
+    /// The narrowed [`set_user_context`] signature accepts only an opaque
+    /// account id: assert the scope state directly so a regression that
+    /// starts attaching email/username again is caught here, mirroring how
+    /// the `before_send` tests above assert redaction on a live event.
+    #[test]
+    fn set_user_context_attaches_only_opaque_id_to_scope() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        set_user_context(Some("00000000-0000-4000-8000-000000000001"));
+        sentry::configure_scope(|scope| {
+            let user = scope.user().expect("scope user must be set");
+            assert_eq!(
+                user.id.as_deref(),
+                Some("00000000-0000-4000-8000-000000000001")
+            );
+            assert!(user.email.is_none(), "email must never reach the scope");
+            assert!(
+                user.username.is_none(),
+                "username must never reach the scope"
+            );
+            assert!(
+                user.ip_address.is_none(),
+                "ip_address must never reach the scope"
+            );
+            assert!(
+                !user.other.contains_key("name"),
+                "display name must never reach the scope"
+            );
+        });
+    }
+
+    /// A `None` account id still attaches a user with `id: None` (anonymous
+    /// attribution), never an absent user and never PII fields.
+    #[test]
+    fn set_user_context_none_keeps_anonymous_scope_user() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        set_user_context(None);
+        sentry::configure_scope(|scope| {
+            let user = scope.user().expect("scope user must remain set");
+            assert!(user.id.is_none());
+            assert!(user.email.is_none());
+            assert!(user.username.is_none());
+        });
+    }
 
     /// Serializes tests that share sentry's global hub.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
