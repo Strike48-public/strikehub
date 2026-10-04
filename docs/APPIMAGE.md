@@ -96,6 +96,34 @@ chmod +x StrikeHub-*.AppImage
 ./StrikeHub-*.AppImage
 ```
 
+## Host runtime requirements
+
+The AppImage bundles the GTK3 + WebKitGTK 4.1 runtime, including WebKit's
+out-of-process helpers. Their `rpath` points inside the bundle, so the
+bundled WebKit is always the one used — a system `libwebkit2gtk-4.1-0` is
+**not** required (and a differently-versioned one is ignored, which is what
+previously hung startup on hosts like ubuntu 26.04 where the system WebKit
+is newer than the bundled one).
+
+Remaining host dependencies (verified in containers against ubuntu 22.04 and
+ubuntu 26.04):
+
+| Package | Why |
+|---|---|
+| `libegl1` | EGL dispatch for WebKit's GL path |
+| `libgl1` | Host OpenGL/GLES (`libGLESv2.so.2`) — without it the app aborts during WebView init |
+| `libgbm1` | Buffer management (Mesa), needed by the bundled WebKitGTK |
+| `libx11-6` | X11 client libs (the app runs `GDK_BACKEND=x11`) |
+| `libwayland-client0` | Wayland client libs needed by GTK3 (inert under `GDK_BACKEND=x11`; the host's copy must be used — bundling an older one breaks WebKit EGL init on newer hosts) |
+| `ca-certificates` | TLS verification for the studio connection (native-tls) |
+
+These are preinstalled on ordinary desktop systems; a minimal container needs
+`apt-get install libegl1 libgl1 libgbm1 libx11-6 libwayland-client0 ca-certificates`
+plus any font package (e.g. `fonts-dejavu-core`).
+
+- glibc floor: GLIBC 2.35 / GLIBCXX 3.4.30 (enforced by `scripts/check-glibc-floor.sh`).
+- A display server is required (X11; Xvfb works for headless testing).
+
 ## Troubleshooting
 
 ### FUSE Error
