@@ -126,10 +126,25 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
     exit 1
 }
 
+# WiX Product/@Version is strictly numeric x.x.x.x (integers 0..65534); candle
+# rejects prerelease versions with CNDL0108 — e.g. 0.1.22-rc.1, which the
+# Release workflow's "Sync Cargo.toml to tag version" step writes for PRERELEASE
+# tags and the MSI step passes through as-is. Feed WiX only the leading numeric
+# groups; $Version stays raw for the output filename so the workflow's Move-Item
+# contract (StrikeHub-<rawVersion>-<arch>.msi) is unchanged.
+if ($Version -match '^(\d+(?:\.\d+){0,3})') {
+    $WixVersion = $Matches[1]
+} else {
+    $WixVersion = $Version   # non-numeric input: pass through (candle rejects as before)
+}
+if ($WixVersion -ne $Version) {
+    Write-Host "  (WiX ProductVersion mapped to numeric $WixVersion)" -ForegroundColor Yellow
+}
+
 # Compile WiX source
 Write-Host "Compiling..." -ForegroundColor Yellow
 & "$wixDir\candle.exe" -nologo `
-    -dVersion="$Version" `
+    -dVersion="$WixVersion" `
     -dPlatform="$WixPlatform" `
     -arch $WixArch `
     -out wix\main.wixobj `
