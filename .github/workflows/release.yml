@@ -503,6 +503,18 @@ jobs:
           [ "$MISSING" -eq 0 ] || { echo "AppImage is NOT portable — runtime not bundled."; exit 1; }
           echo "AppImage bundles the GTK/WebKit runtime + keeps connector siblings ✓"
 
+      - name: Verify AppImage runtime is static FUSE-3 (no libfuse.so.2)
+        if: matrix.installer == 'appimage'
+        run: |
+          set -euo pipefail
+          # The AppImage's embedded runtime decides which FUSE the artifact
+          # needs. The legacy AppImageKit runtime dlopens libfuse.so.2 —
+          # absent on stock Ubuntu 24.04+ (FUSE 3 only) — and dies at launch
+          # silently from the app grid (Strike48/project-management#377
+          # finding 2, BLOCKER; #382). Guard the runtime section, not just
+          # the payload, on every build.
+          scripts/check-appimage-fuse.sh "$(ls StrikeHub-*.AppImage | head -1)"
+
       - name: Verify glibc/libstdc++ floor
         if: matrix.installer == 'appimage'
         run: |
