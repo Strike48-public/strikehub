@@ -474,12 +474,21 @@ jobs:
           chmod +x "$AI"
           # Assert the runtime is bundled — if these libs aren't inside, the
           # AppImage relies on the host and isn't portable (the bug we fixed).
+          # The graphics stack (wayland/EGL/GBM/glvnd/mesa) had to be added
+          # explicitly: stock Ubuntu (incl. minimal/server images) ships none
+          # of it, and the build runners DO, which is why it was missing for
+          # years without CI complaining.
           export APPIMAGE_EXTRACT_AND_RUN=1
           ./"$AI" --appimage-extract >/dev/null
           MISSING=0
-          for lib in libwebkit2gtk-4.1.so.0 libgtk-3.so.0 libxdo.so.3; do
+          for lib in libwebkit2gtk-4.1.so.0 libgtk-3.so.0 libxdo.so.3 \
+              libwayland-client libwayland-egl libgbm libEGL libGL libGLX libOpenGL \
+              libGLdispatch libGLX_mesa libEGL_mesa libdrm libglapi libLLVM; do
             find squashfs-root -name "$lib*" | grep -q . || { echo "MISSING bundled lib: $lib"; MISSING=1; }
           done
+          # The software renderer must be bundled, else GPU-less stock hosts
+          # (containers, minimal/server images) cannot render the webview.
+          find squashfs-root -path '*dri/swrast_dri.so' | grep -q . || { echo "MISSING DRI software renderer (swrast_dri.so)"; MISSING=1; }
           find squashfs-root -name 'WebKitNetworkProcess' | grep -q . || { echo "MISSING WebKitNetworkProcess helper"; MISSING=1; }
           # The hardcoded absolute WebKit exec path must be patched out, else the
           # web process can't spawn on a host without webkit at that fixed path.
@@ -877,7 +886,7 @@ jobs:
 
             All packages include bundled connectors (`ks-connector` and `pentest-agent`) and pre-configured environment variables.
             - **`.msi`** — Windows installer with Start Menu, desktop shortcut, and system env vars
-            - **`.AppImage`** — Portable Linux package, runs on most distributions without installation
+            - **`.AppImage`** — Portable Linux package: runs out of the box on stock Ubuntu 22.04/26.04, including minimal/server images (zero extra packages — the full GTK/WebKit/graphics runtime is bundled). Building from source instead? Install `libegl1 libgbm1 libwayland-client0 ca-certificates libwebkit2gtk-4.1-0` first (desktop)
 
             <!--
             Docker instructions hidden from the rendered release until the published
