@@ -53,6 +53,25 @@
                     Source='dist\strikehub.exe'
                     KeyPath='yes' />
             </Component>
+            <!-- VC++ 2015-2022 runtime, app-local deployment. strikehub.exe is
+                 built with the default MSVC dynamic CRT and imports
+                 VCRUNTIME140.dll + VCRUNTIME140_1.dll (verified with dumpbin
+                 /dependents on the release binary); a clean Windows 10 machine
+                 ships no VC++ redist, so the installer carries exactly those
+                 DLLs next to the executable. build-msi.ps1 stages them from
+                 the build host's MSVC toolset (see redist\ provenance there). -->
+            <Component Id='VcRuntimeInstallDir' Guid='B1A34567-89AB-CDEF-0123-456789ABC040' Win64='yes'>
+                <File Id='vcruntime140InstallDir'
+                    Name='vcruntime140.dll'
+                    Source='redist\vcruntime140.dll'
+                    KeyPath='yes' />
+            </Component>
+            <Component Id='VcRuntime1401InstallDir' Guid='B1A34567-89AB-CDEF-0123-456789ABC041' Win64='yes'>
+                <File Id='vcruntime1401InstallDir'
+                    Name='vcruntime140_1.dll'
+                    Source='redist\vcruntime140_1.dll'
+                    KeyPath='yes' />
+            </Component>
         </DirectoryRef>
 
         <DirectoryRef Id='ConnectorsDir'>
@@ -66,6 +85,23 @@
                 <File Id='pentest_agent.exe'
                     Name='pentest-agent.exe'
                     Source='dist\pentest-agent.exe'
+                    KeyPath='yes' />
+            </Component>
+            <!-- Same app-local CRT copies for the bundled connectors: the DLL
+                 search for a process starts in ITS OWN directory, so the copies
+                 next to strikehub.exe are invisible to executables running from
+                 connectors\. (The runtime cache copy staged by seed_vc_runtime
+                 in sh-core covers the per-user cache dir.) -->
+            <Component Id='VcRuntimeConnectorsDir' Guid='B1A34567-89AB-CDEF-0123-456789ABC042' Win64='yes'>
+                <File Id='vcruntime140ConnectorsDir'
+                    Name='vcruntime140.dll'
+                    Source='redist\vcruntime140.dll'
+                    KeyPath='yes' />
+            </Component>
+            <Component Id='VcRuntime1401ConnectorsDir' Guid='B1A34567-89AB-CDEF-0123-456789ABC043' Win64='yes'>
+                <File Id='vcruntime1401ConnectorsDir'
+                    Name='vcruntime140_1.dll'
+                    Source='redist\vcruntime140_1.dll'
                     KeyPath='yes' />
             </Component>
         </DirectoryRef>
@@ -145,12 +181,16 @@
             ConfigurableDirectory='INSTALLDIR'
             AllowAdvertise='no' Absent='disallow'>
             <ComponentRef Id='StrikeHubExe' />
+            <ComponentRef Id='VcRuntimeInstallDir' />
+            <ComponentRef Id='VcRuntime1401InstallDir' />
             <ComponentRef Id='EnvVars' />
             <ComponentRef Id='StartMenuShortcut' />
 
             <Feature Id='Connectors' Title='Bundled Connectors' Level='1'>
                 <ComponentRef Id='KsConnector' />
                 <ComponentRef Id='PentestAgent' />
+                <ComponentRef Id='VcRuntimeConnectorsDir' />
+                <ComponentRef Id='VcRuntime1401ConnectorsDir' />
             </Feature>
 
             <Feature Id='DesktopShortcutFeature' Title='Desktop Shortcut' Level='1'>

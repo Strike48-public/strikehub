@@ -86,6 +86,51 @@ cargo build --bin pentest-agent
 
 ## Packaging
 
+### VC++ runtime (app-local deployment)
+
+`strikehub.exe` and the connector binaries are built with the default MSVC
+**dynamic** CRT, so they import `VCRUNTIME140.dll` (all) and
+`VCRUNTIME140_1.dll` (strikehub). A clean Windows 10 machine ships no VC++
+redist, so the MSI carries exactly those DLLs **next to every executable it
+installs** (app-local deployment; see `wix\main.wxs`). Verify any binary's
+imports with:
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\dumpbin.exe" /dependents strikehub.exe
+```
+
+`scripts\build-msi.ps1` stages the DLLs into `redist\` **at build time**
+(never vendored in git). Provenance, in search order:
+
+1. `$env:SHVCREDIST_DIR` (explicit override: a directory containing the DLLs)
+2. `<VS 2022 flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>\` (Build Tools / Community / Professional / Enterprise)
+3. `C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>\`
+
+Both (2) and (3) hold the identical redistributable CRT the toolchain itself
+uses to run its host tools. Each staged DLL is PE-machine-verified
+(`0x8664` x64 / `0xAA64` arm64) and its SHA256 is printed to the build log.
+If the DLLs cannot be found, the MSI build fails loudly — do not work around
+it by deleting the check.
+
+CI additionally runs `scripts\verify-crt-coverage.ps1`, which `dumpbin`
+scans every shipped exe and fails the build if any import is neither
+OS-provided nor staged in `redist\`. If a future binary starts importing a
+new non-OS DLL (e.g. `MSVCP140.dll`), extend `VC_RUNTIME_DLLS` in
+`crates/sh-core/src/connector_seed.rs`, the staging list in
+`build-msi.ps1`, and the `File` elements in `wix\main.wxs` together — the
+three lists must stay in lockstep.
+
+At first run, the app also copies the app-local DLLs into the per-user
+connector cache (`%USERPROFILE%\.strike48\strikehub\bin\`), because cached /dynamically-fetched connector binaries run from there and the
+installer's copies in `Program Files` are not on that process's DLL search
+path (`seed_vc_runtime` in `crates/sh-core/src/connector_seed.rs`).
+
+Known gap: the SFX build (`scripts\build-windows-sfx.sh`, not part of CI
+releases) does not stage the DLLs yet — the SFX `StrikeHub-*.exe` will hit
+the same clean-machine failure until it is updated.
+
+### Binary layout
+
 After building, connector binaries must be placed next to `strikehub.exe`
 so the app finds them via `resolve_binary()`:
 

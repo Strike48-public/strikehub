@@ -18,6 +18,7 @@ pub mod registry;
 #[cfg(feature = "sentry")]
 pub mod sentry_init;
 pub mod transport;
+pub mod webview2;
 pub mod ws_relay;
 
 pub use allowlist::{RepoAllowlist, get_allowlist, init_allowlist, load_allowlist};

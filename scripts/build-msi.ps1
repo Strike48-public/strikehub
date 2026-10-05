@@ -68,6 +68,87 @@ if (-not (Test-Path "dist\strikehub.exe")) {
     Copy-Item $exe "dist\strikehub.exe"
 }
 
+# -- Stage the VC++ 2015-2022 runtime DLLs (app-local deployment) ----------
+# strikehub.exe and the bundled connectors are built with the default MSVC
+# dynamic CRT, so they import VCRUNTIME140.dll (all) and VCRUNTIME140_1.dll
+# (strikehub) - verified with `dumpbin /dependents` on the release MSI
+# (v0.1.22, 2026-10-05). A clean Windows 10 machine ships no VC++ redist, so
+# the MSI carries exactly those two DLLs next to every executable it installs
+# (see wix\main.wxs). The DLLs are NOT vendored in git; they are copied at
+# build time from the build host's MSVC toolset:
+#   provenance: <VS 2022 flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>\
+#   fallback:   C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>\
+# Both locations hold the identical redistributable CRT the toolchain itself
+# uses to run its own host tools. Override the search with $env:SHVCREDIST_DIR
+# (a directory containing the DLLs directly) for exotic toolchains.
+$requiredCrt = @("vcruntime140.dll", "vcruntime140_1.dll")
+$crtStage = "redist"
+$crtArchDir = if ($WixArch -eq "x64") { "x64" } else { "arm64" }
+$crtExpectedMachine = if ($WixArch -eq "x64") { 0x8664 } else { 0xAA64 }
+
+# Read the PE "Machine" field so a wrong-arch DLL can never be staged.
+function Get-PeMachine {
+    param([string]$Path)
+    $fs = [IO.File]::OpenRead($Path)
+    try {
+        $head = New-Object byte[] 4096
+        [void]$fs.Read($head, 0, 4096)
+        if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) { return -1 }   # not MZ
+        $peOff = [BitConverter]::ToInt32($head, 0x3C)
+        if ($head[$peOff] -ne 0x50 -or $head[$peOff + 1] -ne 0x45) { return -1 }  # not PE
+        return [int][BitConverter]::ToUInt16($head, $peOff + 4)  # COFF file header starts at peOff+4; Machine is its first field
+    } finally {
+        $fs.Close()
+    }
+}
+
+Write-Host "Staging VC++ runtime DLLs (app-local) for $crtArchDir..." -ForegroundColor Cyan
+$crtRoots = @()
+if ($env:SHVCREDIST_DIR) { $crtRoots += $env:SHVCREDIST_DIR }
+$vsToolsetRoots = @(
+    "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+    "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
+    "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC",
+    "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+)
+foreach ($vs in $vsToolsetRoots) {
+    if (Test-Path $vs) {
+        Get-ChildItem $vs -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { $crtRoots += Join-Path $_.FullName "bin\Hostx64\$crtArchDir" }
+    }
+}
+$sdkBinRoot = "C:\Program Files (x86)\Windows Kits\10\bin"
+if (Test-Path $sdkBinRoot) {
+    Get-ChildItem $sdkBinRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object { $crtRoots += Join-Path $_.FullName $crtArchDir }
+}
+
+New-Item -ItemType Directory -Path $crtStage -Force | Out-Null
+foreach ($dll in $requiredCrt) {
+    $found = $null
+    foreach ($root in $crtRoots) {
+        $candidate = Join-Path $root $dll
+        if (Test-Path $candidate) { $found = $candidate; break }
+    }
+    if (-not $found) {
+        Write-Host "ERROR: $dll not found on this build host." -ForegroundColor Red
+        Write-Host "Install Visual Studio 2022 Build Tools (C++ workload) or set SHVCREDIST_DIR to a directory containing the $crtArchDir VC++ runtime DLLs." -ForegroundColor Yellow
+        exit 1
+    }
+    $machine = Get-PeMachine $found
+    if ($machine -ne $crtExpectedMachine) {
+        Write-Host ("ERROR: {0} is PE machine 0x{1:X4}, expected 0x{2:X4} ({3}). Wrong-arch toolset on this build host?" -f $found, $machine, $crtExpectedMachine, $crtArchDir) -ForegroundColor Red
+        exit 1
+    }
+    $stagedPath = Join-Path $crtStage $dll
+    Copy-Item $found $stagedPath -Force
+    $hash = (Get-FileHash $stagedPath -Algorithm SHA256).Hash
+    Write-Host ("  staged {0,-20} <- {1}  (machine 0x{2:X4}, sha256 {3}...)" -f $dll, $found, $machine, $hash.Substring(0, 16))
+}
+Write-Host "VC++ runtime staged in $crtStage\ (shipped app-locally by the MSI)" -ForegroundColor Green
+
 # Download connectors if needed
 if (-not (Test-Path "dist\ks-connector.exe")) {
     Write-Host "Downloading ks-connector..." -ForegroundColor Yellow
@@ -127,7 +208,7 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
 }
 
 # WiX Product/@Version is strictly numeric x.x.x.x (integers 0..65534); candle
-# rejects prerelease versions with CNDL0108 — e.g. 0.1.22-rc.1, which the
+# rejects prerelease versions with CNDL0108 - e.g. 0.1.22-rc.1, which the
 # Release workflow's "Sync Cargo.toml to tag version" step writes for PRERELEASE
 # tags and the MSI step passes through as-is. Feed WiX only the leading numeric
 # groups; $Version stays raw for the output filename so the workflow's Move-Item
