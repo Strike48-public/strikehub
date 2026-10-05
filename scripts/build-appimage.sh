@@ -14,18 +14,83 @@ case "$ARCH" in
   *)       echo "Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
+# ── Pinned AppImage tooling (Strike48/project-management#382) ───────────────
+# The AppImage's EMBEDDED RUNTIME comes from the tool that packages the
+# AppDir. This script previously downloaded AppImageKit's "continuous"
+# appimagetool, which embeds the legacy type-2 runtime: it resolves FUSE 2 at
+# launch (dlopen libfuse.so.2) and fails on stock Ubuntu 24.04+, which only
+# ships FUSE 3 — and silently, when launched from the app grid (the error
+# only reaches the journal). See Strike48/project-management#377 finding 2
+# (BLOCKER) and #382.
+#
+# Fix: pin BOTH the tool and the runtime it embeds, by release tag AND
+# sha256 (the same pin-and-verify style this repo uses for its connectors):
+#   * appimagetool 1.9.1 — the AppImage/appimagetool successor to the
+#     unmaintained AppImageKit releases. Its own embedded runtime is already
+#     the static FUSE-3 one, and it accepts a pinned runtime file, so the
+#     runtime embedded in OUR AppImages never drifts from the pin below.
+#   * type2-runtime 20251108 — github.com/AppImage/type2-runtime, the
+#     official static type-2 runtime: built -static -lfuse3 (Alpine/musl), so
+#     the AppImage needs NO host libfuse at all — only fusermount3, which
+#     stock Ubuntu 24.04+ provides (the runtime locates fusermount* on $PATH;
+#     without any fusermount, APPIMAGE_EXTRACT_AND_RUN=1 still works).
+# Bump deliberately: when moving either pin, update the sha256 from the
+# release asset's digest (shown on the GitHub release page / API).
+APPIMAGETOOL_VERSION="1.9.1"
+TYPE2_RUNTIME_VERSION="20251108"
+case "$ARCH" in
+  x86_64)
+    APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+    TYPE2_RUNTIME_SHA256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+    ;;
+  aarch64)
+    APPIMAGETOOL_SHA256="f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
+    TYPE2_RUNTIME_SHA256="00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444"
+    ;;
+  *)
+    echo "Unsupported arch: $ARCH (no pinned AppImage tooling)"; exit 1 ;;
+esac
+
+# Download a pinned release artifact and verify its sha256 before use. The
+# old script wget'd AppImageKit's moving "continuous" assets with no checksum
+# at all; both pins above are now verified.
+download_pinned() {
+    local url="$1" dest="$2" want="$3" got
+    echo "Downloading $dest (pinned) ..."
+    wget -q "$url" -O "$dest" || { echo "ERROR: download failed: $url" >&2; exit 1; }
+    got="$(sha256sum "$dest" | awk '{print $1}')"
+    if [ "$got" != "$want" ]; then
+        echo "ERROR: sha256 mismatch for $dest" >&2
+        echo "  expected: $want" >&2
+        echo "  got:      $got" >&2
+        echo "  (release asset changed or was tampered with — do not proceed)" >&2
+        exit 1
+    fi
+    echo "  sha256 verified: $got"
+}
+
 echo "Building StrikeHub AppImage ($ARCH) with working env vars..."
 
 # Clean up
 rm -rf "$APPDIR"
 rm -f StrikeHub*.AppImage
 
-# Download appimagetool if needed
+# appimagetool (pinned; see above). It packages the AppDir and embeds a
+# type-2 runtime — that runtime is what decides which FUSE the AppImage
+# needs, which is why both the tool and the runtime are pinned.
 APPIMAGETOOL="appimagetool-${ARCH}.AppImage"
 if [ ! -f "$APPIMAGETOOL" ]; then
-    echo "Downloading $APPIMAGETOOL..."
-    wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/${APPIMAGETOOL}"
+    download_pinned "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/${APPIMAGETOOL}" "$APPIMAGETOOL" "$APPIMAGETOOL_SHA256"
     chmod +x "$APPIMAGETOOL"
+fi
+
+# The static FUSE-3 type-2 runtime embedded into OUR AppImage (pinned; see
+# above). Passed to appimagetool below via --runtime-file, and exported as
+# APPIMAGETOOL_RUNTIME_FILE for any appimagetool linuxdeploy may spawn, so
+# the embedded runtime is exactly this file — never a downloaded default.
+TYPE2_RUNTIME="type2-runtime-${ARCH}"
+if [ ! -f "$TYPE2_RUNTIME" ]; then
+    download_pinned "https://github.com/AppImage/type2-runtime/releases/download/${TYPE2_RUNTIME_VERSION}/runtime-${ARCH}" "$TYPE2_RUNTIME" "$TYPE2_RUNTIME_SHA256"
 fi
 
 # Create AppDir structure
@@ -129,6 +194,9 @@ export PATH="$PWD/.ldbin:$PATH"
 # in some images) and tell the gtk plugin we target GTK3, not GTK4.
 export APPIMAGE_EXTRACT_AND_RUN=1
 export DEPLOY_GTK_VERSION=3
+# Any appimagetool invoked below (directly, or by linuxdeploy) must embed the
+# pinned static FUSE-3 runtime — never a downloaded default (#382).
+export APPIMAGETOOL_RUNTIME_FILE="$PWD/${TYPE2_RUNTIME}"
 
 # Env + CWD as an AppRun hook. linuxdeploy's generated AppRun sources
 # apprun-hooks/*.sh in ALPHABETICAL order before exec'ing the app, and it only
@@ -327,9 +395,14 @@ for rsvg in "$HOST_LIBDIR"/librsvg-2.so*; do
 done
 
 # Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
-echo "Packaging AppImage..."
-ARCH=$ARCH "./${APPIMAGETOOL}" "$APPDIR" "StrikeHub-${VERSION}-${ARCH}.AppImage"
+# --runtime-file pins the embedded runtime to the checked static FUSE-3
+# type2-runtime (project-management#382): without it, appimagetool would
+# download its own (moving) default runtime and the FUSE guarantee would
+# silently drift.
+echo "Packaging AppImage (static FUSE-3 type2-runtime ${TYPE2_RUNTIME_VERSION})..."
+ARCH=$ARCH "./${APPIMAGETOOL}" --runtime-file "$PWD/${TYPE2_RUNTIME}" "$APPDIR" "StrikeHub-${VERSION}-${ARCH}.AppImage"
 
 echo ""
 echo "✅ Portable AppImage created: StrikeHub-${VERSION}-${ARCH}.AppImage"
 echo "   (GTK/WebKit runtime + out-of-process helpers bundled — runs without host webkit2gtk)"
+echo "   (static FUSE-3 type2-runtime ${TYPE2_RUNTIME_VERSION} embedded — no host libfuse2 needed; stock Ubuntu 24.04+ OK)"

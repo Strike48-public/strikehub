@@ -14,6 +14,9 @@ AppImage is a format for distributing portable software on Linux without needing
 
 ```bash
 # Install required dependencies on Ubuntu/Debian
+# NOTE: no host FUSE library is needed — the AppImage embeds a static
+# FUSE-3 type-2 runtime (only fusermount3 is used at run time, and it is
+# present on stock Ubuntu 24.04+).
 sudo apt-get update
 sudo apt-get install -y \
     libwebkit2gtk-4.1-dev \
@@ -22,8 +25,7 @@ sudo apt-get install -y \
     libxdo-dev \
     wget \
     file \
-    imagemagick \
-    libfuse2
+    imagemagick
 ```
 
 ### Build Process
@@ -117,6 +119,10 @@ ubuntu 26.04):
 | `libwayland-client0` | Wayland client libs needed by GTK3 (inert under `GDK_BACKEND=x11`; the host's copy must be used — bundling an older one breaks WebKit EGL init on newer hosts) |
 | `ca-certificates` | TLS verification for the studio connection (native-tls) |
 
+No host FUSE **library** is required: the AppImage embeds the static FUSE-3
+type-2 runtime (see below), which only uses `fusermount3` (present on stock
+Ubuntu 24.04+ and most current distros).
+
 These are preinstalled on ordinary desktop systems; a minimal container needs
 `apt-get install libegl1 libgl1 libgbm1 libx11-6 libwayland-client0 ca-certificates`
 plus any font package (e.g. `fonts-dejavu-core`).
@@ -126,13 +132,21 @@ plus any font package (e.g. `fonts-dejavu-core`).
 
 ## Troubleshooting
 
-### FUSE Error
+### FUSE
 
-If you see an error about FUSE, install it:
+The shipped AppImage embeds the **static FUSE-3 type-2 runtime**
+([github.com/AppImage/type2-runtime](https://github.com/AppImage/type2-runtime),
+pinned by release tag + sha256 in `scripts/build-appimage.sh`), so it needs
+**no host FUSE library at all** — only `fusermount3`, which stock Ubuntu 24.04+
+provides. (Older builds used the legacy AppImageKit runtime, which dlopened
+`libfuse.so.2` and failed **silently** on stock Ubuntu 24.04+, which ships FUSE
+3 only — Strike48/project-management#377 finding 2, resolved by #382.)
+
+On a system without a working `fusermount3`, the AppImage still runs via
+extraction:
+
 ```bash
-sudo apt-get install libfuse2  # For Ubuntu 22.04+
-# or
-sudo apt-get install fuse       # For older distributions
+APPIMAGE_EXTRACT_AND_RUN=1 ./StrikeHub-*.AppImage
 ```
 
 ### Extracting AppImage Contents
@@ -177,15 +191,16 @@ The build system:
 To test the AppImage on different distributions, you can use Docker:
 
 ```bash
-# Test on Ubuntu 20.04
-docker run -it --rm -v $(pwd):/app ubuntu:20.04 bash
+# Test on Ubuntu 24.04 (static FUSE-3 runtime: only fusermount3 is needed,
+# which fuse3 provides; without it, APPIMAGE_EXTRACT_AND_RUN=1 works)
+docker run -it --rm -v $(pwd):/app ubuntu:24.04 bash
 cd /app
-apt-get update && apt-get install -y libfuse2
-./StrikeHub-*.AppImage --help
+apt-get update && apt-get install -y fuse3
+./StrikeHub-*.AppImage --appimage-extract >/dev/null   # no FUSE needed to inspect
 
 # Test on Fedora
 docker run -it --rm -v $(pwd):/app fedora:latest bash
 cd /app
-dnf install -y fuse fuse-libs
-./StrikeHub-*.AppImage --help
+dnf install -y fuse-libs
+./StrikeHub-*.AppImage --appimage-extract >/dev/null
 ```
