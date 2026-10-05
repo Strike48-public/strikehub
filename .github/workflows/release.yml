@@ -824,6 +824,16 @@ jobs:
           find artifacts -type f -exec cp {} release/ \;
           ls -la release/
 
+      - name: Resolve image tag
+        id: imagetag
+        run: |
+          # The docker job tags the ghcr image via docker/metadata-action
+          # type=semver,pattern={{version}}, i.e. the tag's semver with the
+          # leading v stripped (tag v0.1.22 -> image tags 0.1.22, 0.1, and
+          # the bare sha). Derive it the same way here so the documented
+          # pull/install commands match what the docker job actually pushed.
+          echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Create Release
         if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
         uses: softprops/action-gh-release@v2
@@ -852,14 +862,14 @@ jobs:
             ### Docker
 
             ```bash
-            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.imagetag.outputs.tag }}
             ```
 
             ### Helm
 
             ```bash
             helm install strikehub chart/strikehub \
-              --set image.tag=${{ github.ref_name }}
+              --set image.tag=${{ steps.imagetag.outputs.tag }}
             ```
 
             ### Checksums
