@@ -66,8 +66,7 @@ This creates a portable AppImage that includes:
 
 #### Windows
 
-Download `strikehub-windows-x86_64.msi` from the latest release and run it
-(per-machine install; adds Start Menu + desktop shortcuts).
+Download the latest `strikehub-windows-x86_64.msi` from releases and run it (per-machine install). It adds Start Menu and desktop shortcuts plus the system env vars; everything is bundled, so no additional configuration is required.
 
 - **VC++ runtime: NOT required of the user.** The installer carries the exact
   VC++ 2015-2022 runtime DLLs the app and bundled connectors import
