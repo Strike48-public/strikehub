@@ -66,7 +66,7 @@ This creates a portable AppImage that includes:
 
 #### Windows
 
-Download the latest `strikehub-windows-x86_64.exe` from releases and double-click to run. Everything is bundled — no installation or configuration required.
+Download the latest `strikehub-windows-x86_64.msi` from releases and double-click to install. It adds Start Menu and desktop shortcuts plus the system env vars; everything is bundled, so no additional configuration is required.
 
 ### Build from Source
 
