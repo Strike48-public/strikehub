@@ -160,36 +160,29 @@ async fn ensure_connector_binary_inner(
         }
     };
 
-    // Verify SHA256 checksum
-    match verify_checksum(client, repo, &latest_tag, &asset_name, &asset_bytes).await {
-        ChecksumResult::Verified => {}
-        ChecksumResult::Failed(e) => {
-            let msg = format!("checksum verification failed for {}: {}", asset_name, e);
-            tracing::warn!("{}", msg);
-            if binary_path.exists() {
-                return EnsureResult::FallbackStale(binary_path, msg);
+    // Verify SHA256 checksum — fail closed for every connector, builtin or
+    // dynamic. The cache dir this binary is written into (and later executed
+    // from) is user-writable, so a download we cannot positively verify must
+    // never reach it. A missing checksum file is therefore a refusal, not a
+    // graceful skip: the release must publish SHA256SUMS.txt or an
+    // {asset}.sha256 sidecar for this platform's asset.
+    let checksum = verify_checksum(client, repo, &latest_tag, &asset_name, &asset_bytes).await;
+    if !install_allowed(&checksum) {
+        let msg = match &checksum {
+            ChecksumResult::Failed(e) => {
+                format!("checksum verification failed for {}: {}", asset_name, e)
             }
-            return EnsureResult::Unavailable(msg);
+            ChecksumResult::NotFound => format!(
+                "no checksum file found for connector '{}' (asset {}, release {}) — refusing to install unverified binary",
+                manifest.id, asset_name, latest_tag
+            ),
+            ChecksumResult::Verified => unreachable!("install_allowed(Verified) is true"),
+        };
+        tracing::warn!("{}", msg);
+        if binary_path.exists() {
+            return EnsureResult::FallbackStale(binary_path, msg);
         }
-        ChecksumResult::NotFound => {
-            if !manifest.is_builtin {
-                // Dynamic connectors require a checksum for security.
-                let msg = format!(
-                    "no checksum file found for dynamic connector '{}' — refusing to install",
-                    manifest.id
-                );
-                tracing::warn!("{}", msg);
-                if binary_path.exists() {
-                    return EnsureResult::FallbackStale(binary_path, msg);
-                }
-                return EnsureResult::Unavailable(msg);
-            }
-            // Builtins gracefully skip missing checksums.
-            tracing::debug!(
-                "no checksum file found for {}, skipping verification",
-                asset_name
-            );
-        }
+        return EnsureResult::Unavailable(msg);
     }
 
     // Ensure cache directory exists
@@ -350,7 +343,8 @@ async fn download_asset(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, 
 }
 
 /// Three-state checksum verification result.
-enum ChecksumResult {
+#[derive(Debug)]
+pub(crate) enum ChecksumResult {
     /// Checksum matched successfully.
     Verified,
     /// Checksum file was found but the hash did not match.
@@ -359,13 +353,81 @@ enum ChecksumResult {
     NotFound,
 }
 
+/// Install policy: a connector binary is installed only when its integrity
+/// has been **positively verified** against a published checksum.
+///
+/// A missing checksum (`NotFound`) refuses installation for every connector,
+/// builtin or dynamic. The older behaviour let builtins "gracefully skip"
+/// missing checksums, which shipped unverified binaries into the user-writable
+/// cache dir in production (the kubestudio release publishes no checksum for
+/// the `ks-connector-*` archives StrikeHub fetches).
+///
+/// Pure so the refusal paths are unit-testable without a network.
+pub(crate) fn install_allowed(checksum: &ChecksumResult) -> bool {
+    matches!(checksum, ChecksumResult::Verified)
+}
+
+/// Pure checksum matching: given the checksum-file texts fetched from the
+/// release (either may be absent), decide the verification outcome for
+/// `asset_name` against its actual SHA256.
+///
+/// Strategies, in order:
+/// 1. `SHA256SUMS.txt` in the same release (pick style) — a line whose
+///    filename equals `asset_name` decides; a mismatch is a hard `Failed`.
+/// 2. `{asset_name}.sha256` sidecar file (kubestudio style).
+///
+/// Returns `Verified`, `Failed`, or `NotFound`. Split from
+/// [`verify_checksum`] so the refusal paths are unit-testable without a
+/// network.
+pub(crate) fn match_checksums(
+    sums_text: Option<&str>,
+    sidecar_text: Option<&str>,
+    asset_name: &str,
+    actual_hash: &str,
+) -> ChecksumResult {
+    // Strategy 1: SHA256SUMS.txt
+    if let Some(sums_text) = sums_text {
+        for line in sums_text.lines() {
+            // Format: "hash  filename" or "hash filename"
+            let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
+            if parts.len() == 2 {
+                let expected_hash = parts[0];
+                let filename = parts[1].trim().trim_start_matches('*');
+                if filename == asset_name {
+                    if actual_hash == expected_hash {
+                        return ChecksumResult::Verified;
+                    }
+                    return ChecksumResult::Failed(format!(
+                        "SHA256 mismatch: expected {}, got {}",
+                        expected_hash, actual_hash
+                    ));
+                }
+            }
+        }
+    }
+
+    // Strategy 2: .sha256 sidecar
+    if let Some(sidecar_text) = sidecar_text {
+        let expected_hash = sidecar_text.split_whitespace().next().unwrap_or("");
+        if !expected_hash.is_empty() {
+            if actual_hash == expected_hash {
+                return ChecksumResult::Verified;
+            }
+            return ChecksumResult::Failed(format!(
+                "SHA256 mismatch: expected {}, got {}",
+                expected_hash, actual_hash
+            ));
+        }
+    }
+
+    ChecksumResult::NotFound
+}
+
 /// Verify SHA256 checksum of downloaded asset.
 ///
-/// Attempts two strategies:
-/// 1. `SHA256SUMS.txt` in the same release (pick style)
-/// 2. `{asset_name}.sha256` sidecar file (kubestudio style)
-///
-/// Returns `Verified`, `Failed`, or `NotFound`.
+/// Fetches `SHA256SUMS.txt` and/or the `{asset_name}.sha256` sidecar from the
+/// same release, then delegates the matching to [`match_checksums`]. Returns
+/// `Verified`, `Failed`, or `NotFound`.
 async fn verify_checksum(
     client: &reqwest::Client,
     repo: &str,
@@ -380,53 +442,43 @@ async fn verify_checksum(
         "https://github.com/{}/releases/download/{}/SHA256SUMS.txt",
         repo, tag
     );
-    if let Ok(sums_resp) = client.get(&sums_url).send().await
+    let sums_text = if let Ok(sums_resp) = client.get(&sums_url).send().await
         && sums_resp.status().is_success()
-        && let Ok(sums_text) = sums_resp.text().await
+        && let Ok(text) = sums_resp.text().await
     {
-        for line in sums_text.lines() {
-            // Format: "hash  filename" or "hash filename"
-            let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
-            if parts.len() == 2 {
-                let expected_hash = parts[0];
-                let filename = parts[1].trim().trim_start_matches('*');
-                if filename == asset_name {
-                    if actual_hash == expected_hash {
-                        tracing::debug!("SHA256 verified via SHA256SUMS.txt");
-                        return ChecksumResult::Verified;
-                    }
-                    return ChecksumResult::Failed(format!(
-                        "SHA256 mismatch: expected {}, got {}",
-                        expected_hash, actual_hash
-                    ));
-                }
-            }
-        }
-    }
+        Some(text)
+    } else {
+        None
+    };
 
     // Strategy 2: .sha256 sidecar
     let sidecar_url = format!(
         "https://github.com/{}/releases/download/{}/{}.sha256",
         repo, tag, asset_name
     );
-    if let Ok(sidecar_resp) = client.get(&sidecar_url).send().await
+    let sidecar_text = if let Ok(sidecar_resp) = client.get(&sidecar_url).send().await
         && sidecar_resp.status().is_success()
-        && let Ok(sidecar_text) = sidecar_resp.text().await
+        && let Ok(text) = sidecar_resp.text().await
     {
-        let expected_hash = sidecar_text.split_whitespace().next().unwrap_or("");
-        if !expected_hash.is_empty() {
-            if actual_hash == expected_hash {
-                tracing::debug!("SHA256 verified via .sha256 sidecar");
-                return ChecksumResult::Verified;
-            }
-            return ChecksumResult::Failed(format!(
-                "SHA256 mismatch: expected {}, got {}",
-                expected_hash, actual_hash
-            ));
+        Some(text)
+    } else {
+        None
+    };
+
+    let result = match_checksums(
+        sums_text.as_deref(),
+        sidecar_text.as_deref(),
+        asset_name,
+        &actual_hash,
+    );
+    match &result {
+        ChecksumResult::Verified => tracing::debug!("SHA256 verified for {}", asset_name),
+        ChecksumResult::Failed(e) => tracing::warn!("{}", e),
+        ChecksumResult::NotFound => {
+            tracing::debug!("no checksum file found for {}", asset_name)
         }
     }
-
-    ChecksumResult::NotFound
+    result
 }
 
 /// Extract a tar.gz archive, looking for a specific binary inside.
@@ -467,8 +519,7 @@ fn extract_tar_gz(
             entry
                 .read_to_end(&mut buf)
                 .map_err(|e| format!("failed to read binary from archive: {}", e))?;
-            std::fs::write(&dest, &buf)
-                .map_err(|e| format!("failed to write binary to {}: {}", dest.display(), e))?;
+            write_binary_atomic(&dest, &buf)?;
             return Ok(());
         }
     }
@@ -513,8 +564,7 @@ fn extract_zip(
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)
                 .map_err(|e| format!("failed to read binary from zip: {}", e))?;
-            std::fs::write(&dest, &buf)
-                .map_err(|e| format!("failed to write binary to {}: {}", dest.display(), e))?;
+            write_binary_atomic(&dest, &buf)?;
             return Ok(());
         }
     }
@@ -541,6 +591,59 @@ pub fn hex_sha256(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(data);
     hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Write `buf` to `dest` atomically and verify the staged bytes.
+///
+/// Stages to a sibling temp file in the same directory, reads it back and
+/// compares it byte-for-byte against `buf`, then renames it over `dest`.
+/// The rename is atomic on NTFS/ext4/APFS, so the cache dir never exposes a
+/// torn or partially-written binary: a crash mid-install leaves either the
+/// previous binary or the new one, never a truncated file that a later
+/// "cache is current" check would happily execute.
+fn write_binary_atomic(dest: &std::path::Path, buf: &[u8]) -> Result<(), String> {
+    let file_name = dest
+        .file_name()
+        .ok_or_else(|| format!("invalid destination path: {}", dest.display()))?;
+    let tmp = dest.with_file_name(format!(
+        ".{}.strikehub-tmp-{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+
+    if let Err(e) = std::fs::write(&tmp, buf) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "failed to write temp binary {}: {}",
+            tmp.display(),
+            e
+        ));
+    }
+
+    // Read-back verification: the staged bytes must be exactly what was
+    // extracted, or the install is refused and the temp file removed.
+    let staged = std::fs::read(&tmp).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("failed to read back {}: {}", tmp.display(), e)
+    })?;
+    if staged != buf {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "read-back verification failed for {} (staged bytes differ from extracted archive)",
+            tmp.display()
+        ));
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "failed to move {} into place at {}: {}",
+            tmp.display(),
+            dest.display(),
+            e
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -832,5 +935,153 @@ mod newest_tests {
     #[test]
     fn downloads_when_no_binary_cached_regardless_of_ts() {
         assert!(should_download(false, "2026-08-09T00:00:00Z", ""));
+    }
+}
+
+#[cfg(test)]
+mod verification_policy_tests {
+    use super::{
+        ChecksumResult, hex_sha256, install_allowed, match_checksums, write_binary_atomic,
+    };
+
+    /// Known SHA256 of the fixture bytes below, computed out-of-band
+    /// (`printf 'pentest-agent release payload' | sha256sum`) so the expected
+    /// value is independent of the code under test.
+    const GOOD_HASH: &str = "d9ed2e522e219e1fdaab86305cce3650927d48b0915f3db8dabd8a4dc5cf79d1";
+    const ASSET: &str = "ks-connector-windows-x86_64.zip";
+
+    fn sums_for(hash: &str) -> String {
+        format!("{}  {}\n", hash, ASSET)
+    }
+
+    #[test]
+    fn tampered_bytes_are_refused() {
+        // Fixture: known-good release payload bytes, then a single flipped
+        // bit — the tampered-bytes case.
+        let good = b"pentest-agent release payload";
+        assert_eq!(hex_sha256(good), GOOD_HASH);
+
+        let mut tampered = good.to_vec();
+        tampered[0] ^= 0x01;
+        let tampered_hash = hex_sha256(&tampered);
+        assert_ne!(tampered_hash, GOOD_HASH);
+
+        // The release publishes the good hash; the tampered download must be
+        // a hard Failed — never Verified — and must fail the install gate.
+        let sums = sums_for(GOOD_HASH);
+        let verdict = match_checksums(Some(&sums), None, ASSET, &tampered_hash);
+        assert!(
+            matches!(verdict, ChecksumResult::Failed(_)),
+            "tampered bytes must yield Failed, got {:?}",
+            verdict
+        );
+        assert!(
+            !install_allowed(&verdict),
+            "tampered bytes must not be installed"
+        );
+    }
+
+    #[test]
+    fn good_bytes_verify_via_sums_file() {
+        let sums = sums_for(GOOD_HASH);
+        let verdict = match_checksums(Some(&sums), None, ASSET, GOOD_HASH);
+        assert!(matches!(verdict, ChecksumResult::Verified));
+        assert!(install_allowed(&verdict));
+    }
+
+    #[test]
+    fn good_bytes_verify_via_sidecar() {
+        let sidecar = format!("{}  {}\n", GOOD_HASH, ASSET);
+        let verdict = match_checksums(None, Some(&sidecar), ASSET, GOOD_HASH);
+        assert!(matches!(verdict, ChecksumResult::Verified));
+        assert!(install_allowed(&verdict));
+    }
+
+    #[test]
+    fn no_checksum_files_is_not_found() {
+        let verdict = match_checksums(None, None, ASSET, GOOD_HASH);
+        assert!(matches!(verdict, ChecksumResult::NotFound));
+    }
+
+    #[test]
+    fn missing_checksum_refuses_install_for_every_connector() {
+        // Regression guard for the old builtin "graceful skip": a release
+        // without a checksum file (the kubestudio production case) must refuse
+        // installation for builtin and dynamic connectors alike — the binary
+        // is destined for a user-writable dir it will later be executed from.
+        assert!(
+            !install_allowed(&ChecksumResult::NotFound),
+            "missing checksums must refuse installation (builtin or dynamic)"
+        );
+        assert!(!install_allowed(&ChecksumResult::Failed("mismatch".into())));
+        assert!(install_allowed(&ChecksumResult::Verified));
+    }
+
+    #[test]
+    fn atomic_write_installs_exact_bytes_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!(
+            "strikehub-atomic-{}-{}",
+            std::process::id(),
+            std::thread::current()
+                .name()
+                .unwrap_or("t")
+                .replace(' ', "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let payload = b"#!/bin/sh\necho atomic";
+        let dest = dir.join("atomic-bin");
+        write_binary_atomic(&dest, payload).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+
+        // Reinstall over the existing binary (the update path).
+        write_binary_atomic(&dest, b"v2").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"v2");
+
+        // No .strikehub-tmp-* leftovers may remain.
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("strikehub-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp leftovers: {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Negative: an unwritable target dir must be refused (temp file removed,
+    /// no partial binary left at the destination). Linux-only: the root-uid
+    /// guard and the `libc` dependency are Linux-scoped in this crate.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_write_refuses_unwritable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::getuid() } == 0 {
+            return; // root bypasses mode bits; nothing to prove
+        }
+        let dir = std::env::temp_dir().join(format!("strikehub-atomic-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = write_binary_atomic(&dir.join("ro-bin"), b"x").unwrap_err();
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The destination must not exist; the temp file must be cleaned up.
+        assert!(!dir.join("ro-bin").exists());
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("strikehub-tmp"))
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(leftovers.is_empty(), "temp leftovers: {leftovers:?}");
+        assert!(
+            err.contains("failed to write temp binary"),
+            "expected a refusal error, got: {err}"
+        );
     }
 }
