@@ -859,11 +859,13 @@ jobs:
             - **`.msi`** — Windows installer with Start Menu, desktop shortcut, and system env vars
             - **`.AppImage`** — Portable Linux package, runs on most distributions without installation
 
-            ### Docker
+            <!--
+            Docker instructions hidden from the rendered release until the published
+            image path works end-to-end (private ghcr package, never QA'd as a customer
+            path) — see issue #105.. Retained verbatim for one-line re-enable:
 
-            ```bash
-            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.imagetag.outputs.tag }}
-            ```
+              docker pull ${{ env.REGISTRY }}/{{ github.repository }}:{{ steps.imagetag.outputs.tag }}
+            -->
 
             ### Helm
 
