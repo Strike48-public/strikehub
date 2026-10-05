@@ -862,7 +862,7 @@ jobs:
             <!--
             Docker instructions hidden from the rendered release until the published
             image path works end-to-end (private ghcr package, never QA'd as a customer
-            path) — see issue #105.. Retained verbatim for one-line re-enable:
+            path) — see issue #105. Retained verbatim for one-line re-enable:
 
               docker pull ${{ env.REGISTRY }}/{{ github.repository }}:{{ steps.imagetag.outputs.tag }}
             -->
