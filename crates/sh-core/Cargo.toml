@@ -45,5 +45,5 @@ sentry-anyhow = { workspace = true, optional = true }
 [features]
 sentry = ["dep:sentry", "dep:sentry-anyhow"]
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"

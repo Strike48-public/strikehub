@@ -14,17 +14,30 @@ AppImage is a format for distributing portable software on Linux without needing
 
 ```bash
 # Install required dependencies on Ubuntu/Debian
+# NOTE: no host FUSE library is needed — the AppImage embeds a static
+# FUSE-3 type-2 runtime (only fusermount3 is used at run time, and it is
+# present on stock Ubuntu 24.04+).
 sudo apt-get update
 sudo apt-get install -y \
     libwebkit2gtk-4.1-dev \
     libgtk-3-dev \
     libayatana-appindicator3-dev \
     libxdo-dev \
+    libegl1 \
+    libgbm1 \
+    libwayland-client0 \
+    libgl1 \
+    libgl1-mesa-dri \
     wget \
     file \
-    imagemagick \
-    libfuse2
+    imagemagick
 ```
+
+The graphics stack (`libegl1 libgbm1 libwayland-client0 libgl1 libgl1-mesa-dri`)
+is bundled **into** the AppImage (Phase 2d of the build script), so the build
+host must have it — the script fails loudly if any piece is missing.
+**Build on the oldest supported glibc (Ubuntu 22.04)** so the bundled libs
+stay inside the floor enforced by `scripts/check-glibc-floor.sh`.
 
 ### Build Process
 
@@ -99,40 +112,52 @@ chmod +x StrikeHub-*.AppImage
 ## Host runtime requirements
 
 The AppImage bundles the GTK3 + WebKitGTK 4.1 runtime, including WebKit's
-out-of-process helpers. Their `rpath` points inside the bundle, so the
-bundled WebKit is always the one used — a system `libwebkit2gtk-4.1-0` is
-**not** required (and a differently-versioned one is ignored, which is what
-previously hung startup on hosts like ubuntu 26.04 where the system WebKit
-is newer than the bundled one).
+out-of-process helpers, **and the full graphics stack** (wayland client, EGL,
+GL/glvnd, mesa DRI drivers with the swrast/llvmpipe software renderer). Their
+`rpath` points inside the bundle, so the bundled runtimes are always the ones
+used — no system `libwebkit2gtk-4.1-0`, mesa, or wayland packages are
+required, and differently-versioned system copies are ignored (which is what
+previously hung startup on hosts like ubuntu 26.04 where the system WebKit is
+newer than the bundled one).
 
-Remaining host dependencies (verified in containers against ubuntu 22.04 and
-ubuntu 26.04):
+**Support target: the AppImage runs with zero extra packages on stock Ubuntu
+22.04/26.04, including minimal/server images.** Verified on pristine
+`ubuntu:22.04` and `ubuntu:26.04` containers (only Xvfb installed, no
+graphics packages): before the graphics stack was bundled, stock 22.04 exited
+127 on `libwayland-client.so.0` (ldd also missing `libgbm.so.1` +
+`libEGL.so.1`; `ks-connector` missing `libwayland-client.so.0`) and stock
+26.04 failed the same way on `libEGL.so.1`; with the bundled closure the app
+launches to the sign-in screen and `ldd` on the extracted binary reports no
+missing libraries. (Building from source instead requires `libegl1 libgbm1
+libwayland-client0 ca-certificates libwebkit2gtk-4.1-0` on the desktop.
+)`
 
-| Package | Why |
-|---|---|
-| `libegl1` | EGL dispatch for WebKit's GL path |
-| `libgl1` | Host OpenGL/GLES (`libGLESv2.so.2`) — without it the app aborts during WebView init |
-| `libgbm1` | Buffer management (Mesa), needed by the bundled WebKitGTK |
-| `libx11-6` | X11 client libs (the app runs `GDK_BACKEND=x11`) |
-| `libwayland-client0` | Wayland client libs needed by GTK3 (inert under `GDK_BACKEND=x11`; the host's copy must be used — bundling an older one breaks WebKit EGL init on newer hosts) |
-| `ca-certificates` | TLS verification for the studio connection (native-tls) |
-
-These are preinstalled on ordinary desktop systems; a minimal container needs
-`apt-get install libegl1 libgl1 libgbm1 libx11-6 libwayland-client0 ca-certificates`
-plus any font package (e.g. `fonts-dejavu-core`).
+No host FUSE **library** is required: the AppImage embeds the static FUSE-3
+type-2 runtime (see below), which only uses `fusermount3` (present on stock
+Ubuntu 24.04+ and most current distros).
 
 - glibc floor: GLIBC 2.35 / GLIBCXX 3.4.30 (enforced by `scripts/check-glibc-floor.sh`).
 - A display server is required (X11; Xvfb works for headless testing).
+- `ca-certificates` must be present for TLS (native-tls) — preinstalled on
+  every normal image, including the minimal ones above.
 
 ## Troubleshooting
 
-### FUSE Error
+### FUSE
 
-If you see an error about FUSE, install it:
+The shipped AppImage embeds the **static FUSE-3 type-2 runtime**
+([github.com/AppImage/type2-runtime](https://github.com/AppImage/type2-runtime),
+pinned by release tag + sha256 in `scripts/build-appimage.sh`), so it needs
+**no host FUSE library at all** — only `fusermount3`, which stock Ubuntu 24.04+
+provides. (Older builds used the legacy AppImageKit runtime, which dlopened
+`libfuse.so.2` and failed **silently** on stock Ubuntu 24.04+, which ships FUSE
+3 only — Strike48/project-management#377 finding 2, resolved by #382.)
+
+On a system without a working `fusermount3`, the AppImage still runs via
+extraction:
+
 ```bash
-sudo apt-get install libfuse2  # For Ubuntu 22.04+
-# or
-sudo apt-get install fuse       # For older distributions
+APPIMAGE_EXTRACT_AND_RUN=1 ./StrikeHub-*.AppImage
 ```
 
 ### Extracting AppImage Contents
@@ -169,7 +194,7 @@ StrikeHub.AppDir/
 The build system:
 - Sets default `STRIKE48_API_URL` and `STRIKE48_URL` environment variables
 - Bundles connectors (ks-connector, pentest-agent) when available
-- Uses a wrapper script to ensure environment variables are always set
+- Ensures environment variables are always set via the generated `apprun-hooks/00-strike48-env.sh` AppRun hook, which the build script writes before the linuxdeploy call and the generated AppRun sources before exec'ing the app
 - Creates a portable, self-contained AppImage
 
 ## Testing
@@ -177,15 +202,16 @@ The build system:
 To test the AppImage on different distributions, you can use Docker:
 
 ```bash
-# Test on Ubuntu 20.04
-docker run -it --rm -v $(pwd):/app ubuntu:20.04 bash
+# Test on Ubuntu 24.04 (static FUSE-3 runtime: only fusermount3 is needed,
+# which fuse3 provides; without it, APPIMAGE_EXTRACT_AND_RUN=1 works)
+docker run -it --rm -v $(pwd):/app ubuntu:24.04 bash
 cd /app
-apt-get update && apt-get install -y libfuse2
-./StrikeHub-*.AppImage --help
+apt-get update && apt-get install -y fuse3
+./StrikeHub-*.AppImage --appimage-extract >/dev/null   # no FUSE needed to inspect
 
 # Test on Fedora
 docker run -it --rm -v $(pwd):/app fedora:latest bash
 cd /app
-dnf install -y fuse fuse-libs
-./StrikeHub-*.AppImage --help
+dnf install -y fuse-libs
+./StrikeHub-*.AppImage --appimage-extract >/dev/null
 ```

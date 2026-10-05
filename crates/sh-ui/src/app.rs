@@ -4,6 +4,8 @@ use crate::components::{
     SetupConnector, Sidebar,
 };
 use crate::theme;
+#[cfg(feature = "desktop")]
+use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 #[cfg(not(feature = "desktop"))]
 use sh_core::js_string_escape;
@@ -415,6 +417,20 @@ fn sync_config(
 
 #[component]
 pub fn App() -> Element {
+    // First-run stability: clamp the initial window to the monitor's
+    // available (work) area so the consent footer is visible even on a
+    // 1280x800 panel — project-management#380 (375 finding 8). Runs exactly
+    // once, after the window exists (use_effect re-fires are a no-op via the
+    // Once guard inside the effect body).
+    #[cfg(feature = "desktop")]
+    {
+        let window = use_window();
+        use_effect(move || {
+            static DONE: std::sync::Once = std::sync::Once::new();
+            DONE.call_once(|| crate::window_fit::apply(&window.window));
+        });
+    }
+
     let mut hub_config = use_signal(|| {
         let mut cfg = HubConfig::load().unwrap_or_else(|_| HubConfig {
             setup_complete: false,

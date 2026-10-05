@@ -8,4 +8,5 @@ Exec=strikehub
 Terminal=false
 Categories=Development;Utility;Network;
 StartupNotify=true
+StartupWMClass=strikehub
 Keywords=Strike48;Kubernetes;DevOps;Connectors;

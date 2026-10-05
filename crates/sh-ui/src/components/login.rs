@@ -85,6 +85,10 @@ pub fn LoginOverlay(
                 "{btn_label}"
             }
 
+            p { class: "login-clear-cache-link",
+                "Sign in to connect StrikeHub to Strike48 Studio — a free Strike48 account is required."
+            }
+
             // Waiting state for an in-flight OAuth flow: the browser is
             // doing the work, so make the app side actionable instead of a
             // dead disabled button — re-open the login page, copy the link,
