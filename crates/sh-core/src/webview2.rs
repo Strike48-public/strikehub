@@ -32,7 +32,10 @@ pub enum WebView2State {
 /// Runtime install roots probed for WebView2 Runtime version directories
 /// (per-machine, then per-user). Each root contains one subdirectory per
 /// installed runtime version (e.g. `.../Application/1.0.2210.55/`).
-pub fn runtime_roots(program_files_x86: Option<&Path>, local_app_data: Option<&Path>) -> Vec<PathBuf> {
+pub fn runtime_roots(
+    program_files_x86: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(pf) = program_files_x86 {
         roots.push(pf.join(r"Microsoft\EdgeWebView\Application"));
@@ -50,10 +53,8 @@ pub fn edge_exe_candidates(
     program_files: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut cands = Vec::new();
-    for pf in [program_files_x86, program_files] {
-        if let Some(dir) = pf {
-            cands.push(dir.join(r"Microsoft\Edge\Application\msedge.exe"));
-        }
+    for dir in [program_files_x86, program_files].into_iter().flatten() {
+        cands.push(dir.join(r"Microsoft\Edge\Application\msedge.exe"));
     }
     cands
 }
@@ -148,15 +149,27 @@ mod tests {
             Some(Path::new(r"C:\Users\me\AppData\Local")),
         );
         assert_eq!(roots.len(), 2);
-        assert!(roots[0].to_string_lossy().ends_with(r"Microsoft\EdgeWebView\Application"));
-        assert!(roots[1].to_string_lossy().ends_with(r"Microsoft\EdgeWebView\Application"));
+        assert!(
+            roots[0]
+                .to_string_lossy()
+                .ends_with(r"Microsoft\EdgeWebView\Application")
+        );
+        assert!(
+            roots[1]
+                .to_string_lossy()
+                .ends_with(r"Microsoft\EdgeWebView\Application")
+        );
 
         let cands = edge_exe_candidates(
             Some(Path::new(r"C:\Program Files (x86)")),
             Some(Path::new(r"C:\Program Files")),
         );
         assert_eq!(cands.len(), 2);
-        assert!(cands[0].to_string_lossy().ends_with(r"Microsoft\Edge\Application\msedge.exe"));
+        assert!(
+            cands[0]
+                .to_string_lossy()
+                .ends_with(r"Microsoft\Edge\Application\msedge.exe")
+        );
     }
 
     #[test]

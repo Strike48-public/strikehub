@@ -164,20 +164,30 @@ pub fn seed_vc_runtime(cache_dir: &Path, exe_dir: &Path) {
             continue;
         }
         if let Err(e) = std::fs::create_dir_all(cache_dir) {
-            tracing::warn!("seed: cannot create cache dir {}: {}", cache_dir.display(), e);
+            tracing::warn!(
+                "seed: cannot create cache dir {}: {}",
+                cache_dir.display(),
+                e
+            );
             continue;
         }
         if let Err(e) = std::fs::copy(&src, &dst) {
             tracing::warn!("seed: copy {} -> cache failed: {}", src.display(), e);
             continue;
         }
-        tracing::info!("seed: staged VC++ runtime {} into {}", name, cache_dir.display());
+        tracing::info!(
+            "seed: staged VC++ runtime {} into {}",
+            name,
+            cache_dir.display()
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bundled_binary_path, crt_source_path, decide_crt_stage, decide_seed, VC_RUNTIME_DLLS};
+    use super::{
+        VC_RUNTIME_DLLS, bundled_binary_path, crt_source_path, decide_crt_stage, decide_seed,
+    };
 
     #[test]
     fn finds_bundled_binary_as_exe_sibling() {
