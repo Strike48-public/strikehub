@@ -244,7 +244,7 @@ strikehub/
 ### Preflight Checks
 
 Before a connector starts, `sh-core` runs device prerequisite checks (kubectl,
-Docker on Windows, etc.). Each `PreflightCheck` may carry an `install_command` the UI can run
+(WSL 2 or Docker) on Windows, etc.). Each `PreflightCheck` may carry an `install_command` the UI can run
 to fix a failed check; `PreflightCheck::is_start_action()` is true when that command
 starts an already-installed dependency whose daemon is stopped, so the wizard offers
 a "Start" button instead of "Install". See `crates/sh-core/src/preflight.rs`.

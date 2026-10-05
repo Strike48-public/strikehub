@@ -651,35 +651,97 @@ async fn run_kubestudio_checks() -> Vec<PreflightCheck> {
     })]
 }
 
-/// Whether the Pick connector requires the Docker CLI as a step-1
+/// Whether the Pick connector requires a Linux sandbox backend as a step-1
 /// (device-posture) prerequisite on the given host OS.
 ///
 /// Pick's tools are Linux tools. On Windows they can only run inside a
-/// Linux sandbox (WSL 2 or Docker, per the release notes), so Docker is a
-/// hard prerequisite there. On macOS and Linux the connector runs natively
-/// when no sandbox backend is available (pick's `resolve_shell_mode`
-/// coerces Proot → Native), so Docker is an optional sandbox backend — not
-/// a prerequisite — and no failing check must be emitted for its absence.
-fn pick_requires_docker(os: HostOs) -> bool {
+/// Linux sandbox, so one of the two supported backends — WSL 2 (preferred;
+/// Pick imports its own distro on first use) or Docker — is a hard
+/// prerequisite there. On macOS and Linux the connector runs natively when
+/// no sandbox backend is available (pick's `resolve_shell_mode` coerces
+/// Proot → Native), so a sandbox backend is optional — not a prerequisite —
+/// and no failing check must be emitted for its absence.
+fn pick_requires_sandbox_backend(os: HostOs) -> bool {
     os == HostOs::Windows
+}
+
+/// Name and requirement statement for the combined Windows sandbox check.
+const WINDOWS_SANDBOX_CHECK_NAME: &str = "Windows sandbox (WSL or Docker)";
+const WINDOWS_SANDBOX_CHECK_DESCRIPTION: &str = "Pick's tools need a Linux sandbox on Windows: WSL 2 (preferred, Pick imports its own distro) or Docker Desktop";
+
+/// Pure OR over the two Windows sandbox backend probes: a backend exists
+/// when either WSL or Docker is usable.
+fn sandbox_backend_present(wsl_ok: bool, docker_ok: bool) -> bool {
+    wsl_ok || docker_ok
+}
+
+/// Probe whether WSL is installed and functional on this host.
+///
+/// `wsl.exe --status` exits 0 when the WSL component is present and
+/// functional, and fails (non-zero exit or spawn error) when it is missing
+/// or broken. Mirrors the guarded one-shot probe style of
+/// [`check_docker_cli`] — `--status` is a fast local metadata query, so no
+/// timeout is needed. A WSL 2 install with no distro yet still passes: Pick
+/// imports its own distro on first use.
+fn check_wsl_available() -> bool {
+    hidden_command("wsl.exe")
+        .args(["--status"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Windows step-1 (device-posture) check for Pick: a Linux sandbox backend
+/// (WSL 2 — preferred — or Docker) must exist.
+///
+/// Passes when EITHER backend is usable; fails only when both are absent.
+/// The dual option is spelled out in the human-readable `install_hint`
+/// (WSL 2 first, matching the release notes). `install_command` is
+/// singular because the UI executes it via `powershell -Command`; it uses
+/// the WSL one (`wsl --install`) as the preferred backend.
+fn check_sandbox_backend() -> PreflightCheck {
+    let wsl_ok = check_wsl_available();
+    // Reuse the existing Docker probe (CLI present + daemon responsive);
+    // only a fully passing probe counts as a usable backend.
+    let docker_ok = check_docker_cli().status == CheckStatus::Passed;
+
+    if sandbox_backend_present(wsl_ok, docker_ok) {
+        PreflightCheck {
+            name: WINDOWS_SANDBOX_CHECK_NAME.into(),
+            description: WINDOWS_SANDBOX_CHECK_DESCRIPTION.into(),
+            status: CheckStatus::Passed,
+            install_hint: String::new(),
+            install_command: None,
+        }
+    } else {
+        PreflightCheck {
+            name: WINDOWS_SANDBOX_CHECK_NAME.into(),
+            description: WINDOWS_SANDBOX_CHECK_DESCRIPTION.into(),
+            status: CheckStatus::Failed,
+            install_hint:
+                "Install WSL 2 (wsl --install) — preferred — or Docker Desktop (winget install Docker.DockerDesktop).".into(),
+            install_command: Some("wsl --install".into()),
+        }
+    }
 }
 
 /// Step-1 (device-posture) checks for the Pick connector.
 ///
 /// On platforms where Pick does not require a Linux sandbox backend
 /// (macOS, Linux) there are no device prerequisites, so the returned group
-/// is empty and the wizard proceeds straight to registration.
+/// is empty and the wizard proceeds straight to registration. On Windows a
+/// single combined check is emitted: WSL 2 or Docker must be present.
 async fn run_pick_checks(os: HostOs) -> Vec<PreflightCheck> {
-    if !pick_requires_docker(os) {
+    if !pick_requires_sandbox_backend(os) {
         return Vec::new();
     }
-    let docker_check = tokio::task::spawn_blocking(check_docker_cli).await;
-    vec![docker_check.unwrap_or_else(|_| PreflightCheck {
-        name: "Docker CLI".into(),
-        description: "Docker must be installed and running".into(),
+    let sandbox_check = tokio::task::spawn_blocking(check_sandbox_backend).await;
+    vec![sandbox_check.unwrap_or_else(|_| PreflightCheck {
+        name: WINDOWS_SANDBOX_CHECK_NAME.into(),
+        description: WINDOWS_SANDBOX_CHECK_DESCRIPTION.into(),
         status: CheckStatus::Failed,
-        install_hint: "Could not verify Docker installation.".into(),
-        install_command: None,
+        install_hint: "Could not verify the Windows sandbox backend (WSL 2 or Docker).".into(),
+        install_command: Some("wsl --install".into()),
     })]
 }
 
@@ -1079,21 +1141,43 @@ mod tests {
     }
 
     #[test]
-    fn pick_requires_docker_only_on_windows() {
+    fn pick_requires_sandbox_backend_only_on_windows() {
         // Windows is the only platform where Pick cannot run without a
         // Linux sandbox backend (WSL 2 or Docker).
-        assert!(pick_requires_docker(HostOs::Windows));
-        assert!(!pick_requires_docker(HostOs::MacOs));
-        assert!(!pick_requires_docker(HostOs::Linux));
+        assert!(pick_requires_sandbox_backend(HostOs::Windows));
+        assert!(!pick_requires_sandbox_backend(HostOs::MacOs));
+        assert!(!pick_requires_sandbox_backend(HostOs::Linux));
+    }
+
+    #[test]
+    fn sandbox_backend_present_or_logic() {
+        // A backend exists when EITHER is usable: WSL-only boxes (the field
+        // QA rig ran the whole funnel on WSL2 with no Docker) and
+        // Docker-only boxes must both pass; only the absence of both fails.
+        assert!(sandbox_backend_present(true, false));
+        assert!(sandbox_backend_present(false, true));
+        assert!(sandbox_backend_present(true, true));
+        assert!(!sandbox_backend_present(false, false));
     }
 
     #[tokio::test]
-    async fn run_pick_checks_omits_docker_outside_windows() {
+    async fn run_pick_checks_omits_sandbox_check_outside_windows() {
         // macOS and Linux run Pick natively when no sandbox backend is
         // available, so the step-1 group is empty — the wizard must not
-        // nag about Docker. These paths return before probing `docker`,
-        // so the test is side-effect free.
+        // nag about a sandbox. These paths return before probing, so the
+        // test is side-effect free.
         assert!(run_pick_checks(HostOs::MacOs).await.is_empty());
         assert!(run_pick_checks(HostOs::Linux).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_pick_checks_windows_emits_single_sandbox_check() {
+        // On Windows exactly one combined check is emitted. Only the shape
+        // (count + name) is asserted — status depends on the host the test
+        // happens to run on, since the probes hit the real `wsl.exe` /
+        // `docker` binaries.
+        let checks = run_pick_checks(HostOs::Windows).await;
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, WINDOWS_SANDBOX_CHECK_NAME);
     }
 }
