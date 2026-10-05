@@ -176,14 +176,23 @@ cat > "$APPDIR/apprun-hooks/00-strike48-env.sh" << HOOKEOF
 # (it ran empty once — the cd anchor below then no-oped and the WebKit helpers
 # could not spawn). Pure bash builtins: no dirname/readlink, so a poisoned env
 # (e.g. a host whose coreutils links libsystemd) cannot abort the launch.
-src="${BASH_SOURCE[0]:-\$0}"
-case "$src" in
+# This is an UNQUOTED heredoc: every $ that must survive to runtime is
+# \$-escaped. Without the escapes, the build-time expansion baked the build
+# host's own script path into src and matched the case against an empty
+# string, so the derivation below silently no-oped.
+src="\${BASH_SOURCE[0]:-\$0}"
+case "\$src" in
     */*) APPDIR="\${APPDIR:-\$(cd "\${src%/*}/.." 2>/dev/null && pwd -P || true)}" ;;
 esac
 [ -n "\${APPDIR:-}" ] || APPDIR="\$PWD"
 export APPDIR
-if [ -z "$STRIKE48_API_URL" ]; then export STRIKE48_API_URL="https://studio.strike48.com"; fi
-if [ -z "$STRIKE48_URL" ]; then export STRIKE48_URL="wss://studio.strike48.com"; fi
+# Default-only: the \$ escapes make these evaluate at RUNTIME. Unescaped, the
+# heredoc expands them at build time (the vars are unset there) and the
+# generated hook clobbers a user's pre-launch export. User-set values win.
+: "\${STRIKE48_API_URL:=https://studio.strike48.com}"
+export STRIKE48_API_URL
+: "\${STRIKE48_URL:=wss://studio.strike48.com}"
+export STRIKE48_URL
 export GDK_BACKEND=x11
 # WebKit's WebProcess (EGL/gbm init + IPC sockets) requires XDG_RUNTIME_DIR;
 # without it EGL init aborts ("Could not create default EGL display:
@@ -210,7 +219,7 @@ fi
 export WEBKIT_DISABLE_DMABUF_RENDERER
 # The graphics runtime is bundled (Phase 2d): mesa dlopens its DRI drivers
 # from LIBGL_DRIVERS_PATH and glvnd dlopens the vendor modules (libGLX_mesa/
-# libEGL_mesa, which live in $APPDIR/usr/lib) from __GLX_DRIVERS_PATH. Point
+# libEGL_mesa, which live in \$APPDIR/usr/lib) from __GLX_DRIVERS_PATH. Point
 # both at the in-bundle copies so a stock host with no graphics stack can
 # software-render. User-set values win.
 : "\${__GLX_DRIVERS_PATH:=\$APPDIR/usr/lib}"
