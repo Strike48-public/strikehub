@@ -547,6 +547,14 @@ jobs:
           .\scripts\build-msi.ps1 -Version $Version -Arch ${{ matrix.arch }}
           Move-Item "StrikeHub-$Version-${{ matrix.arch }}.msi" "dist\${{ matrix.artifact }}.msi"
 
+      # Guard against regressing the clean-Windows CRT failure (v0.1.22 field
+      # bug: "VCRUNTIME140_1.dll was not found"): every DLL the shipped exes
+      # import must be OS-provided or staged in redist\ by build-msi.ps1.
+      - name: Verify app-local CRT coverage
+        if: matrix.installer == 'msi'
+        shell: pwsh
+        run: .\scripts\verify-crt-coverage.ps1
+
       - name: Sign MSI
         if: matrix.installer == 'msi'
         uses: azure/trusted-signing-action@v0.5.0

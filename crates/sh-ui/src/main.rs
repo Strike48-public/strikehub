@@ -49,6 +49,26 @@ fn main() {
 
     tracing::info!("StrikeHub starting — logs at {}", log_dir.display());
 
+    // Windows: pre-emptively probe for the WebView2 host prerequisite so a
+    // machine without the runtime OR Edge (e.g. a clean Windows 10 VM) gets
+    // an actionable log line BEFORE the first window fails to render. The
+    // loader itself is statically linked into this binary; only the runtime
+    // is external. Check-and-warn: we still attempt to launch, because Edge
+    // in unusual locations is possible and wry's own error stays authoritative.
+    #[cfg(target_os = "windows")]
+    {
+        if let sh_core::webview2::WebView2State::Missing = sh_core::webview2::probe() {
+            tracing::error!(
+                "WebView2 runtime NOT found (no WebView2 Runtime and no Microsoft Edge \
+                 installation): the StrikeHub window will not render. Install the \
+                 WebView2 Evergreen Runtime from \
+                 https://developer.microsoft.com/en-us/microsoft-edge/webview2/ and \
+                 relaunch StrikeHub. The VC++ runtime is NOT the issue — it is \
+                 bundled app-locally with this install."
+            );
+        }
+    }
+
     // Install a Ctrl+C / SIGTERM handler so the process shuts down cleanly.
     // On Unix this sends SIGTERM to our entire process group, which kills any
     // child connector processes that are still in our group. On all platforms,

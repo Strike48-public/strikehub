@@ -66,7 +66,18 @@ This creates a portable AppImage that includes:
 
 #### Windows
 
-Download the latest `strikehub-windows-x86_64.msi` from releases and double-click to install. It adds Start Menu and desktop shortcuts plus the system env vars; everything is bundled, so no additional configuration is required.
+Download the latest `strikehub-windows-x86_64.msi` from releases and run it (per-machine install). It adds Start Menu and desktop shortcuts plus the system env vars; everything is bundled, so no additional configuration is required.
+
+- **VC++ runtime: NOT required of the user.** The installer carries the exact
+  VC++ 2015-2022 runtime DLLs the app and bundled connectors import
+  (app-local deployment), so it runs on a clean Windows 10/11 machine.
+- **WebView2 runtime: required.** The window renders through the WebView2
+  runtime (shipped by recent Windows updates, or present via Microsoft Edge).
+  On a machine with neither the WebView2 runtime nor an Edge installation,
+  the app logs an actionable error to `%LOCALAPPDATA%\StrikeHub\logs\
+  strikehub.log` and the window will not render — install the
+  [WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
+  and relaunch.
 
 ### Build from Source
 

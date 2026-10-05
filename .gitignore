@@ -17,6 +17,10 @@ appimagetool*.AppImage
 # Downloaded connectors
 /dist/
 
+# App-local VC++ runtime DLLs staged by scripts/build-msi.ps1 (sourced from
+# the build host's MSVC toolset at build time; never vendored in git)
+/redist/
+
 # Build artifacts in root
 strikehub.svg
 strikehub.png
