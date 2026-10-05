@@ -69,6 +69,10 @@ pub fn LoginOverlay(
                 "{btn_label}"
             }
 
+            p { class: "login-clear-cache-link",
+                "Sign in to connect StrikeHub to Strike48 Studio — a free Strike48 account is required."
+            }
+
             if custom_visible {
                 div { class: "login-url-group",
                     label { class: "login-url-label", r#for: "login-studio-url", "Studio URL" }
