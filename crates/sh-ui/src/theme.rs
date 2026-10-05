@@ -704,6 +704,60 @@ pub fn app_css() -> &'static str {
             cursor: default;
         }
 
+        /* Waiting state for an in-flight OAuth flow (#379): the browser is
+           doing the work — re-open the page, copy the link, or cancel. */
+        .login-waiting {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            margin-top: 4px;
+            max-width: 380px;
+        }
+
+        .login-waiting-text {
+            font-size: 12px;
+            color: var(--ink-400);
+            text-align: center;
+            line-height: 1.5;
+            margin: 0;
+        }
+
+        .login-waiting-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .login-waiting-btn {
+            padding: 7px 14px;
+            font-size: 12px;
+            font-weight: 500;
+            font-family: var(--font-sans);
+            border: 1px solid var(--ink-700);
+            border-radius: var(--radius-pill);
+            background: var(--ink-850);
+            color: var(--ink-200);
+            cursor: pointer;
+            transition: border-color 0.15s, background 0.15s;
+        }
+
+        .login-waiting-btn:hover {
+            border-color: var(--brand-500);
+            background: var(--ink-800);
+        }
+
+        .login-waiting-cancel {
+            color: var(--status-critical);
+            border-color: rgba(217, 154, 154, 0.35);
+        }
+
+        .login-waiting-cancel:hover {
+            border-color: var(--status-critical);
+            background: var(--err-bg);
+        }
+
         .login-error {
             margin-bottom: 8px;
             padding: 8px 14px;

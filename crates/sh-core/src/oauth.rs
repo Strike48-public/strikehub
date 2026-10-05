@@ -21,13 +21,30 @@ pub struct OAuthResult {
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Returned by [`start_oauth_flow_with`] when the user cancels the in-flight
+/// sign-in flow from the waiting state (Strike48/project-management#379).
+///
+/// Distinct from a timeout or other failure so the UI can reset quietly
+/// instead of surfacing an error banner.
+#[derive(Debug, thiserror::Error)]
+#[error("sign-in cancelled")]
+pub struct SignInCancelled;
+
+/// How long the flow waits for the browser callback before giving up.
+///
+/// 15 minutes: first-run users can spend several minutes in browser
+/// first-run wizards or account-creation flows before reaching the Keycloak
+/// screen (parent finding #375-5).
+pub const OAUTH_TIMEOUT_SECS: u64 = 900;
+
 /// Start the system-browser OAuth flow via Matrix + Keycloak PKCE.
 ///
 /// Two-hop flow that ensures both a Matrix session AND usable tokens:
 ///
 /// 1. Discover Keycloak OIDC config via Matrix publicConfig
 /// 2. Generate PKCE code_verifier + code_challenge
-/// 3. Open browser → `{matrix}/auth/login?redirect=http://127.0.0.1:4000/session-created`
+/// 3. Open browser → `{matrix}/auth/login?redirect=http://127.0.0.1:{port}/session-created`
+///    (`{port}` is an OS-assigned ephemeral loopback port in desktop mode)
 /// 4. Matrix → Keycloak → user authenticates → Matrix creates session →
 ///    redirects to `/session-created`
 /// 5. `/session-created` immediately redirects browser to Keycloak's auth
@@ -44,10 +61,18 @@ pub struct OAuthResult {
 /// popup in the user's browser.
 ///
 /// `callback_base_url` is the externally-reachable base URL for the OAuth
-/// callback server (e.g. `http://localhost:8080` when port-forwarding).
-/// If `None`, defaults to `http://127.0.0.1:{port}` using the bound port.
+/// callback server (e.g. `http://localhost:4000` when port-forwarding to a
+/// container). If `None` (desktop mode), defaults to
+/// `http://127.0.0.1:{port}` using the bound loopback ephemeral port, and
+/// every consumer of the redirect (Keycloak PKCE `redirect_uri`,
+/// `/session-created`, the Matrix login URL, and the token-exchange
+/// `redirect_uri` form field) is built from that actual bound port.
+///
+/// While waiting for the browser callback the flow is cancellable (see the
+/// `cancel` parameter of [`start_oauth_flow_with`]) and bounded by a
+/// 15-minute timeout.
 pub async fn start_oauth_flow(matrix_url: &str, tls_insecure: bool) -> anyhow::Result<OAuthResult> {
-    start_oauth_flow_with(matrix_url, tls_insecure, None, None, None).await
+    start_oauth_flow_with(matrix_url, tls_insecure, None, None, None, None, None).await
 }
 
 /// Like [`start_oauth_flow`] but with:
@@ -60,6 +85,12 @@ pub async fn start_oauth_flow(matrix_url: &str, tls_insecure: bool) -> anyhow::R
 /// - `login_url_tx` — when provided, the login URL is sent over this channel
 ///   instead of calling `open::that()`. Allows the caller to open the URL
 ///   client-side (e.g. via Dioxus `eval` / `window.open()`).
+/// - `login_url_out` — when provided, the final login URL (which embeds the
+///   bound callback port) is *also* sent over this channel so the caller
+///   can offer "Open sign-in page again" / "Copy sign-in link" actions in
+///   the waiting state (Strike48/project-management#379).
+/// - `cancel` — when provided, firing this channel aborts the callback
+///   server and returns [`SignInCancelled`] without surfacing an error.
 #[tracing::instrument(
     name = "oauth.flow",
     skip_all,
@@ -76,6 +107,8 @@ pub async fn start_oauth_flow_with(
     callback_base_url: Option<String>,
     browser_matrix_url: Option<String>,
     login_url_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    login_url_out: Option<tokio::sync::oneshot::Sender<String>>,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> anyhow::Result<OAuthResult> {
     let span = tracing::Span::current();
     let started = std::time::Instant::now();
@@ -113,21 +146,45 @@ pub async fn start_oauth_flow_with(
 
     let (tx, mut rx) = mpsc::channel::<OAuthResult>(1);
 
-    // Bind callback server — use 0.0.0.0 so it's reachable from outside
-    // containers when port-forwarded. Try port 4000 first (whitelisted in
-    // Keycloak), fall back to any available port.
-    let bind_addr = "0.0.0.0:4000";
-    let listener = match tokio::net::TcpListener::bind(bind_addr).await {
-        Ok(l) => l,
-        Err(_) => tokio::net::TcpListener::bind("0.0.0.0:0")
+    // Bind the callback server.
+    //
+    // Desktop (no `callback_base_url`): loopback-only (`127.0.0.1`) on an
+    // OS-assigned ephemeral port. The old `0.0.0.0:4000` bind made the
+    // sign-in listener reachable from the LAN, triggered OS firewall
+    // "publisher unknown" prompts, and could collide with other software
+    // on the fixed port (Strike48/project-management#379; parent findings
+    // #375-5/#375-7, #376-4, #377-5). Every consumer of the redirect is
+    // built below from the *actual* bound port, so an ephemeral port is
+    // safe — the Keycloak client's allowed redirect URIs must cover it
+    // with a port wildcard (`http://127.0.0.1:*/cb`).
+    //
+    // Server/port-forward (`callback_base_url` set): kubectl port-forward
+    // connects to the pod IP on the fixed port the external base URL
+    // advertises, so bind all interfaces on exactly that port (a
+    // loopback-only bind would not receive those connections).
+    let listener = if let Some(ref base) = callback_base_url {
+        let bind_addr = format!("0.0.0.0:{}", callback_port(base));
+        tokio::net::TcpListener::bind(&bind_addr)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to bind OAuth callback server: {}", e))?,
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to bind OAuth callback server to {} (port-forward mode): {}",
+                    bind_addr,
+                    e
+                )
+            })?
+    } else {
+        tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to bind OAuth callback server to 127.0.0.1:0: {}", e)
+            })?
     };
     let addr: SocketAddr = listener.local_addr()?;
     tracing::info!("OAuth callback server listening on {}", addr);
 
     // External base URL for the callback — either provided (server mode)
-    // or default to localhost with the bound port (desktop mode).
+    // or default to loopback with the bound port (desktop mode).
     let external_base =
         callback_base_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", addr.port()));
     let pkce_redirect_uri = format!("{}/cb", external_base);
@@ -196,6 +253,14 @@ pub async fn start_oauth_flow_with(
         urlencoding::encode(&session_created_uri),
     );
 
+    // Hand the login URL (it embeds the bound callback port) to the caller
+    // for "Open sign-in page again" / "Copy sign-in link" actions in the
+    // waiting state — before opening the browser, so it is still available
+    // if opening the browser fails.
+    if let Some(out) = login_url_out {
+        let _ = out.send(login_url.clone());
+    }
+
     let is_server_mode = login_url_tx.is_some();
     span.record("mode", if is_server_mode { "server" } else { "desktop" });
     tracing::info!("Opening browser for Matrix login (two-hop: Matrix session + PKCE)");
@@ -212,9 +277,25 @@ pub async fn start_oauth_flow_with(
         }
     }
 
-    // Wait for token with 5-minute timeout
+    // Wait for the token: 15-minute ceiling, or until the user cancels from
+    // the waiting state (Strike48/project-management#379).
     tracing::info!("Waiting for OAuth callback (rx)...");
-    let result = tokio::time::timeout(std::time::Duration::from_secs(300), rx.recv()).await;
+    let callback_wait = tokio::time::timeout(
+        std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS),
+        rx.recv(),
+    );
+    let result = match cancel {
+        Some(cancel) => tokio::select! {
+            r = callback_wait => r,
+            _ = cancel => {
+                span.record("outcome", "cancelled");
+                server_handle.abort();
+                tracing::info!("OAuth flow cancelled by user");
+                return Err(anyhow::anyhow!(SignInCancelled));
+            }
+        },
+        None => callback_wait.await,
+    };
 
     // In server mode, keep the callback server alive so the port stays open
     // (kubectl port-forward drops all ports if any forwarded port closes).
@@ -245,14 +326,44 @@ pub async fn start_oauth_flow_with(
         Err(_) => {
             span.record("outcome", "timeout");
             server_handle.abort();
-            anyhow::bail!("OAuth flow timed out after 5 minutes")
+            anyhow::bail!("OAuth flow timed out after 15 minutes. If you finished sign-in in the browser, click Sign In again to start a fresh flow.")
         }
     }
+}
+
+/// Port advertised by a callback base URL (`http://localhost:4000` → 4000),
+/// defaulting to 4000 (the Helm chart's `oauth-cb` container port) when the
+/// URL carries no explicit port.
+fn callback_port(base: &str) -> u16 {
+    base.rsplit(':')
+        .next()
+        .and_then(|p| p.split('/').next())
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(4000)
 }
 
 // ---------------------------------------------------------------------------
 // PKCE helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::callback_port;
+
+    #[test]
+    fn parses_explicit_port() {
+        assert_eq!(callback_port("http://localhost:4000"), 4000);
+        assert_eq!(callback_port("http://localhost:9443/"), 9443);
+        assert_eq!(callback_port("http://10.0.0.5:8443/x"), 8443);
+    }
+
+    #[test]
+    fn defaults_to_4000_without_port() {
+        assert_eq!(callback_port("http://localhost"), 4000);
+        assert_eq!(callback_port("http://localhost/"), 4000);
+        assert_eq!(callback_port(""), 4000);
+    }
+}
 
 /// Generate a random 32-byte code verifier, base64url-encoded (no padding).
 fn generate_code_verifier() -> String {
