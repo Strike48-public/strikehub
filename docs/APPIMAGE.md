@@ -180,7 +180,7 @@ StrikeHub.AppDir/
 The build system:
 - Sets default `STRIKE48_API_URL` and `STRIKE48_URL` environment variables
 - Bundles connectors (ks-connector, pentest-agent) when available
-- Uses a wrapper script to ensure environment variables are always set
+- Ensures environment variables are always set via the generated `apprun-hooks/00-strike48-env.sh` AppRun hook, which the build script writes before the linuxdeploy call and the generated AppRun sources before exec'ing the app
 - Creates a portable, self-contained AppImage
 
 ## Testing

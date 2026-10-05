@@ -13,6 +13,8 @@ pub mod matrix_ws;
 pub mod oauth;
 pub mod ott;
 pub mod preflight;
+#[cfg(unix)]
+pub mod process;
 pub mod proxy;
 pub mod registry;
 #[cfg(feature = "sentry")]
@@ -43,6 +45,8 @@ pub use preflight::{
     AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
 };
+#[cfg(unix)]
+pub use process::{detach_process_group, is_process_group_leader};
 pub use proxy::ConnectorProxy;
 pub use registry::{
     ConnectorManifest, DEFAULT_CONNECTOR_ID, all_manifests, builtin_manifests, merge_manifests,

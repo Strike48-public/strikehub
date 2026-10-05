@@ -25,7 +25,9 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with(fmt::layer().with_writer(file_appender))
+        // File logs must stay clean for grep/tail/grep -c: no ANSI escapes.
+        .with(fmt::layer().with_ansi(false).with_writer(file_appender))
+        // The console layer keeps its default (colored) output.
         .with(fmt::layer().with_writer(std::io::stderr))
         // The layer's default event_filter already maps only error! records to
         // Sentry events (warn!/info! become breadcrumbs only), and
@@ -42,7 +44,9 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with(fmt::layer().with_writer(file_appender))
+        // File logs must stay clean for grep/tail: no ANSI escapes.
+        .with(fmt::layer().with_ansi(false).with_writer(file_appender))
+        // The console layer keeps its default (colored) output.
         .with(fmt::layer().with_writer(std::io::stderr));
 
     registry.init();
@@ -69,9 +73,22 @@ fn main() {
         }
     }
 
+    // Leave the launching session's process group (Unix) BEFORE anything is
+    // spawned: when launched from a desktop launcher (GNOME app grid, dock,
+    // ...) the process starts in the LAUNCHER's process group, and the
+    // shutdown handler's killpg would then SIGTERM the launcher (e.g. GNOME
+    // Shell) — project-management#380 (377 finding 7), HIGH. After this call
+    // StrikeHub leads its own group; child connectors inherit it, so
+    // signalling it on shutdown reaches only StrikeHub and its children.
+    // (Windows has no process-group semantics; the Ctrl+C path below is
+    // unchanged.)
+    #[cfg(unix)]
+    sh_core::detach_process_group();
+
     // Install a Ctrl+C / SIGTERM handler so the process shuts down cleanly.
-    // On Unix this sends SIGTERM to our entire process group, which kills any
-    // child connector processes that are still in our group. On all platforms,
+    // On Unix this sends SIGTERM to OUR process group (see the setpgid call
+    // above), which kills any child connector processes that are still in it.
+    // On all platforms,
     // kill_on_drop(true) on the tokio::process::Child handles provides a
     // secondary safety net when the Child handle is dropped.
     install_signal_handler();
@@ -112,7 +129,10 @@ fn main() {
                 .with_title("StrikeHub")
                 .with_window_icon(Some(icon))
                 .with_always_on_top(false)
-                .with_inner_size(dioxus::desktop::LogicalSize::new(1024.0, 768.0))
+                .with_inner_size(dioxus::desktop::LogicalSize::new(
+                    sh_ui::window_fit::DEFAULT_WIDTH,
+                    sh_ui::window_fit::DEFAULT_HEIGHT,
+                ))
                 .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 600.0)),
         );
 
@@ -172,7 +192,7 @@ fn install_signal_handler() {
         static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
         // SAFETY: signal handler only calls async-signal-safe functions
-        // (getpgrp, killpg, _exit).
+        // (getpgrp, getpid, killpg, sleep, _exit).
         unsafe {
             libc::signal(
                 libc::SIGINT,
@@ -191,14 +211,22 @@ fn install_signal_handler() {
                 unsafe { libc::_exit(128 + sig) };
             }
             unsafe {
-                // Kill every process in our process group. Child connectors
-                // spawned without setsid() share our group, so they receive
-                // SIGTERM and can exit cleanly.
-                let pgrp = libc::getpgrp();
-                libc::killpg(pgrp, libc::SIGTERM);
-                // Give children a brief moment to exit, then force-exit.
-                // sleep() is async-signal-safe per POSIX.
-                libc::sleep(1);
+                // Only killpg when we actually LEAD our process group. We set
+                // that up at startup (sh_core::detach_process_group calls
+                // setpgid(0,0)), and child connectors inherit the group, so
+                // the group then contains exactly StrikeHub + its children —
+                // never the launching session's group (GNOME Shell et al.).
+                // If the detach failed and we are still in the launcher's
+                // group, signalling it would kill the launcher — the
+                // regression this exists to prevent — so skip the group kill
+                // and rely on PR_SET_PDEATHSIG (SIGHUP on parent death) and
+                // kill_on_drop to clean the connectors up instead.
+                if sh_core::is_process_group_leader() {
+                    libc::killpg(libc::getpgrp(), libc::SIGTERM);
+                    // Give children a brief moment to exit, then force-exit.
+                    // sleep() is async-signal-safe per POSIX.
+                    libc::sleep(1);
+                }
                 libc::_exit(128 + sig);
             }
         }

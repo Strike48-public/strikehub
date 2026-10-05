@@ -36,29 +36,19 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 # Copy binaries (BIN_DIR can be overridden for debug builds)
 BIN_DIR="${BIN_DIR:-target/${TARGET}/release}"
 echo "Copying binaries from ${BIN_DIR}..."
-cp "${BIN_DIR}/strikehub" "$APPDIR/usr/bin/strikehub-real"
-chmod +x "$APPDIR/usr/bin/strikehub-real"
-
-# Create wrapper script that sets env vars
-cat > "$APPDIR/usr/bin/strikehub" << 'EOF'
-#!/bin/bash
-HERE="$(dirname "$(readlink -f "${0}")")"
-
-# Set default Strike48 URLs if not already set
-if [ -z "$STRIKE48_API_URL" ]; then
-    export STRIKE48_API_URL="https://studio.strike48.com"
-fi
-if [ -z "$STRIKE48_URL" ]; then
-    export STRIKE48_URL="wss://studio.strike48.com"
-fi
-
-# Force X11 backend to avoid Wayland protocol errors with WebKitGTK
-export GDK_BACKEND=x11
-
-# Execute the real binary
-exec "$HERE/strikehub-real" "$@"
-EOF
+# The payload keeps the end-user name `strikehub` (no `-real` suffix): on
+# X11 the toolkit derives WM_CLASS from the process name (argv[0]), and
+# GNOME matches the window to strikehub.desktop via that class. The old
+# `strikehub-real` name made WM_CLASS `strikehub-real`, which matched no
+# desktop entry -> generic gear icon (project-management#380, 377 finding 6).
+cp "${BIN_DIR}/strikehub" "$APPDIR/usr/bin/strikehub"
 chmod +x "$APPDIR/usr/bin/strikehub"
+
+# NOTE: no separate env-var wrapper script is needed here. The AppRun that
+# linuxdeploy generates (see below) sources apprun-hooks/*.sh and exports the
+# same STRIKE48_API_URL / STRIKE48_URL / GDK_BACKEND defaults, so the real
+# binary can be the payload itself — which is what keeps argv[0] (and thus
+# WM_CLASS) equal to `strikehub`.
 
 # Copy connectors if they exist
 if [ -f "dist/ks-connector" ]; then
@@ -239,7 +229,7 @@ EXTRA_EXE=()
 echo "Deploying libraries via linuxdeploy..."
 "./${LINUXDEPLOY}" \
     --appdir "$APPDIR" \
-    --executable "$APPDIR/usr/bin/strikehub-real" \
+    --executable "$APPDIR/usr/bin/strikehub" \
     "${EXTRA_EXE[@]}" \
     --desktop-file "$APPDIR/usr/share/applications/strikehub.desktop" \
     --icon-file "$APPDIR/strikehub.png" \
