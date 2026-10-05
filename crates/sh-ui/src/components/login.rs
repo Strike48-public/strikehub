@@ -16,9 +16,11 @@ pub fn LoginOverlay(
     /// Login URL of the in-flight OAuth flow (when `signing_in`), for the
     /// "Open sign-in page again" / "Copy sign-in link" waiting-state actions.
     /// `None` while the flow is still computing it.
-    #[props(default)] sign_in_url: Option<String>,
+    #[props(default)]
+    sign_in_url: Option<String>,
     /// Cancel the in-flight OAuth flow (waiting state, #379).
-    #[props(default)] on_cancel: EventHandler<()>,
+    #[props(default)]
+    on_cancel: EventHandler<()>,
     /// Previously saved custom URL (from config). Pre-fills the URL input
     /// when the user clicks "Custom URL sign in...". The link is always
     /// shown first — the input only appears after clicking.

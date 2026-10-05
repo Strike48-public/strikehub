@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Result of a successful OAuth flow.
+#[derive(Debug)]
 pub struct OAuthResult {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -110,6 +111,43 @@ pub async fn start_oauth_flow_with(
     login_url_out: Option<tokio::sync::oneshot::Sender<String>>,
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> anyhow::Result<OAuthResult> {
+    run_oauth_flow(
+        matrix_url,
+        tls_insecure,
+        callback_base_url,
+        browser_matrix_url,
+        login_url_tx,
+        login_url_out,
+        cancel,
+        OAUTH_TIMEOUT_SECS,
+        |url| open::that(url),
+    )
+    .await
+}
+
+/// Core of the OAuth flow with the two production knobs pinned by
+/// [`start_oauth_flow_with`] made injectable for tests: `timeout_secs`
+/// (the waiting-state ceiling — [`OAUTH_TIMEOUT_SECS`] in production) and
+/// `open_browser` (the system-browser opener — `open::that` on desktop).
+/// Tests inject a short timeout and a no-op opener so the cancel/timeout
+/// and ephemeral-port behaviour is covered deterministically, without
+/// 15-minute sleeps or a real browser (Strike48/project-management#379).
+// 9 args = the public 7-arg surface plus the two test-only knobs above.
+#[allow(clippy::too_many_arguments)]
+async fn run_oauth_flow<O>(
+    matrix_url: &str,
+    tls_insecure: bool,
+    callback_base_url: Option<String>,
+    browser_matrix_url: Option<String>,
+    login_url_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    login_url_out: Option<tokio::sync::oneshot::Sender<String>>,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    timeout_secs: u64,
+    open_browser: O,
+) -> anyhow::Result<OAuthResult>
+where
+    O: Fn(&str) -> std::io::Result<()>,
+{
     let span = tracing::Span::current();
     let started = std::time::Instant::now();
 
@@ -270,7 +308,7 @@ pub async fn start_oauth_flow_with(
         tracing::info!("Login URL sent to caller: {}", login_url);
     } else {
         // Desktop mode: open system browser directly
-        if let Err(e) = open::that(&login_url) {
+        if let Err(e) = open_browser(&login_url) {
             tracing::error!("Failed to open system browser: {}", e);
             server_handle.abort();
             anyhow::bail!("Failed to open system browser: {}", e);
@@ -280,10 +318,8 @@ pub async fn start_oauth_flow_with(
     // Wait for the token: 15-minute ceiling, or until the user cancels from
     // the waiting state (Strike48/project-management#379).
     tracing::info!("Waiting for OAuth callback (rx)...");
-    let callback_wait = tokio::time::timeout(
-        std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS),
-        rx.recv(),
-    );
+    let callback_wait =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx.recv());
     let result = match cancel {
         Some(cancel) => tokio::select! {
             r = callback_wait => r,
@@ -326,7 +362,9 @@ pub async fn start_oauth_flow_with(
         Err(_) => {
             span.record("outcome", "timeout");
             server_handle.abort();
-            anyhow::bail!("OAuth flow timed out after 15 minutes. If you finished sign-in in the browser, click Sign In again to start a fresh flow.")
+            anyhow::bail!(
+                "OAuth flow timed out after 15 minutes. If you finished sign-in in the browser, click Sign In again to start a fresh flow."
+            )
         }
     }
 }
@@ -348,7 +386,13 @@ fn callback_port(base: &str) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::callback_port;
+    use super::*;
+    use axum::Json;
+    use axum::extract::{Form, State};
+    use axum::routing::post;
+    use std::time::{Duration, Instant};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
 
     #[test]
     fn parses_explicit_port() {
@@ -362,6 +406,462 @@ mod tests {
         assert_eq!(callback_port("http://localhost"), 4000);
         assert_eq!(callback_port("http://localhost/"), 4000);
         assert_eq!(callback_port(""), 4000);
+    }
+
+    /// The public ceiling is the 15-minute bound the waiting state promises
+    /// (parent finding #375-5: first-run browser wizards take minutes).
+    #[test]
+    fn oauth_timeout_is_15_minutes() {
+        assert_eq!(OAUTH_TIMEOUT_SECS, 900);
+    }
+
+    /// `SignInCancelled` is the quiet-reset signal the UI downcasts on
+    /// (sh-ui/src/app.rs) — it must downcast through `anyhow` and carry a
+    /// stable display message.
+    #[test]
+    fn sign_in_cancelled_downcasts_and_displays() {
+        let err: anyhow::Error = anyhow::anyhow!(SignInCancelled);
+        assert!(err.downcast_ref::<SignInCancelled>().is_some());
+        assert_eq!(err.to_string(), "sign-in cancelled");
+    }
+
+    // ------------------------------------------------------------------
+    // Mock Matrix + Keycloak (in-process) for full-flow tests
+    // ------------------------------------------------------------------
+
+    /// One observed token-exchange POST (form fields), for end-to-end
+    /// assertions on the redirect_uri the flow built.
+    #[derive(Clone, Default)]
+    struct TokenCall {
+        grant_type: Option<String>,
+        code: Option<String>,
+        client_id: Option<String>,
+        redirect_uri: Option<String>,
+        code_verifier_present: bool,
+    }
+
+    /// Shared state for the mock identity stack.
+    #[derive(Clone)]
+    struct MockIdState {
+        base: String,
+        token_calls: Arc<std::sync::Mutex<Vec<TokenCall>>>,
+    }
+
+    #[derive(Deserialize)]
+    struct TokenForm {
+        grant_type: String,
+        code: String,
+        client_id: String,
+        redirect_uri: String,
+        code_verifier: String,
+    }
+
+    async fn graphql_handler(State(s): State<MockIdState>) -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "data": {
+                "publicConfig": {
+                    "keycloak": {
+                        "url": s.base,
+                        "realm": "test",
+                        "clientId": "strikehub-client"
+                    }
+                }
+            }
+        }))
+    }
+
+    async fn oidc_handler(State(s): State<MockIdState>) -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "authorization_endpoint": format!(
+                "{}/realms/test/protocol/openid-connect/auth",
+                s.base
+            ),
+            "token_endpoint": format!(
+                "{}/realms/test/protocol/openid-connect/token",
+                s.base
+            ),
+        }))
+    }
+
+    async fn token_handler(
+        State(s): State<MockIdState>,
+        Form(form): Form<TokenForm>,
+    ) -> Json<serde_json::Value> {
+        s.token_calls.lock().unwrap().push(TokenCall {
+            grant_type: Some(form.grant_type),
+            code: Some(form.code),
+            client_id: Some(form.client_id),
+            redirect_uri: Some(form.redirect_uri),
+            code_verifier_present: !form.code_verifier.is_empty(),
+        });
+        Json(serde_json::json!({
+            "access_token": "mock-access-token",
+            "refresh_token": "mock-refresh-token",
+        }))
+    }
+
+    /// Serves `publicConfig` (GraphQL), the OIDC well-known, and the token
+    /// endpoint on a random loopback port; returns the shared state so tests
+    /// can inspect the recorded token-exchange calls.
+    async fn spawn_mock_id_stack() -> MockIdState {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let state = MockIdState {
+            base: base.clone(),
+            token_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route("/api/v1alpha/graphql", post(graphql_handler))
+            .route(
+                "/realms/test/.well-known/openid-configuration",
+                get(oidc_handler),
+            )
+            .route(
+                "/realms/test/protocol/openid-connect/token",
+                post(token_handler),
+            )
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        wait_for_accept(&base).await;
+        state
+    }
+
+    /// Wait until the mock is actually accepting connections (closes the
+    /// spawn→accept race so the flow's discovery never sees ECONNREFUSED).
+    async fn wait_for_accept(base: &str) {
+        let port = port_of(base);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(_) => return,
+                Err(_) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                Err(e) => panic!("mock id stack never started accepting: {e}"),
+            }
+        }
+    }
+
+    /// The callback base URL the flow embedded in the login URL's
+    /// `redirect=` query param (where the browser lands after Matrix
+    /// session creation).
+    fn external_base_from_login_url(login_url: &str) -> String {
+        let encoded = login_url
+            .split("redirect=")
+            .nth(1)
+            .expect("login URL carries a redirect param");
+        let decoded = urlencoding::decode(encoded).expect("redirect param decodes");
+        decoded
+            .strip_suffix("/session-created")
+            .expect("redirect param targets /session-created")
+            .to_string()
+    }
+
+    fn port_of(base: &str) -> u16 {
+        base.rsplit_once(':')
+            .expect("base has a port")
+            .1
+            .parse()
+            .expect("port parses")
+    }
+
+    /// Wait until `port` on loopback is re-bindable — proves the flow's
+    /// callback listener was torn down rather than left as a zombie.
+    async fn wait_for_port_free(port: u16) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(_) => return,
+                Err(_) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                Err(e) => panic!("callback port {port} still bound: {e}"),
+            }
+        }
+    }
+
+    /// No system browser in tests — the production wrapper uses
+    /// `open::that`.
+    fn no_browser(_url: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Browser stand-in that never follows the 307 (a real browser would,
+    /// but we assert on the redirect itself).
+    fn no_follow_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // Flow tests (cancel / timeout / ephemeral port / happy path)
+    // ------------------------------------------------------------------
+
+    /// Full desktop-mode happy path against the mock Matrix/Keycloak: the
+    /// callback port is OS-assigned, the Keycloak PKCE `redirect_uri` and
+    /// the token-exchange `redirect_uri` are built from the *actually
+    /// bound* port, the callback completes, and the listener is torn down.
+    #[tokio::test]
+    async fn desktop_happy_path_uses_bound_port_and_completes() {
+        let mock = spawn_mock_id_stack().await;
+        let (out_tx, out_rx) = oneshot::channel::<String>();
+
+        let flow = run_oauth_flow(
+            &mock.base,
+            false,
+            None, // desktop: no callback base URL -> ephemeral loopback bind
+            None,
+            None, // desktop: no login_url_tx
+            Some(out_tx),
+            None, // no cancel: run to the happy path
+            30,
+            no_browser,
+        );
+        tokio::pin!(flow);
+
+        let login_url = tokio::select! {
+            r = &mut flow => panic!("flow ended before reporting the login URL: {r:?}"),
+            url = out_rx => url.expect("flow reports the login URL"),
+        };
+        let external_base = external_base_from_login_url(&login_url);
+        let port = port_of(&external_base);
+        assert_eq!(
+            external_base,
+            format!("http://127.0.0.1:{port}"),
+            "desktop mode must expose loopback-only callbacks"
+        );
+        assert_ne!(port, 0, "desktop mode must use an OS-assigned port");
+        assert_ne!(
+            port, 4000,
+            "desktop mode must not fall back to the fixed 4000"
+        );
+
+        // Drive the "browser": Matrix session-created -> Keycloak auth redirect.
+        let client = no_follow_client();
+        let resp = client
+            .get(format!("{external_base}/session-created"))
+            .send()
+            .await
+            .expect("/session-created reachable on the bound port");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::TEMPORARY_REDIRECT,
+            "/session-created redirects to the Keycloak auth endpoint"
+        );
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .expect("Location header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            location.contains(&format!(
+                "redirect_uri={}",
+                urlencoding::encode(&format!("{external_base}/cb"))
+            )),
+            "Keycloak PKCE redirect_uri must use the bound port: {location}"
+        );
+
+        // Keycloak sends the browser back to /cb with the auth code.
+        let resp = client
+            .get(format!("{external_base}/cb?code=mock-auth-code"))
+            .send()
+            .await
+            .expect("/cb reachable on the bound port");
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("Signed in"), "success page expected: {body}");
+
+        let result = flow.await.expect("flow completes");
+        assert_eq!(result.access_token, "mock-access-token");
+        assert_eq!(result.refresh_token.as_deref(), Some("mock-refresh-token"));
+        assert_eq!(
+            result.token_endpoint,
+            format!("{}/realms/test/protocol/openid-connect/token", mock.base)
+        );
+        assert_eq!(result.client_id, "strikehub-client");
+        assert!(
+            result.server_handle.is_none(),
+            "desktop mode does not keep the listener alive"
+        );
+
+        // The token exchange saw the bound-port redirect_uri (end-to-end).
+        {
+            let calls = mock.token_calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].grant_type.as_deref(), Some("authorization_code"));
+            assert_eq!(calls[0].code.as_deref(), Some("mock-auth-code"));
+            assert_eq!(calls[0].client_id.as_deref(), Some("strikehub-client"));
+            assert_eq!(
+                calls[0].redirect_uri.as_deref(),
+                Some(format!("{external_base}/cb").as_ref())
+            );
+            assert!(calls[0].code_verifier_present);
+        }
+
+        // No zombie listener: the ephemeral port is free again.
+        wait_for_port_free(port).await;
+    }
+
+    /// Cancellation from the waiting state: the flow returns
+    /// `SignInCancelled` (the UI's quiet-reset signal) and tears the
+    /// callback listener down — the port is re-bindable, no zombie.
+    #[tokio::test]
+    async fn cancel_returns_sign_in_cancelled_and_tears_down_listener() {
+        let mock = spawn_mock_id_stack().await;
+        let (out_tx, out_rx) = oneshot::channel::<String>();
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+
+        let flow = run_oauth_flow(
+            &mock.base,
+            false,
+            None,
+            None,
+            None,
+            Some(out_tx),
+            Some(cancel_rx),
+            30,
+            no_browser,
+        );
+        tokio::pin!(flow);
+
+        let login_url = tokio::select! {
+            r = &mut flow => panic!("flow ended before reporting the login URL: {r:?}"),
+            url = out_rx => url.expect("flow reports the login URL before waiting"),
+        };
+        let port = port_of(&external_base_from_login_url(&login_url));
+        // Sanity: the listener is actually live while the flow waits.
+        TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("callback listener is live while waiting");
+
+        cancel_tx.send(()).expect("cancel channel open");
+        let err = flow.await.expect_err("cancel must not complete the flow");
+        assert!(
+            err.downcast_ref::<SignInCancelled>().is_some(),
+            "cancel must return SignInCancelled, got: {err}"
+        );
+
+        // The select! cancel branch aborts the callback server before
+        // returning — the port must be free again (no zombie listener).
+        wait_for_port_free(port).await;
+    }
+
+    /// The flow gives up at the (injected) timeout, aborts its callback
+    /// listener, and surfaces an actionable error that is NOT
+    /// `SignInCancelled`.
+    #[tokio::test]
+    async fn timeout_fires_aborts_listener_and_returns_actionable_error() {
+        let mock = spawn_mock_id_stack().await;
+        let (out_tx, out_rx) = oneshot::channel::<String>();
+
+        let flow = run_oauth_flow(
+            &mock.base,
+            false,
+            None,
+            None,
+            None,
+            Some(out_tx),
+            None,
+            1, // injected short timeout — no 900 s sleeps in tests
+            no_browser,
+        );
+        tokio::pin!(flow);
+
+        let login_url = tokio::select! {
+            r = &mut flow => panic!("flow ended before reporting the login URL: {r:?}"),
+            url = out_rx => url.expect("flow reports the login URL before waiting"),
+        };
+        let port = port_of(&external_base_from_login_url(&login_url));
+
+        let started = Instant::now();
+        let err = flow.await.expect_err("timeout must not complete the flow");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "gave up before the injected 1 s timeout: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "timeout did not fire promptly: {elapsed:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timed out"),
+            "actionable timeout message expected, got: {msg}"
+        );
+        assert!(
+            err.downcast_ref::<SignInCancelled>().is_none(),
+            "a timeout is not a user cancel"
+        );
+
+        wait_for_port_free(port).await;
+    }
+
+    /// Server/port-forward mode keeps its observable contract: it binds
+    /// exactly the port the external base URL advertises, the login URL
+    /// embeds that port, the callback completes, and the server handle is
+    /// handed back to the caller (kept alive so port-forward stays up).
+    #[tokio::test]
+    async fn server_mode_binds_advertised_port_completes_and_keeps_handle() {
+        let mock = spawn_mock_id_stack().await;
+        // Find a free port for the advertised callback base.
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let base = format!("http://127.0.0.1:{port}");
+
+        let (url_tx, url_rx) = oneshot::channel::<String>();
+        let flow = run_oauth_flow(
+            &mock.base,
+            false,
+            Some(base.clone()),
+            None,
+            Some(url_tx), // server mode
+            None,
+            None,
+            10,
+            no_browser,
+        );
+        tokio::pin!(flow);
+
+        let login_url = tokio::select! {
+            r = &mut flow => panic!("flow ended before reporting the login URL: {r:?}"),
+            url = url_rx => url.expect("server mode reports the login URL"),
+        };
+        let expected_redirect =
+            urlencoding::encode(&format!("{base}/session-created")).into_owned();
+        assert!(
+            login_url.contains(&expected_redirect),
+            "login URL must embed the advertised callback port: {login_url}"
+        );
+
+        // Drive the "browser" straight to /cb on the advertised port.
+        let client = no_follow_client();
+        let resp = client
+            .get(format!("{base}/cb?code=mock-auth-code"))
+            .send()
+            .await
+            .expect("/cb reachable on the advertised port");
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let mut result = flow.await.expect("flow completes");
+        assert_eq!(result.access_token, "mock-access-token");
+        assert!(
+            result.server_handle.is_some(),
+            "server mode keeps the listener alive for port-forward"
+        );
+
+        // The handle is abortable and frees the port (sh-ui does this
+        // before the next sign-in and on sign-out).
+        let handle = result.server_handle.take().expect("server handle");
+        handle.abort();
+        wait_for_port_free(port).await;
     }
 }
 
