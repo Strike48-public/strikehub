@@ -131,22 +131,38 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 export DEPLOY_GTK_VERSION=3
 
 # Env + CWD as an AppRun hook. linuxdeploy's generated AppRun sources
-# apprun-hooks/*.sh before exec, so these apply whether it launches the
-# `strikehub` wrapper or `strikehub-real` directly (version-dependent).
+# apprun-hooks/*.sh in ALPHABETICAL order before exec'ing the app, and it only
+# exports APPDIR inside the linuxdeploy-plugin-gtk.sh hook — which sorts AFTER
+# any 00-* file. So this hook must compute APPDIR itself. (Relying on the
+# inherited variable was a real bug: the hook ran with APPDIR EMPTY, the
+# LD_LIBRARY_PATH line degenerated to "/usr/lib:", and the cd anchor below was
+# a no-op.)
+#  - No LD_LIBRARY_PATH: the bundle's flat usr/lib holds build-host copies of
+#    system-ish libs (libsystemd 249, icu70, ...). Putting it on the global
+#    LD_LIBRARY_PATH makes it shadow the HOST's copies for every child process
+#    and breaks symbol versioning on newer distros — verified on ubuntu 26.04:
+#    tail/cut/readlink die with "version `LIBSYSTEMD_254' not found" and the app
+#    fails to exec. The main binary and the connectors already find the bundle
+#    via their patched $ORIGIN rpaths, and the WebKit helpers get the bundled
+#    libwebkit via the rpath baked into them in Phase 2b — neither needs
+#    LD_LIBRARY_PATH.
 #  - GDK_BACKEND=x11 avoids the WebKitGTK Wayland surface bug.
-#  - LD_LIBRARY_PATH makes WebKit's freshly-spawned helper processes (which don't
-#    inherit the main binary's patched rpath) resolve the bundled libwebkit/gtk.
-#  - cd "$APPDIR": WebKitGTK 2.52 removed WEBKIT_EXEC_PATH and hardcodes an
-#    ABSOLUTE libexec path into libwebkit; Phase 2 below binary-patches that to a
-#    RELATIVE path, which g_subprocess resolves against CWD — so anchor CWD at the
-#    AppDir root. StrikeHub uses absolute paths (data dir, current_exe-based
-#    connector resolution), so changing CWD here is safe.
+#  - cd "$APPDIR": WebKitGTK 2.5x hardcodes the helper libexec dir into
+#    libwebkit; Phase 2 below binary-patches that ABSOLUTE path to a
+#    same-length RELATIVE one, which the kernel resolves against the CWD at
+#    spawn. Without this anchor the helpers are not found at all when the
+#    AppImage is launched from a normal CWD — verified on ubuntu 26.04: g_error
+#    abort "Failed to spawn child process 'usr/lib/.../WebKitNetworkProcess'
+#    (No such file or directory)". StrikeHub uses absolute paths (data dir,
+#    current_exe-based connector resolution), so changing CWD here is safe.
 mkdir -p "$APPDIR/apprun-hooks"
 cat > "$APPDIR/apprun-hooks/00-strike48-env.sh" << 'HOOKEOF'
+if [ -n "${BASH_SOURCE:-}" ]; then
+    APPDIR="${APPDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P || true)}"
+fi
 if [ -z "$STRIKE48_API_URL" ]; then export STRIKE48_API_URL="https://studio.strike48.com"; fi
 if [ -z "$STRIKE48_URL" ]; then export STRIKE48_URL="wss://studio.strike48.com"; fi
 export GDK_BACKEND=x11
-export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
 cd "${APPDIR}" 2>/dev/null || true
 HOOKEOF
 
@@ -212,6 +228,103 @@ print(f"  patched: exec-dir x{n_dir}, injected-bundle x{n_ib}")
 if n_dir == 0:
     sys.exit("ERROR: hardcoded WebKit exec path not found in libwebkit — patch failed")
 PY
+
+# Phase 2b — bake an rpath into the bundled WebKit helper binaries.
+# The helper ELFs ship WITHOUT any rpath, so at spawn their dynamic linker
+# resolves libwebkit2gtk-4.1.so.0 from LD_LIBRARY_PATH (absent — WebKit spawns
+# helpers with a sanitized env) and then the HOST's loader cache. Both failure
+# modes were reproduced in containers against this packaging:
+#   - host has a DIFFERENT webkit (ubuntu 26.04 ships 2.52.6, the bundle was
+#     built against 2.50.4): the helper linked the host lib while the UI
+#     process ran the bundled one -> IPC version mismatch, the web process
+#     never became ready, the sign-in UI never mapped (startup hang, 4/4).
+#   - host has NO webkit (pristine ubuntu 22.04): the helper's exec failed in
+#     the loader — "error while loading shared libraries: libwebkit2gtk-4.1.so.0"
+#     -> black webview / "Failed to spawn child process" abort.
+# An rpath lives in the ELF, so it survives env sanitizing and CWD moves.
+# $ORIGIN/../.. from the helper dir is the flat usr/lib where linuxdeploy put
+# the bundle libs.
+if ! command -v patchelf >/dev/null 2>&1; then
+    echo "patchelf not found — attempting install (needed to bake helper rpaths)..."
+    (apt-get install -y patchelf 2>/dev/null || sudo apt-get install -y patchelf 2>/dev/null) >/dev/null || true
+fi
+if ! command -v patchelf >/dev/null 2>&1; then
+    echo "ERROR: patchelf is required to bake the WebKit helper rpaths (apt-get install -y patchelf)" >&2
+    exit 1
+fi
+HELPER_RPATH='$ORIGIN/../..'
+for h in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess MiniBrowser; do
+    if [ -f "$APPDIR/$WK_REL/$h" ]; then
+        patchelf --set-rpath "$HELPER_RPATH" "$APPDIR/$WK_REL/$h"
+        echo "  helper rpath '$HELPER_RPATH': $h"
+    fi
+done
+
+# Phase 2c — complete the webkit closure inside the bundle.
+# linuxdeploy's ldd-closure copy leaves out libraries it considers
+# build-host-common (on the ubuntu 22.04 build host: libharfbuzz, libfribidi,
+# libfreetype, libfontconfig, libexpat, libz). A minimal host WITHOUT
+# webkit2gtk installed does not have those, so the bundled libwebkit could not
+# load them. Walk the NEEDED closure of the webkit stack and copy whatever is
+# missing from the build host, each with an $ORIGIN rpath. The glibc/libstdc++
+# family and the X11/GL/GBM/Wayland stack are deliberately left host-provided
+# (linuxdeploy policy; the glibc floor is enforced by check-glibc-floor.sh).
+# NOTE: do NOT bundle the build host's libwayland-client here — on newer hosts
+# (verified: ubuntu 26.04 / mesa 26.08) the older bundled client breaks WebKit
+# EGL init: "Could not create default EGL display: EGL_BAD_PARAMETER.
+# Aborting...". The host's wayland client works on every tested floor.
+HOST_LIBDIR="$(dirname "$WK_SRC")"   # the build host's multiarch lib dir
+host_provided() {
+    case "$1" in
+        libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libresolv.so*|libutil.so*|\
+        libstdc++.so*|libgcc_s.so*|ld-linux-*|libX*|libxcb*|libgbm*|libdrm*|libGL*|libEGL*|libOpenGL*|\
+        libwayland-*)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+closure_queue=("$LIBWK")
+JSC="$(find "$APPDIR/usr/lib" -maxdepth 1 -name 'libjavascriptcoregtk-4.1.so.0*' -type f 2>/dev/null | head -1)"
+[ -n "$JSC" ] && closure_queue+=("$JSC")
+declare -A seen_closure
+while [ "${#closure_queue[@]}" -gt 0 ]; do
+    next=()
+    for lib in "${closure_queue[@]}"; do
+        while IFS= read -r need; do
+            [ -z "$need" ] && continue
+            [ -n "${seen_closure[$need]:-}" ] && continue
+            seen_closure[$need]=1
+            if host_provided "$need"; then continue; fi
+            if [ ! -e "$APPDIR/usr/lib/$need" ]; then
+                hostlib="$HOST_LIBDIR/$need"
+                if [ -e "$hostlib" ]; then
+                    cp -L "$hostlib" "$APPDIR/usr/lib/$need"
+                    patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/$need"
+                    echo "  bundled webkit-closure lib: $need"
+                    next+=("$APPDIR/usr/lib/$need")
+                fi
+            else
+                # Already bundled: no copy needed, but walk its own NEEDEDs so
+                # gaps behind bundled libs (e.g. libfribidi behind libpango)
+                # are found too.
+                next+=("$APPDIR/usr/lib/$need")
+            fi
+        done < <(readelf -d "$lib" 2>/dev/null | awk -F'[][]' '/NEEDED/ {print $2}')
+    done
+    closure_queue=("${next[@]}")
+done
+
+# The gdk-pixbuf SVG loader dlopen's librsvg at runtime (invisible to the
+# NEEDED walk). Bundle it when the build host has it, matching what the gtk
+# plugin did on the CI build host.
+for rsvg in "$HOST_LIBDIR"/librsvg-2.so*; do
+    [ -e "$rsvg" ] || continue
+    base="$(basename "$rsvg")"
+    [ -e "$APPDIR/usr/lib/$base" ] && continue
+    cp -L "$rsvg" "$APPDIR/usr/lib/$base"
+    patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/$base"
+    echo "  bundled svg loader lib: $base"
+done
 
 # Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
 echo "Packaging AppImage..."
