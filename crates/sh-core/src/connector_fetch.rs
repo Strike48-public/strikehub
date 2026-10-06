@@ -4,8 +4,14 @@
 //! archives, and caches them in `~/.strike48/strikehub/bin/`.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::registry::ConnectorManifest;
+
+/// Monotonic per-process sequence so parallel connector fetches (see
+/// `ensure_all_connector_binaries`, which downloads with `join_all`) never
+/// stage into the same sibling directory.
+static STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Decide whether to download: yes if no binary is cached, or the release is
 /// strictly newer than the cached record. Split out so the rule is unit-tested.
@@ -481,95 +487,532 @@ async fn verify_checksum(
     result
 }
 
-/// Extract a tar.gz archive, looking for a specific binary inside.
+/// Extract a tar.gz archive's WHOLE bundle into `dest_dir`.
 ///
-/// The binary may be at the top level or nested in a directory.
+/// The bundle is the binary's directory inside the archive: everything in
+/// the same directory as the entry whose file name matches `binary_name`
+/// (the binary may sit at the archive root or be nested in a directory).
+/// For the post-pick#553 Linux release shape this is the binary, its
+/// sibling `lib/` (the `$ORIGIN/lib` rpath target — dropping it is the bug
+/// behind issue #108), and the license notices; the relative layout is
+/// preserved, flattened onto `dest_dir`'s root, so the binary lands exactly
+/// where the caller execs it and `lib/` lands exactly where `$ORIGIN/lib`
+/// resolves.
+///
+/// Extraction is atomic with respect to `dest_dir`: everything is staged
+/// into a sibling temp dir first, then moved into place with per-entry
+/// renames ([`install_staged_bundle`]); `dest_dir` never exposes a
+/// half-installed bundle.
 fn extract_tar_gz(
     archive_bytes: &[u8],
     dest_dir: &std::path::Path,
     binary_name: &str,
 ) -> Result<(), String> {
     use flate2::read::GzDecoder;
-    use std::io::Read;
     use tar::Archive;
 
-    let decoder = GzDecoder::new(archive_bytes);
-    let mut archive = Archive::new(decoder);
-
-    let entries = archive
+    // Pass 1: locate the binary entry and capture its directory (the bundle
+    // prefix). Only regular files qualify — a directory that merely shares
+    // the binary's name is not a binary (the old code died reading it).
+    let mut archive = Archive::new(GzDecoder::new(archive_bytes));
+    let mut prefix: Option<std::path::PathBuf> = None;
+    for entry in archive
         .entries()
-        .map_err(|e| format!("failed to read archive entries: {}", e))?;
+        .map_err(|e| format!("failed to read archive entries: {}", e))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("refusing unsafe archive entry: {}", e))?;
+        let path = path.as_ref();
+        let is_file = entry.header().entry_type() == tar::EntryType::Regular;
+        if is_file
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == binary_name)
+        {
+            prefix = Some(
+                path.parent()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default(),
+            );
+            break;
+        }
+    }
+    let Some(prefix) = prefix else {
+        return Err(format!("binary '{}' not found in archive", binary_name));
+    };
 
-    for entry in entries {
+    let stage = stage_dir_for(dest_dir)?;
+    if let Err(e) = std::fs::create_dir_all(&stage) {
+        return Err(format!(
+            "failed to create staging dir {}: {}",
+            stage.display(),
+            e
+        ));
+    }
+    let result = extract_tar_gz_into(&stage, archive_bytes, &prefix)
+        .and_then(|()| install_staged_bundle(dest_dir, &stage, binary_name));
+    cleanup_stage(&stage, &result);
+    result
+}
+
+/// Pass 2 of [`extract_tar_gz`]: extract the bundle entries (everything
+/// under the binary's directory prefix, relative layout preserved) into a
+/// fresh staging dir. Exec bits, symlinks, and hard links are preserved;
+/// setuid/setgid/sticky bits are dropped — the bundle lands in a
+/// user-writable cache dir, never a setuid farm.
+fn extract_tar_gz_into(
+    stage: &std::path::Path,
+    archive_bytes: &[u8],
+    prefix: &std::path::Path,
+) -> Result<(), String> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let mut archive = Archive::new(GzDecoder::new(archive_bytes));
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("failed to read archive entries: {}", e))?
+    {
         let mut entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
         let path = entry
             .path()
-            .map_err(|e| format!("failed to read entry path: {}", e))?
-            .to_path_buf();
-
-        // Match the binary by filename (may be nested in a directory)
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        if file_name == binary_name {
-            let dest = dest_dir.join(binary_name);
-            let mut buf = Vec::new();
-            entry
-                .read_to_end(&mut buf)
-                .map_err(|e| format!("failed to read binary from archive: {}", e))?;
-            write_binary_atomic(&dest, &buf)?;
-            return Ok(());
+            .map_err(|e| format!("refusing unsafe archive entry: {}", e))?;
+        let path = path.as_ref();
+        if !path_within(path, prefix) {
+            continue; // outside the binary's bundle — not installed
+        }
+        let rel = path.strip_prefix(prefix).unwrap_or(path);
+        if rel.as_os_str().is_empty() {
+            continue; // the bundle prefix directory itself
+        }
+        let target = stage.join(rel);
+        let mode =
+            entry.header().mode().map_err(|e| {
+                format!("failed to read entry mode for {}: {}", target.display(), e)
+            })? & 0o7777;
+        match entry.header().entry_type() {
+            tar::EntryType::Directory => {
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| format!("failed to create {}: {}", target.display(), e))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode));
+                }
+            }
+            tar::EntryType::Regular => {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!(
+                            "failed to create {} for {}: {}",
+                            parent.display(),
+                            target.display(),
+                            e
+                        )
+                    })?;
+                }
+                let _ = std::fs::remove_file(&target);
+                entry
+                    .unpack(&target)
+                    .map_err(|e| format!("failed to extract {}: {}", target.display(), e))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    // unpack applies the header mode; set it explicitly so the
+                    // executable bits the rpath bundle relies on are exact.
+                    let _ =
+                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode));
+                }
+            }
+            tar::EntryType::Symlink => {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+                }
+                let _ = std::fs::remove_file(&target); // remove_file clears symlinks too
+                #[cfg(unix)]
+                {
+                    let link = entry
+                        .link_name()
+                        .map_err(|e| format!("failed to read link target: {}", e))?
+                        .ok_or_else(|| {
+                            format!("symlink entry '{}' has no target", path.display())
+                        })?;
+                    std::os::unix::fs::symlink(&link, &target).map_err(|e| {
+                        format!("failed to create symlink {}: {}", target.display(), e)
+                    })?;
+                }
+                #[cfg(not(unix))]
+                {
+                    return Err(format!(
+                        "archive entry '{}' is a symlink, which is not supported on this platform",
+                        path.display()
+                    ));
+                }
+            }
+            tar::EntryType::Link => {
+                // Hard link: the stored target is the referent's archive
+                // path. It must be inside the bundle (mapped through the same
+                // prefix strip) and staged already, or the bundle is
+                // incoherent — refuse rather than stage a dangling link.
+                let raw = entry
+                    .link_name()
+                    .map_err(|e| format!("failed to read link target: {}", e))?
+                    .ok_or_else(|| format!("hardlink entry '{}' has no target", path.display()))?;
+                let referent = raw.into_owned();
+                if !path_within(&referent, prefix) {
+                    return Err(format!(
+                        "hardlink '{}' targets outside the bundle",
+                        path.display()
+                    ));
+                }
+                let link_to = stage.join(
+                    referent
+                        .strip_prefix(prefix)
+                        .unwrap_or_else(|_| referent.as_ref()),
+                );
+                if !link_to.exists() {
+                    return Err(format!(
+                        "hardlink '{}' target not staged: {}",
+                        path.display(),
+                        link_to.display()
+                    ));
+                }
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+                }
+                let _ = std::fs::remove_file(&target);
+                #[cfg(unix)]
+                std::fs::hard_link(&link_to, &target).map_err(|e| {
+                    format!("failed to create hardlink {}: {}", target.display(), e)
+                })?;
+                #[cfg(not(unix))]
+                {
+                    return Err(format!(
+                        "archive entry '{}' is a hardlink, which is not supported on this platform",
+                        path.display()
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported archive entry type for {}",
+                    path.display()
+                ));
+            }
         }
     }
-
-    Err(format!("binary '{}' not found in archive", binary_name))
+    Ok(())
 }
 
-/// Extract a zip archive, looking for a specific binary inside.
+/// True when `p` is strictly below `prefix` (component-wise, so
+/// `foo-bar/x` is not under `foo`). An empty prefix (archive root) contains
+/// everything.
+fn path_within(p: &std::path::Path, prefix: &std::path::Path) -> bool {
+    if prefix.components().count() == 0 {
+        return true;
+    }
+    let p_comps: Vec<_> = p.components().collect();
+    let f_comps: Vec<_> = prefix.components().collect();
+    p_comps.len() > f_comps.len() && p_comps[..f_comps.len()] == f_comps[..]
+}
+
+/// True when the '/'-separated zip entry `name` lies strictly below the
+/// '/'-separated `prefix` (see [`path_within`]).
+fn zip_str_within(name: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    name.len() > prefix.len()
+        && name.starts_with(prefix)
+        && name.as_bytes().get(prefix.len()) == Some(&b'/')
+}
+
+/// Staging dir for a bundle install: a hidden sibling of `dest_dir` (same
+/// filesystem, so the final renames are atomic).
+fn stage_dir_for(dest_dir: &std::path::Path) -> Result<PathBuf, String> {
+    let parent = dest_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "cannot stage beside {}: no parent directory",
+                dest_dir.display()
+            )
+        })?;
+    let seq = STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".strikehub-stage-{}-{}", std::process::id(), seq)))
+}
+
+/// Move a staged bundle into `dest_dir` with per-entry renames.
 ///
-/// The binary may be at the top level or nested in a directory.
-/// On Windows, also matches `{binary_name}.exe`.
+/// Directories first (removing stale contents, so a newer release that drops
+/// a lib file never leaves the old one behind), then the remaining files,
+/// and the binary LAST — via [`write_binary_atomic`], keeping its temp-file
+/// + read-back verification.
+///
+/// The binary is therefore never visible in `dest_dir` before its `lib/` is
+/// in place, and a crash at any point leaves the version file (written by
+/// the caller only after this succeeds) stale, which forces a re-extract on
+/// the next run: no half-installed state survives a restart.
+fn install_staged_bundle(
+    dest_dir: &std::path::Path,
+    stage: &std::path::Path,
+    binary_name: &str,
+) -> Result<(), String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Dir,
+        File,
+        Binary,
+    }
+    let mut items: Vec<(PathBuf, Kind)> = std::fs::read_dir(stage)
+        .map_err(|e| format!("failed to read staging dir {}: {}", stage.display(), e))?
+        .flatten()
+        .map(|e| {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let kind = if e.file_type().is_ok_and(|t| t.is_dir()) {
+                Kind::Dir
+            } else if name == binary_name || name == format!("{binary_name}.exe") {
+                Kind::Binary
+            } else {
+                Kind::File
+            };
+            (p, kind)
+        })
+        .collect();
+    if items.is_empty() {
+        return Err(format!(
+            "staging dir {} is empty — bundle not installed",
+            stage.display()
+        ));
+    }
+    // Dir < File < Binary: the binary swaps in last, onto a fully staged bundle.
+    items.sort_by_key(|(p, k)| {
+        (
+            match k {
+                Kind::Dir => 0u8,
+                Kind::File => 1,
+                Kind::Binary => 2,
+            },
+            p.clone(),
+        )
+    });
+    for (p, kind) in &items {
+        let name = p
+            .file_name()
+            .ok_or_else(|| format!("invalid staging entry: {}", p.display()))?;
+        let target = dest_dir.join(name);
+        if *kind == Kind::Dir {
+            // Replace wholesale: stale files from a previous release of this
+            // bundle must not survive an update.
+            if target.exists() {
+                std::fs::remove_dir_all(&target)
+                    .map_err(|e| format!("failed to remove stale {}: {}", target.display(), e))?;
+            }
+            std::fs::rename(p, &target).map_err(|e| {
+                format!(
+                    "failed to move {} into place at {}: {}",
+                    p.display(),
+                    target.display(),
+                    e
+                )
+            })?;
+        } else if *kind == Kind::Binary {
+            // The executable gets the same temp-file + read-back treatment
+            // the single-binary path always had. write_binary_atomic stages
+            // fresh bytes (default file mode), so the archive's mode —
+            // already masked to 0o7777 during staging — is reapplied after
+            // the rename.
+            let bytes = std::fs::read(p)
+                .map_err(|e| format!("failed to read staged binary {}: {}", p.display(), e))?;
+            #[cfg(unix)]
+            let staged_perms = std::fs::metadata(p).map(|m| m.permissions()).ok();
+            write_binary_atomic(&target, &bytes)?;
+            #[cfg(unix)]
+            if let Some(perms) = staged_perms {
+                let _ = std::fs::set_permissions(&target, perms);
+            }
+        } else {
+            std::fs::rename(p, &target).map_err(|e| {
+                format!(
+                    "failed to move {} into place at {}: {}",
+                    p.display(),
+                    target.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove a staging dir after an install attempt; warn (not fail) if a
+/// successful install still left it behind.
+fn cleanup_stage(stage: &std::path::Path, result: &Result<(), String>) {
+    if let Err(e) = std::fs::remove_dir_all(stage)
+        && result.is_ok()
+    {
+        tracing::warn!("left staging dir {}: {}", stage.display(), e);
+    }
+}
+
+/// Extract a zip archive's WHOLE bundle into `dest_dir` — the mirror of
+/// [`extract_tar_gz`] for the Windows asset path. Same rules: the bundle is
+/// the binary's directory (binary matched by base name or `{name}.exe`),
+/// layout preserved, staged then atomically swapped in.
+///
+/// Note on the current assets: today's pick Windows release zip contains
+/// just the statically-linked `.exe` (its `check-windows-crt.ps1` gate
+/// proves no VC++ runtime side-by-side is needed), so there are no siblings
+/// to preserve in practice yet — but the extractor must not silently drop
+/// them if a release ever bundles DLLs beside the exe.
 fn extract_zip(
     archive_bytes: &[u8],
     dest_dir: &std::path::Path,
     binary_name: &str,
 ) -> Result<(), String> {
-    use std::io::Read;
-
-    let cursor = std::io::Cursor::new(archive_bytes);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("failed to read zip archive: {}", e))?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive_bytes))
+        .map_err(|e| format!("failed to read zip archive: {}", e))?;
 
     let exe_name = format!("{}.exe", binary_name);
+
+    // Pass 1: locate the binary entry and its directory prefix.
+    let mut prefix: Option<String> = None;
+    for i in 0..archive.len() {
+        let file = archive
+            .by_index(i)
+            .map_err(|e| format!("failed to read zip entry: {}", e))?;
+        if file.is_dir() || file.is_symlink() {
+            continue;
+        }
+        let name = zip_entry_path(file.name())?;
+        let file_name = name.rsplit('/').next().unwrap_or_default();
+        if file_name == binary_name || file_name == exe_name {
+            prefix = Some(match name.rfind('/') {
+                Some(pos) => name[..pos].to_string(),
+                None => String::new(),
+            });
+            break;
+        }
+    }
+    let Some(prefix) = prefix else {
+        return Err(format!("binary '{}' not found in zip archive", binary_name));
+    };
+
+    let stage = stage_dir_for(dest_dir)?;
+    if let Err(e) = std::fs::create_dir_all(&stage) {
+        return Err(format!(
+            "failed to create staging dir {}: {}",
+            stage.display(),
+            e
+        ));
+    }
+    let result = extract_zip_into(&stage, &mut archive, &prefix)
+        .and_then(|()| install_staged_bundle(dest_dir, &stage, binary_name));
+    cleanup_stage(&stage, &result);
+    result
+}
+
+/// Pass 2 of [`extract_zip`]: extract the bundle entries into a fresh
+/// staging dir, preserving the stored Unix mode when present and symlink
+/// entries (zip stores the target path as the entry's content).
+fn extract_zip_into(
+    stage: &std::path::Path,
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    prefix: &str,
+) -> Result<(), String> {
+    use std::io::Read;
 
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
             .map_err(|e| format!("failed to read zip entry: {}", e))?;
-
         if file.is_dir() {
+            continue; // parent dirs are created implicitly below
+        }
+        let name = zip_entry_path(file.name())?;
+        if !zip_str_within(&name, prefix) {
+            continue; // outside the binary's bundle — not installed
+        }
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            name[prefix.len() + 1..].to_string()
+        };
+        let mut target = PathBuf::new();
+        for part in rel.split('/') {
+            if !part.is_empty() {
+                target.push(part);
+            }
+        }
+        if target.as_os_str().is_empty() {
             continue;
         }
-
-        let path = std::path::PathBuf::from(file.name());
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        if file_name == binary_name || file_name == exe_name {
-            let dest = dest_dir.join(file_name);
+        target = stage.join(target);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+        }
+        let _ = std::fs::remove_file(&target);
+        if file.is_symlink() {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)
-                .map_err(|e| format!("failed to read binary from zip: {}", e))?;
-            write_binary_atomic(&dest, &buf)?;
-            return Ok(());
+                .map_err(|e| format!("failed to read entry {}: {}", name, e))?;
+            let link = std::ffi::OsString::from(String::from_utf8_lossy(&buf).into_owned());
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&link, &target)
+                .map_err(|e| format!("failed to create symlink {}: {}", target.display(), e))?;
+            #[cfg(not(unix))]
+            {
+                return Err(format!(
+                    "zip entry '{}' is a symlink, which is not supported on this platform",
+                    name
+                ));
+            }
+        } else {
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)
+                .map_err(|e| format!("failed to read entry {}: {}", name, e))?;
+            std::fs::write(&target, &buf)
+                .map_err(|e| format!("failed to write {}: {}", target.display(), e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // The zip's external attributes carry the Unix mode when the
+                // archive was made on Unix; drop setuid/setgid/sticky.
+                if let Some(mode) = file.unix_mode() {
+                    let _ = std::fs::set_permissions(
+                        &target,
+                        std::fs::Permissions::from_mode(mode & 0o7777),
+                    );
+                }
+            }
         }
     }
+    Ok(())
+}
 
-    Err(format!("binary '{}' not found in zip archive", binary_name))
+/// Normalize and validate a zip entry name: backslash → '/', then refuse
+/// absolute paths and `..` components (fail closed, same policy as the tar
+/// path's `entry.path()` rejection).
+fn zip_entry_path(name: &str) -> Result<String, String> {
+    let normalized = name.replace('\\', "/");
+    if normalized.starts_with('/') {
+        return Err(format!("refusing absolute zip entry: {name}"));
+    }
+    for comp in normalized.split('/') {
+        if comp == ".." {
+            return Err(format!("refusing zip entry with '..' component: {name}"));
+        }
+    }
+    Ok(normalized)
 }
 
 /// Dispatch archive extraction based on the asset filename extension.
@@ -902,6 +1345,348 @@ mod tests {
         };
 
         assert!(manifest.asset_name().is_none());
+    }
+}
+
+#[cfg(test)]
+mod bundle_extract_tests {
+    // Regression tests for issue #108: `extract_tar_gz` / `extract_zip`
+    // must install the connector's WHOLE bundle — the binary plus its
+    // sibling `lib/` (and friends) — not just the named binary. Since
+    // pick#553 the Linux release tarball carries an `$ORIGIN/lib` rpath,
+    // so the staged layout must keep `lib/` beside the binary for the
+    // rpath to resolve on minimal hosts (NixOS, containers).
+    //
+    // Fixture shapes mirror the post-pick#553 release pipeline
+    // (pick `.github/workflows/release.yml`, build-headless-linux):
+    //
+    //     pentest-agent              (binary, 0755)
+    //     THIRD-PARTY-NOTICES.md     (license attribution)
+    //     lib/libpcap.so.0.8         (bundled libs, flat under lib/)
+    //     lib/libssl.so.3
+    //     lib/libcrypto.so.3
+
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// (path, content, mode, symlink-target) — a symlink entry has `None`
+    /// content and `Some(target)`.
+    type Fixture = (&'static str, &'static [u8], u32, Option<&'static str>);
+
+    fn make_tar_gz(entries: &[Fixture]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            for (path, content, mode, link) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(*mode);
+                match link {
+                    Some(target) => {
+                        // GNU encoding: the link target lives in the header's
+                        // linkname field; the entry carries no data.
+                        header.set_entry_type(tar::EntryType::Symlink);
+                        header.set_link_name(std::path::Path::new(target)).unwrap();
+                        header.set_size(0);
+                        header.set_cksum();
+                        builder.append_data(&mut header, path, &b""[..]).unwrap();
+                    }
+                    None => {
+                        header.set_size(content.len() as u64);
+                        header.set_cksum();
+                        builder
+                            .append_data(&mut header, path, &content[..])
+                            .unwrap();
+                    }
+                }
+            }
+            builder.finish().unwrap();
+        }
+        encoder.finish().unwrap()
+    }
+
+    /// Fresh unique temp dir with its OWN private parent, so the staging-
+    /// leftover assertion can't see other (parallel, same-process) tests'
+    /// stages: returns (dest, private_parent).
+    fn fresh_dest(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let parent = std::env::temp_dir().join(format!(
+            "strikehub-108-{}-{}-parent",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&parent);
+        let dir = parent.join("dest");
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir, parent)
+    }
+
+    fn assert_no_stage_leftovers(parent: &std::path::Path) {
+        let leftovers: Vec<String> = std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("strikehub-stage"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging leftovers: {leftovers:?}");
+    }
+
+    /// The post-pick#553 shape: binary + THIRD-PARTY-NOTICES.md + lib/ at the
+    /// tarball root (flat), plus one nested dir under lib/ to prove the
+    /// relative layout survives extraction.
+    fn pick_bundle_fixture() -> Vec<Fixture> {
+        vec![
+            ("pentest-agent", b"#!/bin/true\nfake elf v1", 0o755, None),
+            ("THIRD-PARTY-NOTICES.md", b"license notices", 0o644, None),
+            ("lib/libpcap.so.0.8", b"fake libpcap bytes", 0o644, None),
+            ("lib/libssl.so.3", b"fake openssl ssl", 0o644, None),
+            ("lib/libcrypto.so.3", b"fake openssl crypto", 0o644, None),
+            ("lib/extra/libfoo.so.1", b"fake nested lib", 0o644, None),
+        ]
+    }
+
+    #[test]
+    fn extract_tar_gz_keeps_lib_dir_beside_binary() {
+        let archive_bytes = make_tar_gz(&pick_bundle_fixture());
+        let (dest, parent) = fresh_dest("bundle-flat");
+
+        let result = extract_tar_gz(&archive_bytes, &dest, "pentest-agent");
+        assert!(result.is_ok(), "extract failed: {:?}", result);
+
+        // The binary, at the cache-dir root as before (callers exec exactly
+        // `dest/pentest-agent` and write `dest/pentest-agent.version`).
+        let bin = dest.join("pentest-agent");
+        assert!(bin.exists(), "binary not staged at {}", bin.display());
+        assert_eq!(std::fs::read(&bin).unwrap(), b"#!/bin/true\nfake elf v1");
+
+        // ISSUE #108: the sibling lib/ must survive, with the same relative
+        // layout the binary's $ORIGIN/lib rpath expects — binary beside lib/.
+        assert!(
+            dest.join("lib/libpcap.so.0.8").is_file(),
+            "lib/libpcap.so.0.8 missing: the rpath $ORIGIN/lib is inert without it"
+        );
+        assert!(dest.join("lib/libssl.so.3").is_file());
+        assert!(dest.join("lib/libcrypto.so.3").is_file());
+        // Nested layout under lib/ preserved, not flattened.
+        assert!(dest.join("lib/extra/libfoo.so.1").is_file());
+        assert_eq!(
+            std::fs::read(dest.join("lib/libpcap.so.0.8")).unwrap(),
+            b"fake libpcap bytes"
+        );
+
+        // The rest of the bundle (license attribution) is part of the tarball
+        // and stays beside the binary too.
+        assert!(dest.join("THIRD-PARTY-NOTICES.md").is_file());
+
+        assert_no_stage_leftovers(&parent);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn extract_tar_gz_preserves_modes_and_symlinks() {
+        let entries: Vec<Fixture> = vec![
+            ("pentest-agent", b"fake elf", 0o755, None),
+            ("lib/libpcap.so.0.8", b"real soname file", 0o644, None),
+            ("lib/libpcap.so", b"", 0o777, Some("libpcap.so.0.8")),
+        ];
+        let archive_bytes = make_tar_gz(&entries);
+        let (dest, parent) = fresh_dest("modes");
+
+        extract_tar_gz(&archive_bytes, &dest, "pentest-agent").unwrap();
+
+        // Exec bit preserved from the archive header (previously the staged
+        // binary only got 0o755 because the caller chmod'd it afterwards;
+        // bundled files keep their own modes).
+        let mode = std::fs::metadata(dest.join("pentest-agent"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755, "binary exec bits not preserved");
+        let lib_mode = std::fs::metadata(dest.join("lib/libpcap.so.0.8"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(lib_mode & 0o777, 0o644, "lib file mode not preserved");
+
+        // Symlink preserved as a symlink (not a copy of the target's bytes).
+        let link = dest.join("lib/libpcap.so");
+        assert!(link.is_symlink(), "lib/libpcap.so must stay a symlink");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::path::Path::new("libpcap.so.0.8")
+        );
+
+        assert_no_stage_leftovers(&parent);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn extract_tar_gz_wrapped_bundle_flattens_to_cache_root() {
+        // Some archives wrap the bundle in a top-level directory. The binary
+        // must still land at the cache-dir root (callers exec that exact
+        // path), and its lib/ must come along, BESIDE it — that is what
+        // $ORIGIN/lib resolves to. Unrelated root-level files stay out of the
+        // shared cache dir.
+        let entries: Vec<Fixture> = vec![
+            (
+                "pentest-agent-linux-x86_64/pentest-agent",
+                b"fake elf wrapped",
+                0o755,
+                None,
+            ),
+            (
+                "pentest-agent-linux-x86_64/lib/libpcap.so.0.8",
+                b"fake libpcap bytes",
+                0o644,
+                None,
+            ),
+            ("README.md", b"unrelated root file", 0o644, None),
+        ];
+        let archive_bytes = make_tar_gz(&entries);
+        let (dest, parent) = fresh_dest("wrapped");
+
+        extract_tar_gz(&archive_bytes, &dest, "pentest-agent").unwrap();
+
+        assert!(dest.join("pentest-agent").is_file());
+        assert_eq!(
+            std::fs::read(dest.join("pentest-agent")).unwrap(),
+            b"fake elf wrapped"
+        );
+        assert!(
+            dest.join("lib/libpcap.so.0.8").is_file(),
+            "wrapped bundle must flatten lib/ beside the binary"
+        );
+        assert!(
+            !dest.join("README.md").exists(),
+            "files outside the binary's directory must not leak into the shared cache dir"
+        );
+
+        assert_no_stage_leftovers(&parent);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn extract_tar_gz_update_removes_stale_bundle_files() {
+        // Re-extraction (a new release) must replace the whole bundle: a lib
+        // file the new release no longer ships must not linger, or the staged
+        // dir drifts between versions.
+        let v1 = make_tar_gz(&[
+            ("pentest-agent", b"fake elf v1", 0o755, None),
+            ("lib/old-lib.so.1", b"old lib", 0o644, None),
+        ]);
+        let (dest, parent) = fresh_dest("update");
+        extract_tar_gz(&v1, &dest, "pentest-agent").unwrap();
+        assert!(dest.join("lib/old-lib.so.1").is_file());
+
+        let v2 = make_tar_gz(&[
+            ("pentest-agent", b"fake elf v2", 0o755, None),
+            ("lib/new-lib.so.2", b"new lib", 0o644, None),
+        ]);
+        extract_tar_gz(&v2, &dest, "pentest-agent").unwrap();
+
+        assert_eq!(
+            std::fs::read(dest.join("pentest-agent")).unwrap(),
+            b"fake elf v2"
+        );
+        assert!(dest.join("lib/new-lib.so.2").is_file());
+        assert!(
+            !dest.join("lib/old-lib.so.1").exists(),
+            "stale lib file from the previous release must be removed"
+        );
+
+        assert_no_stage_leftovers(&parent);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn extract_tar_gz_missing_binary_refuses_and_leaves_nothing() {
+        let archive_bytes = make_tar_gz(&[("some-other-tool", b"x", 0o755, None)]);
+        let (dest, parent) = fresh_dest("missing");
+
+        let err = extract_tar_gz(&archive_bytes, &dest, "pentest-agent").unwrap_err();
+        assert!(
+            err.contains("not found in archive"),
+            "unexpected error: {err}"
+        );
+
+        // Nothing may reach the (shared, user-writable, executed-from) cache
+        // dir, and no staging dir may leak in its parent.
+        let staged: Vec<String> = std::fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(staged.is_empty(), "nothing may be staged, got: {staged:?}");
+        assert_no_stage_leftovers(&parent);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn extract_zip_keeps_siblings_beside_binary() {
+        // Mirror of the tarball rule for the Windows zip path: if a release
+        // zip ever bundles the DLLs a .exe needs beside it (today's pick
+        // windows asset is a single statically-linked exe, but the extractor
+        // must not silently drop siblings if that changes), they must land
+        // beside the binary.
+        use std::io::Write;
+
+        let buf = Vec::new();
+        let cursor = std::io::Cursor::new(buf);
+        let mut zip_writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("pentest-agent.exe", options).unwrap();
+        zip_writer.write_all(b"fake exe").unwrap();
+        zip_writer.start_file("wpcap.dll", options).unwrap();
+        zip_writer.write_all(b"fake wpcap").unwrap();
+        zip_writer.start_file("Packet.dll", options).unwrap();
+        zip_writer.write_all(b"fake packet").unwrap();
+        let archive_bytes = zip_writer.finish().unwrap().into_inner();
+
+        let (dest, parent) = fresh_dest("zip-siblings");
+        extract_zip(&archive_bytes, &dest, "pentest-agent").unwrap();
+
+        assert!(dest.join("pentest-agent.exe").is_file());
+        assert_eq!(
+            std::fs::read(dest.join("pentest-agent.exe")).unwrap(),
+            b"fake exe"
+        );
+        assert!(
+            dest.join("wpcap.dll").is_file(),
+            "zip siblings must be extracted beside the binary"
+        );
+        assert!(dest.join("Packet.dll").is_file());
+
+        assert_no_stage_leftovers(&parent);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn extract_zip_missing_binary_refuses_and_leaves_nothing() {
+        use std::io::Write;
+
+        let buf = Vec::new();
+        let cursor = std::io::Cursor::new(buf);
+        let mut zip_writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file("other-tool.exe", options).unwrap();
+        zip_writer.write_all(b"x").unwrap();
+        let archive_bytes = zip_writer.finish().unwrap().into_inner();
+
+        let (dest, parent) = fresh_dest("zip-missing");
+        let err = extract_zip(&archive_bytes, &dest, "pentest-agent").unwrap_err();
+        assert!(err.contains("not found in zip"), "unexpected error: {err}");
+
+        let staged: Vec<String> = std::fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(staged.is_empty(), "nothing may be staged, got: {staged:?}");
+        assert_no_stage_leftovers(&parent);
+        let _ = std::fs::remove_dir_all(&dest);
     }
 }
 
