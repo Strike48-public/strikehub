@@ -525,6 +525,11 @@ fn extract_tar_gz(
             .path()
             .map_err(|e| format!("refusing unsafe archive entry: {}", e))?;
         let path = path.as_ref();
+        // Fail closed on any hostile path anywhere in the archive (before it
+        // can influence the bundle prefix): absolute paths, `..` components,
+        // drive prefixes. `Entry::path()` itself only rejects non-UTF-8
+        // names — the containment policy lives here.
+        refuse_unsafe_rel_path(path, &path.to_string_lossy())?;
         let is_file = entry.header().entry_type() == tar::EntryType::Regular;
         if is_file
             && path
@@ -563,6 +568,14 @@ fn extract_tar_gz(
 /// fresh staging dir. Exec bits, symlinks, and hard links are preserved;
 /// setuid/setgid/sticky bits are dropped — the bundle lands in a
 /// user-writable cache dir, never a setuid farm.
+///
+/// Containment is fail closed: absolute entry paths, `..` components and
+/// drive prefixes are refused ([`refuse_unsafe_rel_path`]); symlink targets
+/// and hardlink referents that would escape the bundle are refused
+/// ([`refuse_unsafe_posix_rel`]); and no entry may be written through a
+/// staged symlink ([`ensure_no_symlink_ancestor`]). Any violation aborts the
+/// whole archive before the install step, so nothing partial lands in the
+/// shared cache dir.
 fn extract_tar_gz_into(
     stage: &std::path::Path,
     archive_bytes: &[u8],
@@ -581,14 +594,25 @@ fn extract_tar_gz_into(
             .path()
             .map_err(|e| format!("refusing unsafe archive entry: {}", e))?;
         let path = path.as_ref();
+        // Fail closed on hostile entry paths (absolute / `..` / drive) —
+        // `Entry::path()` performs no read-side traversal validation, and
+        // `stage.join(absolute)` would replace the staging root entirely.
+        refuse_unsafe_rel_path(path, &path.to_string_lossy())?;
         if !path_within(path, prefix) {
             continue; // outside the binary's bundle — not installed
         }
         let rel = path.strip_prefix(prefix).unwrap_or(path);
+        // The stripped path is what gets joined to the staging root; the
+        // invariant is asserted at the join site, not just upstream.
+        refuse_unsafe_rel_path(rel, &path.to_string_lossy())?;
         if rel.as_os_str().is_empty() {
             continue; // the bundle prefix directory itself
         }
         let target = stage.join(rel);
+        // Second line of defense against the classic write-through: no
+        // EXISTING ancestor of this target may be a staged symlink, or the
+        // OS would follow it and write outside the staging root.
+        ensure_no_symlink_ancestor(stage, &target, &path.to_string_lossy())?;
         let mode =
             entry.header().mode().map_err(|e| {
                 format!("failed to read entry mode for {}: {}", target.display(), e)
@@ -642,6 +666,14 @@ fn extract_tar_gz_into(
                         .ok_or_else(|| {
                             format!("symlink entry '{}' has no target", path.display())
                         })?;
+                    // A symlink target that escapes the bundle (absolute, or
+                    // `..`-relative out of it) is refused: the link would be
+                    // installed into the shared cache dir pointing outside
+                    // it, and a later entry could write through it.
+                    refuse_unsafe_posix_rel(
+                        &link.to_string_lossy(),
+                        &format!("symlink '{}' target '{}'", path.display(), link.display()),
+                    )?;
                     std::os::unix::fs::symlink(&link, &target).map_err(|e| {
                         format!("failed to create symlink {}: {}", target.display(), e)
                     })?;
@@ -664,6 +696,18 @@ fn extract_tar_gz_into(
                     .map_err(|e| format!("failed to read link target: {}", e))?
                     .ok_or_else(|| format!("hardlink entry '{}' has no target", path.display()))?;
                 let referent = raw.into_owned();
+                // The referent is an ARCHIVE path: it must be a safe relative
+                // path (no absolute, no `..`), or `stage.join(referent)`
+                // could link a host file into the bundle (or escape the
+                // staging root).
+                refuse_unsafe_posix_rel(
+                    &referent.to_string_lossy(),
+                    &format!(
+                        "hardlink '{}' referent '{}'",
+                        path.display(),
+                        referent.display()
+                    ),
+                )?;
                 if !path_within(&referent, prefix) {
                     return Err(format!(
                         "hardlink '{}' targets outside the bundle",
@@ -956,6 +1000,9 @@ fn extract_zip_into(
             continue;
         }
         target = stage.join(target);
+        // Same write-through defense as the tar path: no existing ancestor
+        // of this target may be a staged symlink.
+        ensure_no_symlink_ancestor(stage, &target, &format!("zip entry '{name}'"))?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
@@ -966,6 +1013,16 @@ fn extract_zip_into(
             file.read_to_end(&mut buf)
                 .map_err(|e| format!("failed to read entry {}: {}", name, e))?;
             let link = std::ffi::OsString::from(String::from_utf8_lossy(&buf).into_owned());
+            // The zip crate performs NO validation of symlink targets
+            // (its `add_symlink` docs say so explicitly); the extractor must
+            // refuse targets that escape the bundle, same policy as tar.
+            refuse_unsafe_posix_rel(
+                &link.to_string_lossy(),
+                &format!(
+                    "zip entry '{name}' symlink target '{}'",
+                    link.to_string_lossy()
+                ),
+            )?;
             #[cfg(unix)]
             std::os::unix::fs::symlink(&link, &target)
                 .map_err(|e| format!("failed to create symlink {}: {}", target.display(), e))?;
@@ -999,20 +1056,123 @@ fn extract_zip_into(
     Ok(())
 }
 
-/// Normalize and validate a zip entry name: backslash → '/', then refuse
-/// absolute paths and `..` components (fail closed, same policy as the tar
-/// path's `entry.path()` rejection).
+/// Normalize and validate a zip entry name: backslash → '/', then apply the
+/// shared fail-closed policy (absolute paths, drive-letter prefixes, `..`
+/// components) — the same rules the tar path applies to `entry.path()`, so
+/// both asset formats are held to one containment contract.
 fn zip_entry_path(name: &str) -> Result<String, String> {
     let normalized = name.replace('\\', "/");
-    if normalized.starts_with('/') {
-        return Err(format!("refusing absolute zip entry: {name}"));
+    refuse_unsafe_posix_rel(&normalized, &format!("zip entry '{name}'"))?;
+    Ok(normalized)
+}
+
+/// Fail-closed containment check for a tar entry path (a platform `Path`).
+///
+/// Refuses anything that could resolve outside the staging root when joined
+/// to it: absolute paths, `..` components, and (on Windows) drive prefixes.
+/// `tar::Entry::path()` performs no read-side traversal validation — the
+/// "refusing unsafe archive entry" error it produces only covers non-UTF-8
+/// names — so this is where the containment contract the extractor promises
+/// is actually enforced. A violation refuses the WHOLE archive (the caller
+/// aborts before the install step, the staging dir is removed, and the
+/// previously installed bundle is untouched).
+fn refuse_unsafe_rel_path(path: &std::path::Path, entry_desc: &str) -> Result<(), String> {
+    if path.is_absolute() {
+        return Err(format!(
+            "refusing archive entry with absolute path: {entry_desc}"
+        ));
     }
-    for comp in normalized.split('/') {
-        if comp == ".." {
-            return Err(format!("refusing zip entry with '..' component: {name}"));
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                return Err(format!(
+                    "refusing archive entry with '..' component: {entry_desc}"
+                ));
+            }
+            std::path::Component::Prefix(_) => {
+                // A drive prefix (`C:` in `C:x`) makes the path absolute to a
+                // drive — not contained by the staging dir.
+                return Err(format!(
+                    "refusing archive entry with drive prefix: {entry_desc}"
+                ));
+            }
+            _ => {}
         }
     }
-    Ok(normalized)
+    Ok(())
+}
+
+/// Fail-closed containment check for a '/'-separated relative name: zip
+/// entry names (after backslash normalization), tar/zip symlink targets, and
+/// hardlink referents.
+///
+/// Refuses absolute paths, drive-letter prefixes (`C:` at the start —
+/// `C:\x`, `C:x`, or bare `C:` — absolute to a drive on Windows), and `..`
+/// components. A relative name without `..` cannot resolve outside its join
+/// base, so the check is complete for POSIX names.
+fn refuse_unsafe_posix_rel(name: &str, entry_desc: &str) -> Result<(), String> {
+    if name.starts_with('/') {
+        return Err(format!(
+            "refusing archive entry with absolute path: {entry_desc}"
+        ));
+    }
+    if name.len() >= 2 && name.as_bytes()[0].is_ascii_alphabetic() && name.as_bytes()[1] == b':' {
+        return Err(format!(
+            "refusing archive entry with drive-letter path: {entry_desc}"
+        ));
+    }
+    for comp in name.split('/') {
+        if comp == ".." {
+            return Err(format!(
+                "refusing archive entry with '..' component: {entry_desc}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Fail closed if any EXISTING directory on the path from the staging root
+/// to `target`'s parent is a symlink.
+///
+/// This is the second line of defense behind the symlink-target policy:
+/// the classic tar write-through stages a link first, then routes a later
+/// file entry THROUGH it. A link whose own target is safe can still be part
+/// of a chain that escapes, and the installer moves a top-level symlink as
+/// an opaque entry — so any staged symlink on another entry's path is
+/// refused outright.
+fn ensure_no_symlink_ancestor(
+    stage: &std::path::Path,
+    target: &std::path::Path,
+    entry_desc: &str,
+) -> Result<(), String> {
+    let mut cur = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => return Ok(()),
+    };
+    loop {
+        if let Ok(meta) = std::fs::symlink_metadata(cur)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!(
+                "refusing archive entry {entry_desc}: path routes through staged symlink {}",
+                cur.display()
+            ));
+        }
+        if cur == stage {
+            return Ok(());
+        }
+        match cur.parent() {
+            Some(p) if !p.as_os_str().is_empty() => cur = p,
+            // Reached the filesystem root without reaching the staging root:
+            // target is not textually under stage (impossible after the
+            // relative-path checks) — fail closed rather than assume.
+            _ => {
+                return Err(format!(
+                    "refusing archive entry {entry_desc}: path escapes the staging dir"
+                ));
+            }
+        }
+    }
 }
 
 /// Dispatch archive extraction based on the asset filename extension.
@@ -1687,6 +1847,675 @@ mod bundle_extract_tests {
         assert!(staged.is_empty(), "nothing may be staged, got: {staged:?}");
         assert_no_stage_leftovers(&parent);
         let _ = std::fs::remove_dir_all(&dest);
+    }
+}
+
+#[cfg(test)]
+mod hostile_fixture_tests {
+    //! Fail-closed traversal guard (review finding S3 on
+    //! https://github.com/Strike48-public/strikehub/pull/117): the extractors
+    //! must REJECT the whole archive — and abort the install atomically —
+    //! when any entry tries to escape the staging root: absolute paths,
+    //! `..` components (incl. nested), symlink targets that escape the
+    //! bundle (absolute or `..`-relative), hardlink referents that escape the
+    //! bundle, drive-letter zip names, and the classic symlink write-through
+    //! (a later file entry routed through a staged symlink). Atomic means:
+    //! nothing is written outside the staging dir, the staging dir is
+    //! removed, and the previously installed bundle in `dest` stays
+    //! byte-identical ("original bin intact").
+
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    /// Hostile fixture entry kinds: regular file (content, mode), symlink
+    /// (target, mode), hardlink (referent archive path, mode).
+    enum Kind {
+        File(&'static [u8], u32),
+        Symlink(String, u32),
+        Hardlink(String, u32),
+    }
+
+    /// Build one raw GNU tar entry (512-byte header + data, block-padded).
+    ///
+    /// `tar::Builder` refuses to WRITE absolute or `..` entry names
+    /// (writer-side filtering), but a hostile archive is raw bytes on the
+    /// wire — so the fixture starts from a well-formed `tar::Header` (correct
+    /// magic/version/mode/size/linkname) and splices the hostile raw name
+    /// into the name field, recomputing the checksum. That is exactly what
+    /// an attacker's archive contains.
+    fn raw_gnu_entry(name: &str, typeflag: u8, mode: u32, data: &[u8], linkname: &str) -> Vec<u8> {
+        assert!(name.len() < 100, "fixture name too long: {name:?}");
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::new(typeflag));
+        header.set_mode(mode);
+        header.set_size(data.len() as u64);
+        if !linkname.is_empty() {
+            header
+                .set_link_name(std::path::Path::new(linkname))
+                .unwrap();
+        }
+        let mut bytes = header.as_bytes().to_vec();
+        // Splice the raw (possibly hostile) name; zero the rest of the field.
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        bytes[name.len()..100].fill(0);
+        // Recompute the checksum (field treated as spaces while summing).
+        bytes[148..156].fill(b' ');
+        let sum: u32 = bytes.iter().map(|b| *b as u32).sum();
+        bytes[148..156].copy_from_slice(format!("{:06o} \0", sum).as_bytes());
+        let mut out = bytes;
+        out.extend_from_slice(data);
+        let rem = data.len() % 512;
+        if rem != 0 {
+            out.extend(std::iter::repeat_n(0u8, 512 - rem));
+        }
+        out
+    }
+
+    fn make_hostile_tar_gz(entries: &[(String, Kind)]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        for (name, kind) in entries {
+            let (typeflag, mode, data, linkname): (u8, u32, &[u8], &str) = match kind {
+                Kind::File(content, m) => (b'0', *m, *content, ""),
+                Kind::Symlink(target, m) => (b'2', *m, &b""[..], target.as_str()),
+                Kind::Hardlink(target, m) => (b'1', *m, &b""[..], target.as_str()),
+            };
+            encoder
+                .write_all(&raw_gnu_entry(name, typeflag, mode, data, linkname))
+                .unwrap();
+        }
+        encoder.write_all(&[0u8; 1024]).unwrap(); // end-of-archive marker
+        encoder.finish().unwrap()
+    }
+
+    /// A tar.gz whose lib file name is > 100 chars, carried in a PAX
+    /// local-extension `path` record (what real `tar czf` emits). The
+    /// guard must not reject PAX-resolved names (the review's PAX positive
+    /// control).
+    fn make_pax_tar_gz(long_name: String, content: &'static [u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        // Binary first, so the bundle prefix is the archive root.
+        encoder
+            .write_all(&raw_gnu_entry(
+                "pentest-agent",
+                b'0',
+                0o755,
+                b"fake elf",
+                "",
+            ))
+            .unwrap();
+        // PAX record: "<len> path=<name>\n" where len counts the whole
+        // record including itself (3 digits for names of this size).
+        let body = format!(" path={}\n", long_name);
+        let rec = format!("{}{}", body.len() + 3, body);
+        assert_eq!(rec.len(), body.len() + 3);
+        encoder
+            .write_all(&raw_gnu_entry(
+                "PaxHeaders.1/lib",
+                b'x',
+                0o644,
+                rec.as_bytes(),
+                "",
+            ))
+            .unwrap();
+        // The real entry: any name; the reader resolves the path from the
+        // PAX record above.
+        encoder
+            .write_all(&raw_gnu_entry(
+                "lib/pax-placeholder",
+                b'0',
+                0o644,
+                content,
+                "",
+            ))
+            .unwrap();
+        encoder.write_all(&[0u8; 1024]).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    enum ZipKind {
+        File(&'static [u8]),
+        Symlink(String),
+    }
+
+    fn make_hostile_zip(entries: &[(String, ZipKind)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, kind) in entries {
+            let mut options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            match kind {
+                ZipKind::File(content) => {
+                    options = options.unix_permissions(0o755);
+                    zw.start_file(name.as_str(), options).unwrap();
+                    zw.write_all(content).unwrap();
+                }
+                ZipKind::Symlink(target) => {
+                    // `add_symlink` stores the target as the entry content and
+                    // marks the entry with the unix symlink mode; the zip
+                    // crate's docs are explicit that it performs NO path
+                    // validation — which is exactly what the guard must supply.
+                    zw.add_symlink(name.as_str(), target.as_str(), options)
+                        .unwrap();
+                }
+            }
+        }
+        zw.finish().unwrap().into_inner()
+    }
+
+    /// Fresh unique dest with its OWN private parent, so the staging-leftover
+    /// assertion can't see other (parallel, same-process) tests' stages.
+    fn fresh_dest(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let parent = std::env::temp_dir().join(format!(
+            "strikehub-hostile-{}-{}-parent",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&parent);
+        let dir = parent.join("dest");
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir, parent)
+    }
+
+    fn walk(p: &std::path::Path, f: &mut impl FnMut(&std::path::Path)) {
+        if p.is_symlink() {
+            f(p);
+            return;
+        }
+        if p.is_dir() {
+            for e in std::fs::read_dir(p).unwrap().flatten() {
+                walk(&e.path(), f);
+            }
+        } else {
+            f(p);
+        }
+    }
+
+    /// (rel path, file bytes | None for symlinks, symlink target | None)
+    type Snap = Vec<(String, Option<Vec<u8>>, Option<String>)>;
+
+    fn snapshot(dir: &std::path::Path) -> Snap {
+        let mut out: Snap = Vec::new();
+        walk(dir, &mut |p| {
+            let rel = p.strip_prefix(dir).unwrap().to_string_lossy().into_owned();
+            let (bytes, target) = if p.is_symlink() {
+                (
+                    None,
+                    std::fs::read_link(p)
+                        .ok()
+                        .map(|t| t.to_string_lossy().into_owned()),
+                )
+            } else {
+                (Some(std::fs::read(p).unwrap()), None)
+            };
+            out.push((rel, bytes, target));
+        });
+        out.sort();
+        out
+    }
+
+    /// The benign bundle installed BEFORE the hostile archive, so each test
+    /// can prove "original bin intact" after the refusal.
+    fn install_baseline(dest: &std::path::Path) {
+        let archive = make_hostile_tar_gz(&[
+            (
+                "pentest-agent".to_string(),
+                Kind::File(b"#!/bin/true\nbaseline elf", 0o755),
+            ),
+            (
+                "lib/libbase.so.1".to_string(),
+                Kind::File(b"baseline lib bytes", 0o644),
+            ),
+        ]);
+        extract_tar_gz(&archive, dest, "pentest-agent").unwrap();
+    }
+
+    /// The hostile archive must have been refused with an explicit error,
+    /// the staging dir cleaned, and the previously installed bundle left
+    /// byte-identical (no partial install, original bin intact).
+    fn assert_aborted_atomically(
+        err: String,
+        dest: &std::path::Path,
+        parent: &std::path::Path,
+        before: Snap,
+    ) {
+        assert!(
+            err.contains("refusing"),
+            "expected a fail-closed refusal, got: {err}"
+        );
+        assert_eq!(
+            snapshot(dest),
+            before,
+            "refused archive must not change the installed bundle"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("strikehub-stage"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging leftovers: {leftovers:?}");
+    }
+
+    fn unique(name: &str) -> String {
+        format!("strikehub-hostile-{}-{name}", std::process::id())
+    }
+
+    fn fname(p: &std::path::Path) -> String {
+        p.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    /// `../evil` — a `..` sibling at the bundle root: refused, and must not
+    /// land in the staging dir's parent.
+    #[test]
+    fn tar_dotdot_entry_refused_atomically() {
+        let (dest, parent) = fresh_dest("tar-dotdot");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        let escaped = parent.join(unique("dotdot"));
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            (
+                format!("../{}", fname(&escaped)),
+                Kind::File(b"escaped", 0o644),
+            ),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        assert!(!escaped.exists(), "entry escaped to {}", escaped.display());
+        let _ = std::fs::remove_file(&escaped);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Absolute path entry (the mission's `/etc/x` case): refused BEFORE any
+    /// write is attempted — so an unwritable /etc is irrelevant, and a
+    /// writable one is never touched.
+    #[test]
+    fn tar_absolute_entry_refused_atomically() {
+        let (dest, parent) = fresh_dest("tar-abs");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            ("/etc/x".to_string(), Kind::File(b"absolute escape", 0o644)),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        assert!(
+            !std::path::Path::new("/etc/x").exists(),
+            "/etc/x must never be written"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Absolute path into a WRITABLE location: pre-fix the extractor
+    /// returned Ok and actually created the file there (`PathBuf::join`
+    /// replaces the staging root with an absolute path). Post-fix it must
+    /// be refused with nothing created.
+    #[test]
+    fn tar_absolute_writable_path_never_created() {
+        let (dest, parent) = fresh_dest("tar-abs-writable");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        let outside = std::env::temp_dir().join(unique("abs-writable"));
+        let _ = std::fs::remove_dir_all(&outside);
+        let evil = outside.join("abs-evil");
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            (
+                evil.to_string_lossy().into_owned(),
+                Kind::File(b"absolute escape", 0o644),
+            ),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        assert!(
+            !evil.exists(),
+            "absolute entry was written to {}",
+            evil.display()
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// `a/../../evil` — `..` segments that normalize out through the staging
+    /// dir's parent (landing in /tmp for this layout).
+    #[test]
+    fn tar_nested_dotdot_refused_atomically() {
+        let (dest, parent) = fresh_dest("tar-nested");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        let escaped = std::env::temp_dir().join(unique("nested"));
+        let _ = std::fs::remove_file(&escaped);
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            (
+                format!("a/../../{}", fname(&escaped)),
+                Kind::File(b"escaped", 0o644),
+            ),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        assert!(!escaped.exists(), "entry escaped to {}", escaped.display());
+        let _ = std::fs::remove_file(&escaped);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// The classic: a symlink entry whose target escapes the bundle, then a
+    /// file entry whose path routes THROUGH the staged symlink. Pre-fix the
+    /// link was planted raw and the follow-up write landed outside the
+    /// staging dir (result Ok). Post-fix: refused, nothing outside.
+    #[test]
+    fn tar_symlink_write_through_refused() {
+        let (dest, parent) = fresh_dest("tar-sym-abs");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        let outside = std::env::temp_dir().join(unique("sym-abs"));
+        // Pre-existing target (as the review's probe had): with it there,
+        // a pre-fix extractor writes THROUGH the planted link into it.
+        std::fs::create_dir_all(&outside).unwrap();
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            (
+                "lib/esc".to_string(),
+                Kind::Symlink(outside.to_string_lossy().into_owned(), 0o777),
+            ),
+            (
+                "lib/esc/pwned".to_string(),
+                Kind::File(b"write-through", 0o644),
+            ),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        assert!(
+            !outside.join("pwned").exists(),
+            "write-through landed at {}",
+            outside.join("pwned").display()
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Same write-through attack with a RELATIVE target containing `..`
+    /// (resolves outside the staging root): `lib/esc2 -> ../../<dir>`, then
+    /// `lib/esc2/pwned2`.
+    #[test]
+    fn tar_symlink_relative_dotdot_write_through_refused() {
+        let (dest, parent) = fresh_dest("tar-sym-rel");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        // stage lives at <parent>/.strikehub-stage-*; the link sits at
+        // stage/lib, so a `../../<dir>` target resolves to <parent>/<dir>
+        // — outside the staging root (and outside the install dir).
+        let outside = parent.join(unique("sym-rel"));
+        std::fs::create_dir_all(&outside).unwrap();
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            (
+                "lib/esc2".to_string(),
+                Kind::Symlink(format!("../../{}", fname(&outside)), 0o777),
+            ),
+            (
+                "lib/esc2/pwned2".to_string(),
+                Kind::File(b"write-through", 0o644),
+            ),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        assert!(
+            !outside.join("pwned2").exists(),
+            "write-through landed at {}",
+            outside.join("pwned2").display()
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Hardlink referents escaping the bundle: absolute (pre-fix this
+    /// hard-linked a HOST file into the bundle and installed it) and
+    /// `..`-relative (escapes the staging root).
+    #[test]
+    fn tar_hardlink_referent_escape_refused() {
+        let (dest, parent) = fresh_dest("tar-hardlink");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        // /etc/passwd exists on every host: pre-fix the extractor hard-linked
+        // it into the staging dir and installed it (an exposure), unless the
+        // device mismatch happened to make hard_link fail first.
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            (
+                "evil-hard".to_string(),
+                Kind::Hardlink("/etc/passwd".to_string(), 0o644),
+            ),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before.clone());
+        assert!(!dest.join("evil-hard").exists());
+
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"evil v9", 0o755)),
+            (
+                "evil-hard2".to_string(),
+                Kind::Hardlink(format!("../../{}", unique("hardref")), 0o644),
+            ),
+        ]);
+        let err = extract_tar_gz(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// PAX positive control: a > 100-char name (PAX local-extension `path`
+    /// record, what real `tar czf` emits) must still extract — the guard
+    /// must not reject PAX-resolved names.
+    #[test]
+    fn tar_pax_long_name_still_extracts() {
+        let (dest, parent) = fresh_dest("tar-pax");
+        let long = format!("lib/{}", "l".repeat(150));
+        let archive = make_pax_tar_gz(long.clone(), b"pax lib bytes");
+
+        let result = extract_tar_gz(&archive, &dest, "pentest-agent");
+        assert!(
+            result.is_ok(),
+            "PAX long-name entry must not be refused: {:?}",
+            result
+        );
+        assert!(dest.join(&long).is_file(), "PAX long-name file missing");
+        assert_eq!(std::fs::read(dest.join(&long)).unwrap(), b"pax lib bytes");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// In-bundle hardlinks must keep working: the guard tightens, it does
+    /// not disable, the hardlink support the bundle extractor relies on.
+    #[test]
+    fn tar_hardlink_inside_bundle_still_works() {
+        let (dest, parent) = fresh_dest("tar-hardlink-ok");
+        let archive = make_hostile_tar_gz(&[
+            ("pentest-agent".to_string(), Kind::File(b"fake elf", 0o755)),
+            ("lib/a.so".to_string(), Kind::File(b"lib bytes", 0o644)),
+            (
+                "lib/b.so".to_string(),
+                Kind::Hardlink("lib/a.so".to_string(), 0o644),
+            ),
+        ]);
+
+        let result = extract_tar_gz(&archive, &dest, "pentest-agent");
+        assert!(
+            result.is_ok(),
+            "in-bundle hardlink must not be refused: {:?}",
+            result
+        );
+        #[cfg(unix)]
+        {
+            let a = std::fs::metadata(dest.join("lib/a.so")).unwrap();
+            let b = std::fs::metadata(dest.join("lib/b.so")).unwrap();
+            assert_eq!(a.ino(), b.ino(), "lib/b.so must be a hardlink of lib/a.so");
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Regression on the zip entry-NAME guard that already existed
+    /// (absolute, `..`, backslash-`..`, nested): keep it refused after the
+    /// guard is unified.
+    #[test]
+    fn zip_dotdot_backslash_absolute_refused() {
+        let (dest, parent) = fresh_dest("zip-regression");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+        let escaped = parent.join(unique("zip-evil"));
+
+        for name in [
+            "/etc/x".to_string(),
+            "../x".to_string(),
+            format!("..\\..\\{}", fname(&escaped)),
+            "a/../../x".to_string(),
+        ] {
+            let archive = make_hostile_zip(&[
+                (
+                    "pentest-agent.exe".to_string(),
+                    ZipKind::File(b"evil exe v9"),
+                ),
+                (name, ZipKind::File(b"escaped")),
+            ]);
+            let err = extract_zip(&archive, &dest, "pentest-agent").unwrap_err();
+            assert_aborted_atomically(err, &dest, &parent, before.clone());
+        }
+        assert!(!escaped.exists(), "backslash-.. entry escaped");
+        let _ = std::fs::remove_file(&escaped);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Drive-letter entries (`C:\evil`, `C:/evil`, `C:evil`) are absolute on
+    /// Windows; the zip path must refuse them on EVERY host (fail closed),
+    /// not only when running on Windows.
+    #[test]
+    fn zip_drive_letter_refused() {
+        let (dest, parent) = fresh_dest("zip-drive");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        for name in [
+            "C:\\evil".to_string(),
+            "C:/evil".to_string(),
+            "C:evil".to_string(),
+        ] {
+            let archive = make_hostile_zip(&[
+                (
+                    "pentest-agent.exe".to_string(),
+                    ZipKind::File(b"evil exe v9"),
+                ),
+                (name, ZipKind::File(b"escaped")),
+            ]);
+            let err = extract_zip(&archive, &dest, "pentest-agent").unwrap_err();
+            assert_aborted_atomically(err, &dest, &parent, before.clone());
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Zip symlink write-through: the zip path must share the
+    /// symlink-TARGET guard (pre-fix it planted the link raw, then the
+    /// follow-up entry wrote through it outside the staging dir). Both the
+    /// absolute and the `..`-relative target forms.
+    #[test]
+    fn zip_symlink_write_through_refused() {
+        let (dest, parent) = fresh_dest("zip-sym");
+        install_baseline(&dest);
+        let before = snapshot(&dest);
+
+        // Absolute target (pre-existing dir, as in the review's probe).
+        let outside = std::env::temp_dir().join(unique("zip-sym-abs"));
+        std::fs::create_dir_all(&outside).unwrap();
+        let archive = make_hostile_zip(&[
+            (
+                "pentest-agent.exe".to_string(),
+                ZipKind::File(b"evil exe v9"),
+            ),
+            (
+                "lib/esc".to_string(),
+                ZipKind::Symlink(outside.to_string_lossy().into_owned()),
+            ),
+            ("lib/esc/pwned".to_string(), ZipKind::File(b"write-through")),
+        ]);
+        let err = extract_zip(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before.clone());
+        assert!(
+            !outside.join("pwned").exists(),
+            "write-through landed at {}",
+            outside.join("pwned").display()
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+
+        // Relative `..` target: from stage/lib, ../../<dir> resolves to
+        // <parent>/<dir> (outside the staging root).
+        let outside2 = parent.join(unique("zip-sym-rel"));
+        std::fs::create_dir_all(&outside2).unwrap();
+        let archive = make_hostile_zip(&[
+            (
+                "pentest-agent.exe".to_string(),
+                ZipKind::File(b"evil exe v9"),
+            ),
+            (
+                "lib/esc2".to_string(),
+                ZipKind::Symlink(format!("../../{}", fname(&outside2))),
+            ),
+            (
+                "lib/esc2/pwned2".to_string(),
+                ZipKind::File(b"write-through"),
+            ),
+        ]);
+        let err = extract_zip(&archive, &dest, "pentest-agent").unwrap_err();
+        assert_aborted_atomically(err, &dest, &parent, before);
+        assert!(
+            !outside2.join("pwned2").exists(),
+            "write-through landed at {}",
+            outside2.join("pwned2").display()
+        );
+        let _ = std::fs::remove_dir_all(&outside2);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// The write-through second line of defense, pinned directly on the
+    /// guard: a staged symlink on the path to a later entry is refused even
+    /// though its own target is safe (a chain of in-bundle links could
+    /// still route a write outside), while a path with only real dirs
+    /// passes.
+    #[test]
+    fn staged_symlink_ancestor_refused_by_guard() {
+        let (dest, parent) = fresh_dest("guard-ancestor");
+        // Use the extractor's own staging helper so the layout is the real
+        // one (hidden sibling of dest).
+        let stage = stage_dir_for(&dest).unwrap();
+        std::fs::create_dir_all(stage.join("lib")).unwrap();
+        let outside = parent.join(unique("ancestor-outside"));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, stage.join("lib/link")).unwrap();
+
+        // Through the staged symlink: refused, nothing written outside.
+        let err =
+            ensure_no_symlink_ancestor(&stage, &stage.join("lib/link/pwned"), "probe").unwrap_err();
+        assert!(err.contains("refusing"), "got: {err}");
+        assert!(!outside.join("pwned").exists());
+
+        // Beside it (real dirs only): fine.
+        ensure_no_symlink_ancestor(&stage, &stage.join("lib/plain"), "probe").unwrap();
+
+        let _ = std::fs::remove_dir_all(&stage);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
 
