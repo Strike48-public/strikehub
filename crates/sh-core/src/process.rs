@@ -44,8 +44,13 @@
 //!    group is empty and the walk has no live anchor — a bounded
 //!    MANAGED-ROOT SWEEP: every process whose RESOLVED executable path
 //!    lives under one of those roots is collected the same way
-//!    ([`sweep_managed_roots`]). The path-prefix whitelist is the safety
-//!    property: nothing else (argv, env, names) is ever matched.
+//!    ([`sweep_managed_roots`]) — TOGETHER WITH ITS FULL DESCENDANT
+//!    SUBTREE: the matched pids are run through [`collect_descendants`]
+//!    before the TERM pass, because a matched root's children/grandchildren
+//!    exec binaries OUTSIDE the roots (the path whitelist is blind to
+//!    them) and the issue's AC is zero descendants (children AND
+//!    grandchildren). The path-prefix whitelist stays the safety property:
+//!    nothing else (argv, env, names) is ever matched.
 //!
 //! # Exit-route coverage (issue #115 RC remainder)
 //!
@@ -403,6 +408,14 @@ pub fn add_managed_root(p: PathBuf) {
 /// Deliberately NOT included: the running executable's directory on
 /// non-bundle layouts (a dev `target/debug` tree is not "managed" — the
 /// prefix whitelist must stay narrow), and anything merely on a PATH.
+///
+/// Every root is CANONICALIZED (symlinks resolved): the matcher is fed
+/// RESOLVED exe paths (see [`process_exe_path`]), so a `$HOME` — or the
+/// bundle location — containing a symlink component must resolve
+/// identically, or the whitelist would silently never match on such hosts
+/// (fail-safe under-kill: the RC scenario stays open). A root that does
+/// not exist yet (first run, before the first self-update) cannot be
+/// canonicalized and keeps its raw path as the fallback.
 #[cfg(unix)]
 #[must_use]
 pub fn managed_roots() -> Vec<PathBuf> {
@@ -425,6 +438,9 @@ pub fn managed_roots() -> Vec<PathBuf> {
     }
     roots.dedup();
     roots
+        .into_iter()
+        .map(|r| std::fs::canonicalize(&r).unwrap_or(r))
+        .collect()
 }
 
 /// Strict component-wise prefix match: `path` must live UNDER one of
@@ -563,6 +579,13 @@ fn all_pids_bounded() -> Vec<u32> {
 ///   its tracked ancestor died — so the group kill (empty group) and the
 ///   descendant walk (no live tracked anchor) both miss it.
 ///
+/// Returns only the processes whose OWN resolved exe matches a root.
+/// [`teardown_process_tree`] extends each match with its FULL bounded
+/// descendant set (via [`collect_descendants`]) before the TERM pass: a
+/// matched root's descendants run arbitrary executables OUTSIDE the roots
+/// and are invisible to the whitelist itself — the AC (issue #115) is
+/// zero descendants, children AND grandchildren.
+///
 /// Safety: ONLY the path-prefix whitelist above matches — resolved paths
 /// under `roots`, self excluded, enumeration and result bounded. Nothing
 /// else (argv, env, process names) is ever considered. NOT for use in
@@ -616,11 +639,16 @@ fn pid_alive(_pid: u32) -> bool {
 /// 1. Snapshot the registry.
 /// 2. Walk the descendants of each tracked pid (catches `setsid`-escaped
 ///    descendants that a group kill would miss).
-/// 3. `SIGTERM` every tracked process group (`kill(-pgid)`) and every
-///    walked descendant (Windows: `TerminateJobObject` + direct terminate).
-/// 4. Poll for up to [`TEARDOWN_GRACE_SECS`] (~2 s) for the whole set to
+/// 3. Managed-root sweep: collect every process whose resolved exe lives
+///    under a managed root, PLUS each match's full bounded descendant
+///    subtree (a matched root's children/grandchildren exec binaries
+///    OUTSIDE the roots — whitelist-blind, walk-only coverage; AC is zero
+///    descendants, children AND grandchildren).
+/// 4. `SIGTERM` every tracked process group (`kill(-pgid)`) and every
+///    collected pid (Windows: `TerminateJobObject` + direct terminate).
+/// 5. Poll for up to [`TEARDOWN_GRACE_SECS`] (~2 s) for the whole set to
 ///    die; return early when it does.
-/// 5. Escalate survivors to `SIGKILL` (Windows: terminate again).
+/// 6. Escalate survivors to `SIGKILL` (Windows: terminate again).
 ///
 /// Synchronous and idempotent — safe to call from `main` after the window
 /// closes, from the [`ProcessTreeGuard`] exit fallback, from the atexit
@@ -644,11 +672,29 @@ pub fn teardown_process_tree() {
     // kill and the descendant walk both miss them. Runs even when the
     // registry is empty: that is precisely the case where every tracked
     // anchor is gone and only the path whitelist can still find them.
+    //
+    // The sweep matches ROOT processes (resolved exe under a managed
+    // root). Their OWN descendants run arbitrary executables OUTSIDE the
+    // roots (shells, helpers — whitelist-blind) and, being untracked,
+    // are invisible to the walk in step 2 as well. The AC (issue #115)
+    // is ZERO descendants — children AND grandchildren — so the matched
+    // pids are run through the same bounded descendant walk before the
+    // TERM pass (review of #121, CQ concern): TERM → grace → KILL then
+    // covers each matched root's full subtree. The walk is bounded
+    // (MAX_WALK_NODES) and rooted ONLY at whitelist-matched pids.
     #[cfg(unix)]
     {
-        for s in sweep_managed_roots(&managed_roots()) {
-            if !targets.contains(&s) {
-                targets.push(s);
+        let swept: Vec<u32> = sweep_managed_roots(&managed_roots());
+        for s in &swept {
+            if !targets.contains(s) {
+                targets.push(*s);
+            }
+        }
+        if !swept.is_empty() {
+            for d in collect_descendants(&swept) {
+                if !targets.contains(&d) {
+                    targets.push(d);
+                }
             }
         }
     }
@@ -989,15 +1035,63 @@ mod tests {
     /// The sweep's default root must include the self-update cache — the
     /// directory the RC verification showed the orphaned agent running
     /// from (`~/.strike48/strikehub/bin/pentest-agent`).
+    ///
+    /// `managed_roots()` canonicalizes (the matcher is fed RESOLVED exe
+    /// paths), so compare in canonical form: a not-yet-existing cache dir
+    /// is its own canonical fallback.
     #[test]
     fn managed_roots_include_the_self_update_cache() {
+        let cache = crate::connector_fetch::bin_cache_dir();
+        let expected = std::fs::canonicalize(&cache).unwrap_or(cache);
         let roots = managed_roots();
         assert!(
-            roots
-                .iter()
-                .any(|r| r == &crate::connector_fetch::bin_cache_dir()),
-            "managed roots {roots:?} must include the self-update cache"
+            roots.contains(&expected),
+            "managed roots {roots:?} must include the self-update cache ({expected:?})"
         );
+    }
+
+    /// The sweep matcher is fed RESOLVED exe paths — a registered root
+    /// whose path contains a SYMLINK (a `$HOME` under a symlinked home,
+    /// a bundle under a symlinked mount point) must come back
+    /// CANONICALIZED from [`managed_roots`], or the whitelist silently
+    /// never matches on such hosts (review of #121, CQ nit).
+    #[test]
+    fn managed_roots_canonicalize_symlinked_roots() {
+        let base = std::env::temp_dir().join(format!(
+            "strikehub-canonical-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // A SYMLINKED registration resolves to the real directory…
+        add_managed_root(link.clone());
+        let roots = managed_roots();
+        assert!(
+            roots.contains(&real),
+            "managed roots {roots:?} must contain the canonical form of the symlinked root {link:?} (={real:?})"
+        );
+        // …and the matcher then accepts a RESOLVED exe path under it.
+        assert!(
+            is_managed_exe(&real.join("pentest-agent"), &roots),
+            "a resolved exe path under the canonical root must match"
+        );
+        // A not-yet-existing root keeps its raw path (canonicalize
+        // fallback — first run, before the first self-update).
+        let missing = base.join("missing");
+        add_managed_root(missing.clone());
+        let roots2 = managed_roots();
+        assert!(
+            roots2.contains(&missing),
+            "a non-existent root must keep its raw path (canonicalize fallback): got {roots2:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// macOS leg of the sweep (kern.proc.pid enumeration + proc_pidpath

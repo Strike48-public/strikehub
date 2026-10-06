@@ -10,12 +10,15 @@ which mechanism, and what CI verifies on each platform.
 On close — normal, quit-event, or signal — StrikeHub escalates
 **TERM → ~2 s → KILL** across the ENTIRE spawned tree, plus a bounded
 **managed-root fallback sweep** for self-update-respawned processes that
-escaped the registry, and `kill_on_drop` + (Linux)
+escaped the registry — including the **full descendant subtree** of every
+matched root process (their children/grandchildren exec binaries OUTSIDE
+the roots, so only the walk from the matched roots can see them) — and
+`kill_on_drop` + (Linux)
 `PR_SET_PDEATHSIG(SIGHUP)` remain as direct-child backstops.
 
 | Platform | Mechanism | Where it runs |
 |---|---|---|
-| Linux / macOS | per-child process group (`process_group(0)` at spawn) + process-lifetime registry + `kill(-pgid)` escalation; bounded best-effort descendant walk (`/proc` on Linux, `ps` on macOS) catches `setsid` escapers; **managed-root fallback sweep** (resolved-exe path-prefix whitelist over `~/.strike48/strikehub/bin/` + the bundle `MacOS` dir on macOS) catches self-update-respawned processes that are untracked and/or reparented to init/launchd | `teardown_process_tree()` on normal close AND via the **C-level `atexit` hook** (`install_exit_handler`) on every `std::process::exit` route; `signal_kill_tracked_groups()` (async-signal-safe, groups only) in the SIGINT/SIGTERM/**SIGTRAP** handler |
+| Linux / macOS | per-child process group (`process_group(0)` at spawn) + process-lifetime registry + `kill(-pgid)` escalation; bounded best-effort descendant walk (`/proc` on Linux, `ps` on macOS) catches `setsid` escapers; **managed-root fallback sweep** (resolved-exe path-prefix whitelist over `~/.strike48/strikehub/bin/` + the bundle `MacOS` dir on macOS) catches self-update-respawned processes that are untracked and/or reparented to init/launchd, **plus their full descendant subtrees** (children/grandchildren whose executables live outside the roots — walk-only coverage) | `teardown_process_tree()` on normal close AND via the **C-level `atexit` hook** (`install_exit_handler`) on every `std::process::exit` route; `signal_kill_tracked_groups()` (async-signal-safe, groups only) in the SIGINT/SIGTERM/**SIGTRAP** handler |
 | Windows | ONE shared Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; every child assigned at spawn (`assign_pid_to_job`), `TerminateJobObject` on close, and the OS kills the job when the handle closes on **any** exit path | `teardown_process_tree()` on normal close; KILL_ON_JOB_CLOSE covers every other path (crash, signal, `_exit`) |
 
 ## Exit routes and who tears down (the RC-remainder wiring)
@@ -49,8 +52,9 @@ no-ops), so overlapping deliveries are harmless.
   — the append-only process-lifetime registry.
 - `sh_core::process::teardown_process_tree()` — normal-close / atexit
   teardown (synchronous, idempotent, not signal-handler-safe): tracked
-  groups + descendant walk + **managed-root sweep**, one TERM → grace →
-  KILL escalation over the union.
+  groups + descendant walk + **managed-root sweep (matched roots + their
+  full bounded descendant subtrees)**, one TERM → grace → KILL escalation
+  over the union.
 - `sh_core::process::install_exit_handler()` — **unix only**, installs the
   C-level `atexit` hook that runs `teardown_process_tree()` on
   `std::process::exit` (called once at startup in `sh-ui/src/main.rs`;
@@ -61,14 +65,20 @@ no-ops), so overlapping deliveries are harmless.
 - `sh_core::process::managed_roots()` / `add_managed_root(path)` — **unix
   only**, the sweep's directory whitelist (`~/.strike48/strikehub/bin` +
   the macOS bundle `MacOS` dir; `add_managed_root` is a test hook —
-  production startup registers nothing extra).
+  production startup registers nothing extra). Roots are **canonicalized**
+  (the matcher is fed RESOLVED exe paths, so a symlinked `$HOME`/bundle
+  location must resolve identically); a not-yet-existing root keeps its
+  raw path as fallback.
 - `sh_core::process::is_managed_exe(path, roots)` — **unix only**, the
   strict component-wise prefix matcher (lookalike prefixes rejected;
   callers pass RESOLVED exe paths, so symlink escapes never match).
 - `sh_core::process::sweep_managed_roots(roots)` — **unix only**, the
   bounded sweep itself (`/proc` + `readlink` on Linux; `kern.proc.pid`
   `sysctlbyname` + `proc_pidpath` on macOS; self excluded; ≤ 4096 pids /
-  ≤ 64 targets).
+  ≤ 64 targets). Returns the MATCHED ROOT processes only —
+  `teardown_process_tree` extends them with the bounded descendant walk
+  before the TERM pass (AC: zero descendants — children AND grandchildren
+  run exes outside the roots).
 - `sh_core::process::ProcessTreeGuard` — drop-guard fallback for exits that
   skip the explicit call (panic, early return). NOTE: Drop never runs for a
   `std::process::exit` death — the atexit hook covers that route.
@@ -107,8 +117,8 @@ no-ops), so overlapping deliveries are harmless.
 
 | What | Where |
 |---|---|
-| unix fixture-tree integration tests (`tests/process_tree.rs`, real `spawn_tracked` + registry): TERM→KILL escalation, respawn + setsid cases, **respawned-successor-outside-the-registry sweep case (RED→GREEN for the RC REPRO)**, **atexit-hook-fires-on-`process::exit` proof (fork + `std::process::exit(42)` — the exact tao quit-route exit)**, **direct call of the atexit quit-route entry**, **symlink-escape whitelist rejection** | `Test` job (ubuntu) |
-| sweep-matcher unit tests (whitelist prefix exactness; lookalike `bin2`/`bin-evil`/other-user rejection; cache dir always a root; atexit entry safe no-op) | `Test` job (ubuntu) — `sh-core` lib tests |
+| unix fixture-tree integration tests (`tests/process_tree.rs`, real `spawn_tracked` + registry): TERM→KILL escalation, respawn + setsid cases, **respawned-successor-outside-the-registry sweep case (RED→GREEN for the RC REPRO)**, **managed-root sweep SUBTREE case — successor (fixture exe under the root) → child → grandchild exec'd to a system binary OUTSIDE every root (RED→GREEN for the post-review CQ finding)**, **atexit-hook-fires-on-`process::exit` proof (fork + `std::process::exit(42)` — the exact tao quit-route exit)**, **direct call of the atexit quit-route entry**, **symlink-escape whitelist rejection** | `Test` job (ubuntu) |
+| sweep-matcher unit tests (whitelist prefix exactness; lookalike `bin2`/`bin-evil`/other-user rejection; cache dir always a root; **symlinked roots canonicalized + raw-path fallback for not-yet-existing roots**; atexit entry safe no-op) | `Test` job (ubuntu) — `sh-core` lib tests |
 | **compile** of the whole `sh-core` crate (incl. all `cfg(windows)` and `cfg(target_os = "macos")` sweep code) for `x86_64-pc-windows-msvc` | `Check (Windows)` job (`windows-latest`, every PR — the MSI installer job is `main`-gated) |
 | **runtime** of the Job Object path: `CreateJobObjectW`/KILL_ON_CLOSE setup, `AssignProcessToJobObject` (success + dead-pid error path), `TerminateJobObject`, and an end-to-end `KILL_ON_JOB_CLOSE` probe (a `cmd → ping` tree assigned to the job must be dead within seconds of the job owner's exit — no `TerminateJobObject` on that path). Fixtures are two-pass (plain spawn → `CREATE_BREAKAWAY_FROM_JOB` after a best-effort `SeCreatePagefilePrivilege` enable) because the `windows-latest` agent runs its tree inside its own Job Object; where a job member is impossible to create, a documented constrained mode verifies everything the environment still allows and reports the exact Win32 errors | `Check (Windows)` job — `cargo test -p sh-core --target x86_64-pc-windows-msvc job` |
 | full MSVC build + link of the app (MSI) | `Build MSI x86_64` job (gated to `main`) |

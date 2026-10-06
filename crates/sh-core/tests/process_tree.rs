@@ -470,8 +470,10 @@ async fn respawned_successor_outside_registry_is_still_collected() {
         // macOS: no setsid utility — perl fork + setsid + exec. The helper
         // parent waits out the successor, so it exits with it (it is not an
         // extra survivor: /usr/bin/perl is not under the managed root).
+        // (`use POSIX;` is mandatory — `POSIX::setsid()` is not
+        // auto-loaded by perl.)
         format!(
-            "perl -e '$p=fork() or POSIX::_exit(98); \n\
+            "perl -e 'use POSIX; $p=fork() or POSIX::_exit(98); \n\
              if ($p==0) {{ POSIX::setsid(); exec @ARGV or POSIX::_exit(99); }} \n\
              waitpid($p, 0);' {} -e 'select(undef,undef,undef,300)' & wait\n",
             fixture.display()
@@ -543,6 +545,224 @@ async fn respawned_successor_outside_registry_is_still_collected() {
     // AC (issue #115 RC verification): zero survivors — the self-update
     // generation that escaped the registry must be collected too.
     wait_gone(succ_pid, "self-update successor (respawn outside registry)");
+
+    let _ = std::fs::remove_file(&fixture);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── #115 AC — zero DESCENDANTS: the sweep must collect the full subtree ──
+//
+// Issue #115's acceptance criterion is ZERO descended processes — "children
+// and grandchildren, including self-update-respawned ...". A self-update
+// successor is not a leaf: it spawns children, and those descendants exec
+// ordinary system binaries that live OUTSIDE every managed root, so the
+// path whitelist alone can never see them — and, being untracked and
+// reparented after the original's death, the tracked-anchor walk misses
+// them too. Only the descendant walk from the sweep's MATCHED roots
+// reaches them. This test builds exactly that shape:
+//
+//   tracked child (OWN pgid via spawn_tracked; `sh -c '... & wait'`)
+//     └── [setsid] successor — a REAL executable copied into
+//         bin_cache_dir() (the self-update root)
+//           └── child (a fork of the successor; its exe is still the
+//               fixture, so the whitelist matches it)
+//                 └── grandchild (exec'd to `sleep` — a system binary
+//                     OUTSIDE every root: whitelist-blind, walk-only)
+//
+// The tracked original dies (the self-update death): successor, child and
+// grandchild are outside the tracked tree. AC: `teardown_process_tree()`
+// leaves ZERO survivors.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sweep_collects_full_subtree_under_managed_root_including_grandchildren() {
+    let _lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    // The managed root the real self-update writes to: ~/.strike48/strikehub/bin
+    let root = sh_core::bin_cache_dir();
+    let fixture_name = format!("sh-115c-sweep-subtree-{}", std::process::id());
+    let fixture = root.join(&fixture_name);
+
+    assert_no_live_managed_procs(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    // A REAL executable under the managed root — the self-update
+    // generation (see `real_perl_binary` for why perl, not a script).
+    std::fs::copy(real_perl_binary(), &fixture).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::fs::metadata(&fixture).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&fixture, p).unwrap();
+    }
+
+    let dir = tmpdir("subtree");
+    let child_marker = dir.join("child.pid");
+    let grand_marker = dir.join("grand.pid");
+
+    // The successor's program ($ARGV[0] = child marker, $ARGV[1] = grand
+    // marker): fork a child; the child forks a grandchild that execs
+    // `sleep` (a system binary OUTSIDE every managed root — the whitelist
+    // can never see it) and records the pids as they appear. No single
+    // quotes in the program: it is embedded in a single-quoted shell arg.
+    let program = r#"
+        my $c = fork();
+        if ($c == 0) {
+            my $g = fork();
+            if ($g == 0) {
+                exec("sleep", "300") or POSIX::_exit(99);
+            }
+            open(my $gfh, ">", $ARGV[1]) or POSIX::_exit(97);
+            print $gfh $g;
+            close $gfh;
+            waitpid($g, 0);
+            POSIX::_exit(0);
+        }
+        open(my $cfh, ">", $ARGV[0]) or POSIX::_exit(96);
+        print $cfh $c;
+        close $cfh;
+        select(undef, undef, undef, 300);
+    "#;
+
+    let with_setsid = cfg!(target_os = "linux") && setsid_available();
+    // The tracked child: spawn the successor DETACHED (setsid => the
+    // successor leaves into its own session AND group) and wait. The
+    // successor's ppid becomes init/launchd (or the nearest subreaper)
+    // the moment this child dies — the RC shape.
+    let script = if with_setsid {
+        format!(
+            "setsid {fixture} -e '{program}' {child} {grand} & wait",
+            fixture = fixture.display(),
+            child = child_marker.display(),
+            grand = grand_marker.display(),
+        )
+    } else {
+        // macOS: no setsid utility — a perl helper fork + setsid + exec's
+        // the fixture. The helper is a child of the tracked shell and
+        // waits out the successor; its exe is the REAL perl (outside the
+        // managed root), so it is an ancestor of the sweep roots, never a
+        // sweep target, and is out of the AC's descendant set here.
+        // (`use POSIX;` is mandatory — `POSIX::setsid()` is not
+        // auto-loaded by perl.)
+        format!(
+            "perl -e 'use POSIX; $p=fork() or POSIX::_exit(98); \n\n\
+             if ($p==0) {{ POSIX::setsid(); exec @ARGV or POSIX::_exit(99); }} \n\n\
+             waitpid($p, 0);' {fixture} -e '{program}' {child} {grand} & wait\n",
+            fixture = fixture.display(),
+            child = child_marker.display(),
+            grand = grand_marker.display(),
+        )
+    };
+
+    // Spawn through the REAL API: own process group + registry entry.
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(&script);
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    let mut child = sh_core::process::spawn_tracked(&mut cmd).unwrap();
+    let child_pid = child.id().unwrap();
+
+    // The pids as the FIXTURE reports them (not the shell's `$!` —
+    // setsid may fork when it is a group leader).
+    assert!(
+        wait_for_file(&child_marker, 10),
+        "child marker never appeared"
+    );
+    assert!(
+        wait_for_file(&grand_marker, 10),
+        "grandchild marker never appeared"
+    );
+    let sub_child_pid = read_pid(&child_marker);
+    let grand_pid = read_pid(&grand_marker);
+
+    // The successor: a live process running the fixture binary (under the
+    // managed root) that is neither the tracked child nor the recorded
+    // child (the child fork keeps the fixture's exe too — it is the
+    // recorded one). Unique fixture name => no ambiguity.
+    let mut succ_pid: Option<u32> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while succ_pid.is_none() && Instant::now() < deadline {
+        succ_pid = pids_exe_under(&root)
+            .into_iter()
+            .map(|(pid, _)| pid)
+            .find(|p| *p != child_pid && *p != sub_child_pid && pid_alive(*p));
+        if succ_pid.is_none() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let succ_pid = succ_pid.expect("successor (self-update generation) never appeared");
+
+    // Sanity: the whole 3-level shape is up, and the premise holds — the
+    // grandchild's resolved exe is OUTSIDE every managed root, so the
+    // path whitelist alone can NEVER collect it; only the walk from the
+    // sweep's matched roots can.
+    assert!(
+        pid_alive(child_pid)
+            && pid_alive(succ_pid)
+            && pid_alive(sub_child_pid)
+            && pid_alive(grand_pid),
+        "fixture subtree not fully up"
+    );
+    assert_ne!(grand_pid, succ_pid);
+    assert_ne!(grand_pid, sub_child_pid);
+    assert!(
+        !pids_exe_under(&root)
+            .iter()
+            .any(|(pid, _)| *pid == grand_pid),
+        "premise broken: the grandchild's exe must be OUTSIDE the managed root (exec'd to a system binary)"
+    );
+
+    // ── Simulate the self-update original dying (the RC shape) ──
+    // (sync start_kill + try_wait: no await points while holding SERIAL)
+    child.start_kill().unwrap();
+    for _ in 0..60 {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    wait_gone(child_pid, "tracked original (self-update died)");
+
+    // Wait until the descendant walk from ALL tracked pids can no longer
+    // see ANY node of the subtree: the successor has been reparented
+    // (ppid is init/launchd or a subreaper — never a tracked anchor) and
+    // leads its OWN group (setsid), so the group kill cannot reach it
+    // either.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut invisible_to_walk = false;
+    while Instant::now() < deadline {
+        let tracked_pids: Vec<u32> = sh_core::process::tracked_children_snapshot()
+            .iter()
+            .map(|c| c.pid)
+            .collect();
+        let desc = sh_core::process::collect_descendants(&tracked_pids);
+        if !desc.contains(&succ_pid) && !desc.contains(&sub_child_pid) && !desc.contains(&grand_pid)
+        {
+            invisible_to_walk = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        invisible_to_walk,
+        "descendant walk still sees the subtree — test premise (reparented + setsid) not met"
+    );
+    assert!(
+        pid_alive(succ_pid) && pid_alive(sub_child_pid) && pid_alive(grand_pid),
+        "subtree must be alive pre-teardown"
+    );
+
+    // ── TEARDOWN — the function under test (normal-close / atexit path) ──
+    sh_core::process::teardown_process_tree();
+
+    // AC (issue #115): ZERO descended processes — children AND
+    // grandchildren of the self-update generation, including the
+    // grandchild whose exe the whitelist can never see.
+    wait_gone(succ_pid, "self-update successor (managed root)");
+    wait_gone(sub_child_pid, "successor's child");
+    wait_gone(
+        grand_pid,
+        "successor's grandchild (exe outside every managed root — walk-only coverage)",
+    );
 
     let _ = std::fs::remove_file(&fixture);
     let _ = std::fs::remove_dir_all(&dir);
