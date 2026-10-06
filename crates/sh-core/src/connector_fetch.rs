@@ -1527,7 +1527,10 @@ mod bundle_extract_tests {
     //     lib/libcrypto.so.3
 
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    // NOTE: no module-level `std::os::unix::fs::PermissionsExt` here — the
+    // one test that needs it (extract_tar_gz_preserves_modes_and_symlinks)
+    // is #[cfg(unix)] and imports it locally, so this module compiles for
+    // the x86_64-pc-windows-msvc target (Check (Windows) CI job).
 
     /// (path, content, mode, symlink-target) — a symlink entry has `None`
     /// content and `Some(target)`.
@@ -1643,8 +1646,13 @@ mod bundle_extract_tests {
         let _ = std::fs::remove_dir_all(&dest);
     }
 
+    // Mode/symlink preservation is Unix semantics (the Windows extractor
+    // refuses symlink entries by design), so this test is Unix-only.
+    #[cfg(unix)]
     #[test]
     fn extract_tar_gz_preserves_modes_and_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+
         let entries: Vec<Fixture> = vec![
             ("pentest-agent", b"fake elf", 0o755, None),
             ("lib/libpcap.so.0.8", b"real soname file", 0o644, None),
@@ -2494,6 +2502,10 @@ mod hostile_fixture_tests {
     /// though its own target is safe (a chain of in-bundle links could
     /// still route a write outside), while a path with only real dirs
     /// passes.
+    // Real-symlink fixture — Unix-only (the Windows target has no
+    // `std::os::unix::fs::symlink`; the guard's Windows behaviour is the
+    // cfg(not(unix)) refusal path exercised by the other tests' shape).
+    #[cfg(unix)]
     #[test]
     fn staged_symlink_ancestor_refused_by_guard() {
         let (dest, parent) = fresh_dest("guard-ancestor");

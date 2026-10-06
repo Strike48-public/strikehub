@@ -47,3 +47,19 @@ sentry = ["dep:sentry", "dep:sentry-anyhow"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Job Object teardown for issue #115 (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE).
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# Same crate for the KILL_ON_CLOSE end-to-end probe (tests/job_kill_on_close.rs
+# drives real CreateProcessW/ResumeThread around the production job API).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# harness = false: the KILL_ON_CLOSE probe doubles as its own helper binary
+# (it must re-execute itself as the job-owning process; the standard test
+# harness would intercept its CLI args).
+[[test]]
+name = "job_kill_on_close"
+harness = false

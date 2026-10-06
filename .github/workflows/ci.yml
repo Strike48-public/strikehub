@@ -56,6 +56,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --no-default-features --features desktop
 
+  check-windows:
+    name: Check (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc-check
+      # Compile proof for the cfg(windows) code (issue #115 Job Object
+      # teardown): the MSI installer job is gated to refs/heads/main, so
+      # without this, PRs would land with the Windows half of the app
+      # never compiled. `cargo check` does not link, so the stock runner
+      # toolchain is enough (no aws-lc-rs/MSVC-lib wall as on Linux hosts).
+      - name: cargo check (x86_64-pc-windows-msvc)
+        run: cargo check --all-targets -p sh-core --target x86_64-pc-windows-msvc
+      # Runtime proof: the cfg(windows) unit tests in sh_core::job drive the
+      # real CreateJobObjectW / SetInformationJobObject(KILL_ON_CLOSE) /
+      # AssignProcessToJobObject / TerminateJobObject paths (incl. error
+      # paths), and tests/job_kill_on_close.rs proves KILL_ON_JOB_CLOSE
+      # kills a whole assigned tree (cmd → ping) when the job owner exits.
+      - name: cargo test — Job Object runtime (x86_64-pc-windows-msvc)
+        run: cargo test -p sh-core --target x86_64-pc-windows-msvc job
+
   build-server:
     name: Build Server
     runs-on: ubuntu-latest
