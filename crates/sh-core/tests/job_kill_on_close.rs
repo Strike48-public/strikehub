@@ -24,6 +24,12 @@
 //!      runs the full `-n 120` ≈ 2 min and is uniquely identifiable) is
 //!      alive.
 //!
+//! Self-healing fixture: if the helper runs under a job-owning parent
+//! (e.g. a CI agent that jobs its whole tree), its children inherit THAT
+//! job and can never be assigned to the production job — pass 2 then
+//! creates the fixture with `CREATE_BREAKAWAY_FROM_JOB` so it starts in
+//! NO job and the production assignment is what puts it in one.
+//!
 //! No mocks: real `CreateProcessW`, real production job API, real OS kill.
 //! Runs in the CI `Check (Windows)` job; prints a skip note on other
 //! platforms (exit 0).
@@ -45,74 +51,109 @@ fn main() {
     driver();
 }
 
+/// Best-effort probe: is the CURRENT process already a member of some Job
+/// Object? windows-sys 0.60 does not export the `JOB_*` access-right
+/// constants, so the raw values are used: 0 (no access requested) and
+/// 0x0002 (JOB_QUERY_LIMITS). Used for reporting only — the two-pass
+/// spawn does not depend on it.
+#[cfg(windows)]
+fn current_process_in_job() -> bool {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
+    for access in [0u32, 0x0002] {
+        // SAFETY: a NULL name opens the CURRENT process's job (documented);
+        // the handle is closed on both paths.
+        let h = unsafe { OpenJobObjectW(access, 0, std::ptr::null()) };
+        if h != HANDLE::default() {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(windows)]
 fn helper() -> ! {
     use std::io::Write;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CreateProcessW, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW,
-        TerminateProcess,
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_SUSPENDED, CreateProcessW, PROCESS_INFORMATION,
+        ResumeThread, STARTUPINFOW, TerminateProcess,
     };
 
     let mut cmd_line: Vec<u16> = format!("cmd /c ping -n 120 {MARKER}")
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: `cmd_line` is NUL-terminated; `si`/`pi` are valid and
-    // zeroed; `CREATE_SUSPENDED` keeps the primary thread suspended so
-    // the assignment happens before the child can spawn children of its
-    // own (the `AssignProcessToJobObject` precondition).
-    let ok = unsafe {
-        CreateProcessW(
-            std::ptr::null(),
-            cmd_line.as_mut_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            CREATE_SUSPENDED,
-            std::ptr::null(),
-            std::ptr::null(),
-            &si,
-            &mut pi,
-        )
-    };
-    if ok == 0 {
-        eprintln!(
-            "job-koc-helper: CreateProcessW failed: {}",
-            std::io::Error::last_os_error()
-        );
-        std::process::exit(2);
-    }
-    // The REAL production API: lazily creates the shared StrikeHub job
-    // object (KILL_ON_CLOSE armed) and assigns the child to it.
-    let assigned = sh_core::job::assign_pid_to_job(pi.dwProcessId);
-    if !assigned {
-        // Deterministic fail without leaking: do NOT resume (so `cmd`
-        // never spawns `ping`), kill the suspended process, report.
+    let mut last_err: Option<std::io::Error> = None;
+    // Pass 1: plain (hosts where the helper is in no job).
+    // Pass 2: break away from a job-owning parent (CI agents) so the
+    // fixture starts in NO job and can be assigned to the production job.
+    for (pass, flags) in [
+        (1, CREATE_SUSPENDED),
+        (2, CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB),
+    ] {
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `cmd_line` is NUL-terminated; `si`/`pi` are valid and
+        // zeroed; `CREATE_SUSPENDED` keeps the primary thread suspended so
+        // the assignment happens before the child can spawn children of its
+        // own (the `AssignProcessToJobObject` precondition).
+        let ok = unsafe {
+            CreateProcessW(
+                std::ptr::null(),
+                cmd_line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                flags,
+                std::ptr::null(),
+                std::ptr::null(),
+                &si,
+                &mut pi,
+            )
+        };
+        if ok == 0 {
+            eprintln!(
+                "job-koc-helper: CreateProcessW (pass {pass}) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            std::process::exit(2);
+        }
+        // The REAL production API: lazily creates the shared StrikeHub job
+        // object (KILL_ON_CLOSE armed) and assigns the child to it.
+        let assigned = sh_core::job::assign_pid_to_job(pi.dwProcessId);
+        if assigned {
+            println!("ASSIGN=true PID={} PASS={}", pi.dwProcessId, pass);
+            let _ = std::io::stdout().flush();
+            // Resume: `cmd` runs `ping` (the grandchild joins the job by
+            // construction). Then we exit WITHOUT terminating or explicitly
+            // closing the job — the OS closes the handle at process exit
+            // and KILL_ON_CLOSE must kill `cmd` AND `ping`.
+            unsafe {
+                ResumeThread(pi.hThread);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+            }
+            std::process::exit(0);
+        }
+        // Not assignable: kill the SUSPENDED process (do NOT resume — so
+        // `cmd` never spawns `ping`), record the error, try the next pass.
+        last_err = Some(std::io::Error::last_os_error());
         unsafe {
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
-        println!("ASSIGN=false PID={}", pi.dwProcessId);
-        let _ = std::io::stdout().flush();
-        std::process::exit(3);
     }
-    println!("ASSIGN=true PID={}", pi.dwProcessId);
+    println!(
+        "ASSIGN=false IN_PARENT_JOB={} ERR={:?}",
+        current_process_in_job(),
+        last_err
+    );
     let _ = std::io::stdout().flush();
-    // Resume: `cmd` runs `ping` (the grandchild joins the job by
-    // construction). Then we exit WITHOUT terminating or explicitly
-    // closing the job — the OS closes the handle at process exit and
-    // KILL_ON_CLOSE must kill `cmd` AND `ping`.
-    unsafe {
-        ResumeThread(pi.hThread);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    }
-    std::process::exit(0);
+    std::process::exit(3);
 }
 
 /// Pids of every process whose command line carries the fixture marker;
@@ -155,7 +196,7 @@ fn driver() {
     let mut pid: Option<u32> = None;
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("ASSIGN=true PID=") {
-            pid = rest.trim().parse().ok();
+            pid = rest.split_whitespace().next().and_then(|p| p.parse().ok());
         }
     }
     let Some(pid) = pid else {

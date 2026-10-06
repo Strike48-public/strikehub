@@ -184,17 +184,129 @@ mod tests {
     // / `SetInformationJobObject(KILL_ON_CLOSE)` / `AssignProcessToJobObject`
     // / `TerminateJobObject`), with real child processes.
     use super::*;
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
+    use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+
+    /// Best-effort probe: is the CURRENT process already a member of some
+    /// Job Object (e.g. under a CI agent that jobs its whole tree)? A
+    /// member's children inherit that job and cannot be assigned to ours,
+    /// so the fixture then falls back to a `CREATE_BREAKAWAY_FROM_JOB`
+    /// child (created in NO job). windows-sys 0.60 does not export the
+    /// `JOB_*` access-right constants, so the raw values are used:
+    /// 0 (no access requested — the most permissive open) and
+    /// 0x0002 (JOB_QUERY_LIMITS). A denial from a restrictive parent-job
+    /// DACL only weakens the PROBE — the two-pass spawn below is
+    /// self-healing and does not depend on this.
+    fn current_process_in_job() -> bool {
+        for access in [0u32, 0x0002] {
+            // SAFETY: a NULL name opens the CURRENT process's job
+            // (documented); the handle is closed on both paths.
+            let h = unsafe { OpenJobObjectW(access, 0, std::ptr::null()) };
+            if h != HANDLE::default() {
+                unsafe { CloseHandle(h) };
+                return true;
+            }
+        }
+        false
+    }
 
     /// Spawn a long-lived leaf process (no children of its own, so the
     /// assignment is deterministic — `AssignProcessToJobObject` refuses a
     /// process that has already spawned children).
-    fn spawn_long_lived_leaf() -> std::process::Child {
-        std::process::Command::new("ping")
-            .args(["-n", "120", "127.0.0.1"])
+    fn spawn_ping(flags: u32) -> std::process::Child {
+        let mut cmd = std::process::Command::new("ping");
+        cmd.args(["-n", "120", "127.0.0.1"])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn ping")
+            .stderr(std::process::Stdio::null());
+        if flags != 0 {
+            cmd.creation_flags(flags);
+        }
+        cmd.spawn().expect("spawn ping")
+    }
+
+    /// Two-pass, self-healing fixture: spawn + assign through the
+    /// PRODUCTION API. Pass 1 is the plain spawn (hosts where the test
+    /// process is in no job). Pass 2 breaks away from a job-owning
+    /// parent (CI agents): the child starts in NO job, so the production
+    /// assignment is what puts it in the StrikeHub job.
+    fn spawn_and_assign() -> Option<std::process::Child> {
+        for flags in [0u32, CREATE_BREAKAWAY_FROM_JOB] {
+            let mut child = spawn_ping(flags);
+            if assign_pid_to_job(child.id()) {
+                return Some(child);
+            }
+            let _ = child.kill(); // never leave an unassigned ping running
+            let _ = child.wait();
+        }
+        None
+    }
+
+    /// Step-by-step isolation of a failed `assign_pid_to_job`: re-runs the
+    /// individual Win32 calls directly and reports where the chain breaks
+    /// (diagnostic only — the test still fails on a production-API failure).
+    fn diagnose_assignment_failure() -> String {
+        let in_parent_job = current_process_in_job();
+        let name: Vec<u16> = "StrikeHubTestDiag"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut child = spawn_ping(CREATE_BREAKAWAY_FROM_JOB);
+        let pid = child.id();
+        // SAFETY: `name` is NUL-terminated; diagnostic-only job, closed
+        // below on every path (no live member is left in it — the child
+        // is killed before return).
+        let h = unsafe { CreateJobObjectW(std::ptr::null(), name.as_ptr()) };
+        let mut detail = format!(
+            "in_parent_job={} CreateJobObjectW={}",
+            in_parent_job,
+            h != HANDLE::default()
+        );
+        if h != HANDLE::default() {
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `h` valid; `limits` outlives the call.
+            let set_ok = unsafe {
+                SetInformationJobObject(
+                    h,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            let set_err = if set_ok == 0 {
+                std::io::Error::last_os_error().to_string()
+            } else {
+                "-".into()
+            };
+            detail.push_str(&format!(" SetInfo(KILL_ON_CLOSE)={set_ok} err={set_err}"));
+            // SAFETY: `pid` is live (spawned above); handle closed below.
+            let hp = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION, 0, pid) };
+            let open_err = if hp == HANDLE::default() {
+                std::io::Error::last_os_error().to_string()
+            } else {
+                "-".into()
+            };
+            detail.push_str(&format!(
+                " OpenProcess={} err={open_err}",
+                hp != HANDLE::default()
+            ));
+            if hp != HANDLE::default() {
+                // SAFETY: both handles valid.
+                let ok = unsafe { AssignProcessToJobObject(h, hp) };
+                let assign_err = if ok == 0 {
+                    std::io::Error::last_os_error().to_string()
+                } else {
+                    "-".into()
+                };
+                detail.push_str(&format!(" Assign={ok} err={assign_err}"));
+                unsafe { CloseHandle(hp) };
+            }
+            unsafe { CloseHandle(h) };
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        detail
     }
 
     fn wait_for_death(pid: u32, secs: u64) -> bool {
@@ -212,19 +324,21 @@ mod tests {
     /// `assign_pid_to_job` + `terminate_job` must kill the assigned process.
     #[test]
     fn terminate_job_kills_assigned_process() {
-        let mut child = spawn_long_lived_leaf();
+        let Some(mut child) = spawn_and_assign() else {
+            panic!(
+                "assignment failed in both passes (plain + breakaway) — job creation \
+                 or OpenProcess/Assign broke (last_os_error={}): {}",
+                std::io::Error::last_os_error(),
+                diagnose_assignment_failure()
+            );
+        };
         let pid = child.id();
-        // Sanity: the child is actually alive before we touch the job.
-        assert!(pid_alive(pid), "child died before assignment");
-        assert!(
-            assign_pid_to_job(pid),
-            "assignment failed — job creation or OpenProcess/Assign broke"
-        );
         terminate_job();
         assert!(
             wait_for_death(pid, 5),
             "TerminateJobObject did not kill the assigned process within 5 s"
         );
+        let _ = child.kill();
         let _ = child.wait();
     }
 
@@ -252,13 +366,21 @@ mod tests {
     #[test]
     fn terminate_job_is_idempotent_and_safe() {
         terminate_job();
-        let mut child = spawn_long_lived_leaf();
+        let mut child = match spawn_and_assign() {
+            Some(c) => c,
+            None => {
+                // No member could be created in this environment — the
+                // safety property still holds: repeated calls on the
+                // (empty-or-foreign) job must not panic.
+                terminate_job();
+                return;
+            }
+        };
         let pid = child.id();
-        if assign_pid_to_job(pid) {
-            terminate_job();
-            assert!(wait_for_death(pid, 5), "child survived terminate_job");
-        }
+        terminate_job();
+        assert!(wait_for_death(pid, 5), "child survived terminate_job");
         terminate_job(); // no-op: nothing left in the job (or empty job)
+        let _ = child.kill();
         let _ = child.wait();
     }
 }
