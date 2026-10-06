@@ -36,7 +36,31 @@
 //!    parent's group unless they detach via `setsid`,
 //! 3. as a best effort for descendants that DID detach, walks the
 //!    descendant tree from each tracked pid before killing
-//!    ([`collect_descendants`] — `/proc` on Linux, `ps` on macOS).
+//!    ([`collect_descendants`] — `/proc` on Linux, `ps` on macOS),
+//! 4. as a fallback for processes that are neither tracked nor reachable
+//!    from a tracked pid — a self-update-respawned connector running from
+//!    our managed roots (`~/.strike48/strikehub/bin/`, the app bundle's
+//!    `MacOS` dir on macOS) whose tracked ancestor already died, so the
+//!    group is empty and the walk has no live anchor — a bounded
+//!    MANAGED-ROOT SWEEP: every process whose RESOLVED executable path
+//!    lives under one of those roots is collected the same way
+//!    ([`sweep_managed_roots`]). The path-prefix whitelist is the safety
+//!    property: nothing else (argv, env, names) is ever matched.
+//!
+//! # Exit-route coverage (issue #115 RC remainder)
+//!
+//! dioxus 0.6.3's `launch()` blocks in tao's `EventLoop::run`, and tao
+//! 0.30.8's `run` is DIVERGING on every platform: when the OS run loop
+//! ends (last window closed, or on macOS the application-terminate event
+//! — AppleEvent quit via `osascript`, Cmd-Q, dock Quit — through
+//! `applicationShouldTerminate`), tao calls `std::process::exit` directly.
+//! That skips the code after `launch()` in `sh-ui/src/main.rs` AND every
+//! Rust Drop impl (`ProcessTreeGuard`, `kill_on_drop`) — which is exactly
+//! how the RC verification REPRO orphaned a self-updated `pentest-agent`
+//! on a clean `osascript quit`. So teardown is additionally delivered by a
+//! C-level `atexit` hook ([`install_exit_handler`], unix) — `process::exit`
+//! runs `atexit` handlers — idempotent with the explicit call and with the
+//! signal-handler path (dead pids/groups are ESRCH no-ops).
 //!
 //! On Windows the same guarantee comes from one shared Job Object with
 //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (see [`crate::job`]): every child
@@ -44,6 +68,7 @@
 //! kills the job when the hub's handle closes on any exit path.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Put the calling process in a new process group of which it is the leader.
@@ -324,6 +349,246 @@ fn ppid_children_table() -> Option<HashMap<u32, Vec<u32>>> {
     None
 }
 
+// ── Managed-root fallback sweep (issue #115 RC remainder) ────────────────
+//
+// The RC verification (issue #115) caught a self-update-respawned
+// `pentest-agent` running from `~/.strike48/strikehub/bin/` survive a
+// clean quit: when the tracked original dies during the ~30 s
+// self-update and the successor detaches (setsid) and is reparented to
+// init/launchd, neither the group kill (the tracked group is empty) nor
+// the descendant walk (anchor pids dead, successor's ppid no longer
+// tracked) can see it. The sweep below closes that hole with a
+// PATH-PREFIX WHITELIST: it only ever matches processes whose RESOLVED
+// executable path lives under a directory StrikeHub itself manages.
+
+/// Bound on how many system pids the sweep inspects (normal desktops are
+/// far below this; the bound keeps a pathological system from stalling
+/// teardown).
+const MAX_SWEEP_PIDS: usize = 4096;
+
+/// Bound on how many processes the sweep can return.
+const MAX_SWEEP_TARGETS: usize = 64;
+
+/// Extra roots for the fallback sweep, registered by tests.
+/// Production startup registers none: [`managed_roots`] already covers
+/// every location StrikeHub manages executables in.
+#[cfg(unix)]
+static EXTRA_MANAGED_ROOTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Register an additional root for the fallback sweep.
+///
+/// Intended for tests: the production sweep's root is the USER's
+/// `~/.strike48/strikehub/bin` (via [`managed_roots`]), which a test must
+/// not treat as disposable. The path-prefix whitelist in [`is_managed_exe`]
+/// is what keeps pointing the sweep at a test directory safe.
+#[cfg(unix)]
+pub fn add_managed_root(p: PathBuf) {
+    if let Ok(mut v) = EXTRA_MANAGED_ROOTS.lock()
+        && !v.contains(&p)
+    {
+        v.push(p);
+    }
+}
+
+/// The directory trees StrikeHub owns executables in:
+///
+/// * `~/.strike48/strikehub/bin/` — the self-update/fetch cache; after the
+///   ~30 s self-update the LIVE connector generation runs from here (RC
+///   evidence, issue #115: `pentest-agent` spawned from
+///   `~/.strike48/strikehub/bin/pentest-agent`),
+/// * (macOS) the app bundle's `Contents/MacOS/` directory when running
+///   from a bundle — bundled connector siblings live there
+///   (`connector_seed::bundled_binary_path`).
+///
+/// Deliberately NOT included: the running executable's directory on
+/// non-bundle layouts (a dev `target/debug` tree is not "managed" — the
+/// prefix whitelist must stay narrow), and anything merely on a PATH.
+#[cfg(unix)]
+#[must_use]
+pub fn managed_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = vec![crate::connector_fetch::bin_cache_dir()];
+    if let Some(exe) = std::env::current_exe().ok().as_deref()
+        && let Some(macos_dir) = exe.parent()
+    {
+        // macOS bundle layout: <...>/StrikeHub.app/Contents/MacOS/<exe>
+        let is_bundle_macos = macos_dir.file_name().is_some_and(|n| n == "MacOS")
+            && macos_dir
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "Contents");
+        if is_bundle_macos {
+            roots.push(macos_dir.to_path_buf());
+        }
+    }
+    if let Ok(extra) = EXTRA_MANAGED_ROOTS.lock() {
+        roots.extend(extra.iter().cloned());
+    }
+    roots.dedup();
+    roots
+}
+
+/// Strict component-wise prefix match: `path` must live UNDER one of
+/// `roots`. Lookalikes (`…/bin2/…`, `…/bin-evil/…`, a different user's
+/// home) are rejected because `Path::starts_with` compares whole path
+/// components. Symlink escapes are rejected by construction: callers pass
+/// the RESOLVED exe path (see [`process_exe_path`]), so a process whose
+/// real executable lives outside `roots` never matches, however it was
+/// launched.
+#[cfg(unix)]
+#[must_use]
+pub fn is_managed_exe(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|r| path.starts_with(r))
+}
+
+/// The resolved executable path of `pid` — symlinks resolved to the actual
+/// file the kernel exec'd:
+///
+/// * Linux — `readlink /proc/<pid>/exe` (the kernel gives the resolved
+///   target; a script reports its interpreter),
+/// * macOS — `proc_pidpath(3)`.
+///
+/// `None` when the process vanished mid-scan or the OS cannot report the
+/// path (zombies, kernel threads).
+#[cfg(unix)]
+fn process_exe_path(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: proc_pidpath writes at most `buffersize` bytes into the
+        // caller buffer and returns the required length; `pid` is a live
+        // pid from our own enumeration moments earlier (a dead pid just
+        // yields 0/ENOENT and is skipped).
+        let n = unsafe {
+            libc::proc_pidpath(
+                pid as libc::c_int,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+            )
+        };
+        if n <= 0 {
+            return None;
+        }
+        let len = (n as usize).min(buf.len());
+        buf.truncate(len);
+        let s = String::from_utf8_lossy(&buf);
+        Some(PathBuf::from(s.as_ref()))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Every pid on the system, bounded to the first [`MAX_SWEEP_PIDS`] (Linux:
+/// `/proc` readdir order; macOS: `kern.proc.pid` order).
+#[cfg(unix)]
+fn all_pids_bounded() -> Vec<u32> {
+    let mut pids: Vec<u32> = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for e in entries.flatten() {
+                if let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
+                    pids.push(pid);
+                    if pids.len() >= MAX_SWEEP_PIDS {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // kern.proc.pid returns a NUL-separated list of pids (no KINFO
+        // structs) — the same enumeration `ps` uses.
+        let name = b"kern.proc.pid\0";
+        let mut size: usize = 0;
+        // SAFETY: sysctlbyname with a valid NUL-terminated name; the size
+        // probe (oldp = null) only reads the required length, and the
+        // second call fills a buffer of exactly that size.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr() as *const libc::c_char,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && size > 0 {
+            let mut buf = vec![0i8; size];
+            let rc = unsafe {
+                libc::sysctlbyname(
+                    name.as_ptr() as *const libc::c_char,
+                    buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    &mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if rc == 0 {
+                for chunk in buf[..size].chunks_exact(4) {
+                    let pid = i32::from_ne_bytes([
+                        chunk[0] as u8,
+                        chunk[1] as u8,
+                        chunk[2] as u8,
+                        chunk[3] as u8,
+                    ]);
+                    if pid > 0 {
+                        pids.push(pid as u32);
+                        if pids.len() >= MAX_SWEEP_PIDS {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pids
+}
+
+/// The fallback sweep (issue #115 RC remainder): every process whose
+/// RESOLVED executable path lives under one of `roots`.
+///
+/// Catches a self-update-respawned connector that
+///
+/// * was not spawned through [`spawn_tracked`] (the successor is created
+///   by the connector's own self-update code, not by StrikeHub), and/or
+/// * has been reparented to init/launchd (ppid = 1 or a subreaper) after
+///   its tracked ancestor died — so the group kill (empty group) and the
+///   descendant walk (no live tracked anchor) both miss it.
+///
+/// Safety: ONLY the path-prefix whitelist above matches — resolved paths
+/// under `roots`, self excluded, enumeration and result bounded. Nothing
+/// else (argv, env, process names) is ever considered. NOT for use in
+/// signal handlers (it reads /proc; on macOS it calls `sysctlbyname`).
+#[cfg(unix)]
+#[must_use]
+pub fn sweep_managed_roots(roots: &[PathBuf]) -> Vec<u32> {
+    let me = std::process::id();
+    let mut out: Vec<u32> = Vec::new();
+    for pid in all_pids_bounded() {
+        if pid == me {
+            continue;
+        }
+        let Some(exe) = process_exe_path(pid) else {
+            continue;
+        };
+        if is_managed_exe(&exe, roots) {
+            out.push(pid);
+            if out.len() >= MAX_SWEEP_TARGETS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 // ── Teardown ─────────────────────────────────────────────────────────
 
 #[cfg(unix)]
@@ -358,14 +623,12 @@ fn pid_alive(_pid: u32) -> bool {
 /// 5. Escalate survivors to `SIGKILL` (Windows: terminate again).
 ///
 /// Synchronous and idempotent — safe to call from `main` after the window
-/// closes, from the [`ProcessTreeGuard`] exit fallback, or both. NOT
-/// signal-handler-safe (it sleeps, reads /proc, and on macOS spawns
-/// `ps`): the signal handler uses [`signal_kill_tracked_groups`] instead.
+/// closes, from the [`ProcessTreeGuard`] exit fallback, from the atexit
+/// hook, or all of the above. NOT signal-handler-safe (it sleeps, reads
+/// /proc, and on macOS calls `sysctlbyname`): the signal handler uses
+/// [`signal_kill_tracked_groups`] instead.
 pub fn teardown_process_tree() {
     let tracked = tracked_children_snapshot();
-    if tracked.is_empty() {
-        return;
-    }
 
     let pids: Vec<u32> = tracked.iter().map(|c| c.pid).collect();
     let mut targets: Vec<u32> = pids.clone();
@@ -373,6 +636,25 @@ pub fn teardown_process_tree() {
         if !targets.contains(&d) {
             targets.push(d);
         }
+    }
+    // Fallback sweep (issue #115 RC remainder): self-update-respawned
+    // processes run from our managed roots and may be BOTH untracked
+    // (spawned by the connector's own self-update code, not by StrikeHub)
+    // and reparented to init/launchd (tracked ancestor dead) — the group
+    // kill and the descendant walk both miss them. Runs even when the
+    // registry is empty: that is precisely the case where every tracked
+    // anchor is gone and only the path whitelist can still find them.
+    #[cfg(unix)]
+    {
+        for s in sweep_managed_roots(&managed_roots()) {
+            if !targets.contains(&s) {
+                targets.push(s);
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        return;
     }
 
     #[cfg(unix)]
@@ -476,6 +758,12 @@ pub fn signal_kill_tracked_groups(sig: libc::c_int) {
 /// scope — the exit fallback for any path that skips the explicit
 /// [`teardown_process_tree`] call in `main` (panic, early return).
 /// Idempotent with the explicit call (dead groups/pids are ESRCH no-ops).
+///
+/// NOTE: a Drop impl never runs for a `std::process::exit` death — and
+/// that is exactly how tao's `EventLoop::run` ends the process on every
+/// GUI close/quit route (see the module docs). The atexit hook
+/// ([`install_exit_handler`]) covers that route; this guard covers panics
+/// and early returns.
 #[must_use]
 #[derive(Debug, Default)]
 pub struct ProcessTreeGuard;
@@ -490,6 +778,49 @@ impl Drop for ProcessTreeGuard {
     fn drop(&mut self) {
         teardown_process_tree();
     }
+}
+
+// ── atexit hook (issue #115 RC remainder — the quit-event route) ─────────
+//
+// tao 0.30.8's `EventLoop::run` — which dioxus 0.6.3's `launch()` blocks
+// in — is DIVERGING on every platform: when the OS run loop ends (last
+// window closed, or on macOS the application-terminate event — AppleEvent
+// quit via `osascript`, Cmd-Q, dock Quit — routed through
+// `applicationShouldTerminate`), tao calls `std::process::exit` DIRECTLY.
+// That runs C-level `atexit` handlers but NONE of the Rust Drop impls
+// (`ProcessTreeGuard`, `kill_on_drop`) and none of the code after
+// `launch()` in `sh-ui/src/main.rs`. The hook below is therefore what
+// actually delivers `teardown_process_tree()` on the quit-event route —
+// the exact route the RC verification REPRO orphaned a self-updated
+// `pentest-agent` on. Idempotent with the explicit call and the
+// signal-handler path (dead pids/groups are ESRCH no-ops).
+
+/// The exact teardown entry the atexit hook runs. Public so tests can
+/// invoke the quit-route entry point directly without waiting for
+/// `process::exit`. Declared `extern "C"` because it is registered with
+/// the C `atexit` mechanism (its Rust-calling wrapper is
+/// [`teardown_process_tree`]).
+#[cfg(unix)]
+pub extern "C" fn atexit_teardown() {
+    teardown_process_tree();
+}
+
+/// Install the C-level `atexit` hook that runs [`atexit_teardown`] when
+/// the process exits via `std::process::exit` — the exit used by tao's
+/// `EventLoop::run` on EVERY GUI exit route (window close, macOS
+/// quit-event). Call once at startup, before the first child is spawned.
+/// Idempotent.
+#[cfg(unix)]
+pub fn install_exit_handler() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // SAFETY: atexit_teardown is a valid `extern "C" fn` pointer;
+        // atexit only stores it. The handler is re-entrancy-safe (teardown
+        // is idempotent) and runs no async code.
+        unsafe {
+            let _ = libc::atexit(atexit_teardown);
+        }
+    });
 }
 
 #[cfg(all(unix, test))]
@@ -591,5 +922,126 @@ mod tests {
         );
         let _ = root.kill();
         let _ = root.wait();
+    }
+
+    /// The sweep matcher must accept ONLY paths under the whitelisted
+    /// roots, component-wise. Adversarial lookalikes — a suffixed root
+    /// directory (`bin2`, `bin-evil`), a different user's home, an
+    /// unrelated tree — are all rejected. (Symlink escapes are rejected
+    /// by construction: the matcher is only ever fed RESOLVED exe paths,
+    /// and the integration test `sweep_rejects_symlink_escape_outside_roots`
+    /// proves a symlinked launch from outside the roots survives.)
+    #[test]
+    fn managed_root_matcher_accepts_only_whitelisted_prefixes() {
+        let root = PathBuf::from("/home/u/.strike48/strikehub/bin");
+        let roots = vec![root.clone()];
+
+        // In-whitelist: direct child and nested paths.
+        assert!(is_managed_exe(&root.join("pentest-agent"), &roots));
+        assert!(is_managed_exe(&root.join("ks-connector"), &roots));
+        assert!(is_managed_exe(
+            &root.join("sub").join("ks-connector"),
+            &roots
+        ));
+
+        // Adversarial lookalikes with a suffix on the root component.
+        assert!(!is_managed_exe(
+            Path::new("/home/u/.strike48/strikehub/bin2/pentest-agent"),
+            &roots
+        ));
+        assert!(!is_managed_exe(
+            Path::new("/home/u/.strike48/strikehub/bin-evil/pentest-agent"),
+            &roots
+        ));
+        assert!(!is_managed_exe(
+            Path::new("/home/u/.strike48/strikehub/binz/x"),
+            &roots
+        ));
+
+        // Same relative path under a DIFFERENT user's home.
+        assert!(!is_managed_exe(
+            Path::new("/home/u2/.strike48/strikehub/bin/pentest-agent"),
+            &roots
+        ));
+
+        // Unrelated trees.
+        assert!(!is_managed_exe(Path::new("/usr/bin/pentest-agent"), &roots));
+        assert!(!is_managed_exe(
+            Path::new("/opt/strikehub/pentest-agent"),
+            &roots
+        ));
+
+        // A second root is additive, not a prefix shortcut.
+        let roots2 = vec![
+            root,
+            PathBuf::from("/Applications/StrikeHub.app/Contents/MacOS"),
+        ];
+        assert!(is_managed_exe(
+            Path::new("/Applications/StrikeHub.app/Contents/MacOS/ks-connector"),
+            &roots2
+        ));
+        assert!(!is_managed_exe(
+            Path::new("/Applications/StrikeHub.app/Contents/MacOS2/x"),
+            &roots2
+        ));
+    }
+
+    /// The sweep's default root must include the self-update cache — the
+    /// directory the RC verification showed the orphaned agent running
+    /// from (`~/.strike48/strikehub/bin/pentest-agent`).
+    #[test]
+    fn managed_roots_include_the_self_update_cache() {
+        let roots = managed_roots();
+        assert!(
+            roots
+                .iter()
+                .any(|r| r == &crate::connector_fetch::bin_cache_dir()),
+            "managed roots {roots:?} must include the self-update cache"
+        );
+    }
+
+    /// macOS leg of the sweep (kern.proc.pid enumeration + proc_pidpath
+    /// resolution): this process must enumerate itself and resolve its
+    /// own executable path to the canonical current_exe. Runtime-verified
+    /// on the mac lab box (RC QA); here it is a compile-time proof that
+    /// the macOS code paths build.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pid_enumeration_and_exe_resolution_see_self() {
+        let me = std::process::id();
+        assert!(
+            all_pids_bounded().contains(&me),
+            "kern.proc.pid enumeration must see this process"
+        );
+        let exe = process_exe_path(me).expect("proc_pidpath must resolve this process");
+        let canonical = std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .unwrap();
+        assert_eq!(
+            exe, canonical,
+            "proc_pidpath({me}) = {exe:?}, expected {canonical:?}"
+        );
+    }
+
+    /// The atexit entry (the EXACT function the C-level atexit hook runs
+    /// when tao's `process::exit` ends the process on the quit-event
+    /// route) must be callable and must be a no-op — not an error — when
+    /// there is nothing tracked and nothing under the managed roots.
+    ///
+    /// Self-guarded: if this lib test binary ever gains a parallel test
+    /// that owns tracked processes (or a live agent runs from the
+    /// managed root on a dev box), the call would CORRECTLY kill them —
+    /// so skip in that case instead of racing.
+    #[test]
+    fn atexit_teardown_is_a_safe_noop_when_idle() {
+        if !tracked_children_snapshot().is_empty()
+            || !sweep_managed_roots(&managed_roots()).is_empty()
+        {
+            eprintln!("atexit no-op test skipped: registry or managed root not idle");
+            return;
+        }
+        atexit_teardown();
+        // Reaching here without a panic is the assertion.
     }
 }
