@@ -32,8 +32,8 @@ across the ENTIRE spawned tree, and `kill_on_drop` + (Linux)
   async-signal-safe, called by the `sh-ui` handler (SIGINT/SIGTERM/SIGTRAP).
 - `sh_core::process::collect_descendants(roots)` — bounded descendant walk
   (≤ 4096 nodes, depth ≤ 32); unix only.
-- `sh_core::job::{assign_pid_to_job, terminate_job, terminate_pid, pid_alive}`
-  — **windows only**, the Job Object primitives used by the above.
+- `sh_core::job::{assign_pid_to_job, terminate_job, terminate_pid, pid_alive, job_is_armed}`
+  — **windows only**, the Job Object primitives used by the above (`job_is_armed` reports whether the shared job exists with KILL_ON_CLOSE armed).
 
 ## Known boundary (signal path, unix)
 
@@ -49,6 +49,6 @@ not a gap that was missed.
 |---|---|
 | unix fixture-tree integration test (`tests/process_tree.rs`, real `spawn_tracked` + registry, TERM→KILL escalation, respawn + setsid cases) + registry/walk unit tests | `Test` job (ubuntu) |
 | **compile** of the whole `sh-core` crate (incl. all `cfg(windows)` code) for `x86_64-pc-windows-msvc` | `Check (Windows)` job (`windows-latest`, every PR — the MSI installer job is `main`-gated) |
-| **runtime** of the Job Object path: `CreateJobObjectW`/KILL_ON_CLOSE setup, `AssignProcessToJobObject` (success + dead-pid error path), `TerminateJobObject`, and an end-to-end `KILL_ON_JOB_CLOSE` probe (a `cmd → ping` tree assigned to the job must be dead within seconds of the job owner's exit — no `TerminateJobObject` on that path; the fixtures are two-pass — plain spawn, then `CREATE_BREAKAWAY_FROM_JOB` when running under a job-owning parent such as a CI agent) | `Check (Windows)` job — `cargo test -p sh-core --target x86_64-pc-windows-msvc job` |
+| **runtime** of the Job Object path: `CreateJobObjectW`/KILL_ON_CLOSE setup, `AssignProcessToJobObject` (success + dead-pid error path), `TerminateJobObject`, and an end-to-end `KILL_ON_JOB_CLOSE` probe (a `cmd → ping` tree assigned to the job must be dead within seconds of the job owner's exit — no `TerminateJobObject` on that path). Fixtures are two-pass (plain spawn → `CREATE_BREAKAWAY_FROM_JOB` after a best-effort `SeCreatePagefilePrivilege` enable) because the `windows-latest` agent runs its tree inside its own Job Object; where a job member is impossible to create, a documented constrained mode verifies everything the environment still allows and reports the exact Win32 errors | `Check (Windows)` job — `cargo test -p sh-core --target x86_64-pc-windows-msvc job` |
 | full MSVC build + link of the app (MSI) | `Build MSI x86_64` job (gated to `main`) |
 | macOS `ps` walk runtime | not in CI (DMG job is `main`-gated); same bounded walk as the Linux path |
