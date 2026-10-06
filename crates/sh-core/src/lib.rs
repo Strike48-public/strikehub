@@ -37,7 +37,7 @@ pub use error::HubError;
 pub use ipc::{IpcAddr, IpcStream};
 pub use ipc_runner::IpcConnectorRunner;
 pub use matrix_ws::MatrixWsClient;
-pub use oauth::{js_string_escape, start_oauth_flow, start_oauth_flow_with};
+pub use oauth::{SignInCancelled, js_string_escape, start_oauth_flow, start_oauth_flow_with};
 pub use ott::{
     PreApprovedOtt, create_pre_approved_token, has_saved_credentials, sdk_connector_type,
 };

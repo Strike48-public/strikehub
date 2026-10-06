@@ -13,6 +13,14 @@ use super::logo::Strike48Logo;
 pub fn LoginOverlay(
     on_sign_in: EventHandler<String>,
     #[props(default = false)] signing_in: bool,
+    /// Login URL of the in-flight OAuth flow (when `signing_in`), for the
+    /// "Open sign-in page again" / "Copy sign-in link" waiting-state actions.
+    /// `None` while the flow is still computing it.
+    #[props(default)]
+    sign_in_url: Option<String>,
+    /// Cancel the in-flight OAuth flow (waiting state, #379).
+    #[props(default)]
+    on_cancel: EventHandler<()>,
     /// Previously saved custom URL (from config). Pre-fills the URL input
     /// when the user clicks "Custom URL sign in...". The link is always
     /// shown first — the input only appears after clicking.
@@ -44,6 +52,14 @@ pub fn LoginOverlay(
     let url_val = custom_url.read().clone();
     let custom_visible = *show_custom_url.read();
 
+    // Waiting-state actions for the in-flight flow (#379): the login URL as
+    // two owned copies, one per button closure (rsx event closures must be
+    // 'static, so each closure takes ownership of its copy).
+    let (waiting_url_open, waiting_url_copy) = match sign_in_url {
+        Some(url) => (Some(url.clone()), Some(url)),
+        None => (None, None),
+    };
+
     rsx! {
         div { class: "login-overlay",
             Strike48Logo { width: "180px" }
@@ -71,6 +87,63 @@ pub fn LoginOverlay(
 
             p { class: "login-clear-cache-link",
                 "Sign in to connect StrikeHub to Strike48 Studio — a free Strike48 account is required."
+            }
+
+            // Waiting state for an in-flight OAuth flow: the browser is
+            // doing the work, so make the app side actionable instead of a
+            // dead disabled button — re-open the login page, copy the link,
+            // or cancel (Strike48/project-management#379).
+            if signing_in {
+                div { class: "login-waiting",
+                    p { class: "login-waiting-text",
+                        "Complete sign-in in the browser window that opened. First run can take a few minutes."
+                    }
+                    div { class: "login-waiting-actions",
+                        if let Some(url) = waiting_url_open {
+                            button {
+                                class: "login-waiting-btn",
+                                onclick: move |_| {
+                                    #[cfg(feature = "desktop")]
+                                    {
+                                        if let Err(e) = open::that(&url) {
+                                            tracing::error!("Failed to open sign-in URL: {}", e);
+                                        }
+                                    }
+                                    #[cfg(not(feature = "desktop"))]
+                                    {
+                                        let js = format!(
+                                            "window.open('{}', '_blank')",
+                                            sh_core::js_string_escape(&url)
+                                        );
+                                        let _ = document::eval(&js);
+                                    }
+                                },
+                                "Open sign-in page again"
+                            }
+                        }
+                        if let Some(url) = waiting_url_copy {
+                            button {
+                                class: "login-waiting-btn",
+                                onclick: move |_| {
+                                    let payload = serde_json::to_string(&url)
+                                        .unwrap_or_else(|_| "null".to_string());
+                                    let js = format!(
+                                        "navigator.clipboard.writeText({payload}).catch(function(){{var t=document.createElement('textarea');t.value={payload};document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();}})"
+                                    );
+                                    let _ = document::eval(&js);
+                                },
+                                "Copy sign-in link"
+                            }
+                        }
+                        button {
+                            class: "login-waiting-btn login-waiting-cancel",
+                            onclick: move |_| {
+                                on_cancel.call(());
+                            },
+                            "Cancel"
+                        }
+                    }
+                }
             }
 
             if custom_visible {

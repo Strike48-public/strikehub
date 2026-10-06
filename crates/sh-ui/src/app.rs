@@ -25,7 +25,7 @@ use tokio::sync::oneshot;
 /// In server (liveview) mode, the Dioxus component is destroyed on browser
 /// refresh, which drops the coroutine's local `prev_oauth_server` variable.
 /// `JoinHandle::drop` detaches rather than cancels the task, so the old
-/// callback server keeps running and holds port 4000 indefinitely.
+/// callback server keeps running and holds its port indefinitely.
 ///
 /// Storing the handle here ensures we can abort the old server when starting
 /// a new OAuth flow or signing out, regardless of component lifecycle.
@@ -469,6 +469,12 @@ pub fn App() -> Element {
     let mut auth_manager = use_signal(|| None::<AuthManager>);
     let mut is_signed_in = use_signal(|| false);
     let mut signing_in = use_signal(|| false);
+    // Login URL of the in-flight OAuth flow (embeds the bound callback
+    // port), surfaced in the waiting state's "Open sign-in page again" /
+    // "Copy sign-in link" actions (Strike48/project-management#379).
+    let mut sign_in_url = use_signal(|| Option::<String>::None);
+    // Sender half of the in-flight flow's cancel channel; None when idle.
+    let mut cancel_sign_in = use_signal(|| Option::<oneshot::Sender<()>>::None);
     let mut sign_in_error: Signal<Option<String>> = use_signal(|| None);
     let mut auth_version = use_signal(|| 0u32);
     // Matrix app address discovered via connectorApps GraphQL after sign-in.
@@ -1486,9 +1492,9 @@ pub fn App() -> Element {
         async move {
             use futures_util::StreamExt;
             // Handle for the OAuth callback HTTP server from a previous
-            // sign-in.  Aborted before starting a new flow so port 4000
-            // can be reused (otherwise the new server falls back to a
-            // random port that Keycloak rejects).
+            // sign-in.  Aborted before starting a new flow so the callback
+            // port can be reused (otherwise the new server would fall back
+            // to a random port that Keycloak rejects).
             //
             // In server mode, also abort any handle stored in the
             // process-level static, which survives component destruction
@@ -1497,9 +1503,12 @@ pub fn App() -> Element {
 
             while let Some(raw_url) = rx.next().await {
                 sign_in_error.set(None);
+                // Fresh waiting state: no login URL / cancel handle yet.
+                sign_in_url.set(None);
+                cancel_sign_in.set(None);
 
                 // Shut down the previous OAuth callback server (if any) so
-                // port 4000 is free for the new sign-in flow.
+                // its port is free for the new sign-in flow.
                 if let Some(handle) = prev_oauth_server.take() {
                     handle.abort();
                 }
@@ -1668,6 +1677,23 @@ pub fn App() -> Element {
                 #[cfg(not(feature = "desktop"))]
                 let url_tx_opt = Some(url_tx);
 
+                // Cancellation for the waiting state (#379): the flow aborts
+                // its callback server and returns SignInCancelled when the
+                // user clicks Cancel.
+                let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+                cancel_sign_in.set(Some(cancel_tx));
+
+                // The flow reports the final login URL (it embeds the bound
+                // ephemeral callback port) so the waiting state can offer
+                // "Open sign-in page again" / "Copy sign-in link".
+                // In server mode the URL already arrives via url_rx below.
+                #[cfg(feature = "desktop")]
+                let (login_url_out_tx, login_url_out_rx) = oneshot::channel::<String>();
+                #[cfg(feature = "desktop")]
+                let login_url_out = Some(login_url_out_tx);
+                #[cfg(not(feature = "desktop"))]
+                let login_url_out: Option<oneshot::Sender<String>> = None;
+
                 let oauth_handle = tokio::spawn(async move {
                     let matrix_url = auth_clone.matrix_url().to_string();
                     let tls_insecure = auth_clone.tls_insecure();
@@ -1677,6 +1703,8 @@ pub fn App() -> Element {
                         callback_base,
                         browser_api_url,
                         url_tx_opt,
+                        login_url_out,
+                        Some(cancel_rx),
                     )
                     .await
                 });
@@ -1686,9 +1714,20 @@ pub fn App() -> Element {
                 #[cfg(not(feature = "desktop"))]
                 {
                     if let Ok(login_url) = url_rx.await {
+                        sign_in_url.set(Some(login_url.clone()));
                         let js =
                             format!("window.open('{}', '_blank')", js_string_escape(&login_url));
                         let _ = document::eval(&js);
+                    }
+                }
+
+                // Desktop: receive the login URL for the waiting-state
+                // actions (arrives as soon as the flow computes it; Err if
+                // the flow bailed out before that).
+                #[cfg(feature = "desktop")]
+                {
+                    if let Ok(url) = login_url_out_rx.await {
+                        sign_in_url.set(Some(url));
                     }
                 }
 
@@ -1696,6 +1735,15 @@ pub fn App() -> Element {
                 let mut oauth_result = match oauth_handle.await {
                     Ok(Ok(result)) => result,
                     Ok(Err(e)) => {
+                        sign_in_url.set(None);
+                        cancel_sign_in.set(None);
+                        if e.downcast_ref::<sh_core::SignInCancelled>().is_some() {
+                            // User cancelled from the waiting state — reset
+                            // quietly, no error banner.
+                            tracing::info!("Sign-in cancelled by user");
+                            signing_in.set(false);
+                            continue;
+                        }
                         let msg = format!("Sign-in failed: {}", e);
                         tracing::error!("{}", msg);
                         sign_in_error.set(Some(msg));
@@ -1703,6 +1751,8 @@ pub fn App() -> Element {
                         continue;
                     }
                     Err(e) => {
+                        sign_in_url.set(None);
+                        cancel_sign_in.set(None);
                         let msg = format!("Sign-in error: {}", e);
                         tracing::error!("{}", msg);
                         sign_in_error.set(Some(msg));
@@ -1711,8 +1761,12 @@ pub fn App() -> Element {
                     }
                 };
 
+                // Flow finished (tokens acquired) — clear the waiting state.
+                sign_in_url.set(None);
+                cancel_sign_in.set(None);
+
                 // Stash the OAuth callback server handle so we can abort it
-                // before the next sign-in attempt (frees port 4000).
+                // before the next sign-in attempt (frees the callback port).
                 // In server mode, store in the process-level static so it
                 // survives component destruction on browser refresh.
                 #[cfg(not(feature = "desktop"))]
@@ -2094,8 +2148,8 @@ pub fn App() -> Element {
         // callback server, and detach the WS client so the next sign-in
         // starts with a clean slate.
         spawn(async move {
-            // Abort the OAuth callback server so port 4000 is freed for
-            // the next sign-in flow.
+            // Abort the OAuth callback server so its port is freed for the
+            // next sign-in flow.
             #[cfg(not(feature = "desktop"))]
             {
                 if let Some(handle) = oauth_server_store().lock().await.take() {
@@ -2415,6 +2469,12 @@ pub fn App() -> Element {
                     LoginOverlay {
                         on_sign_in: on_sign_in,
                         signing_in: *signing_in.read(),
+                        sign_in_url: sign_in_url.read().clone(),
+                        on_cancel: move |_: ()| {
+                            if let Some(tx) = cancel_sign_in.take() {
+                                let _ = tx.send(());
+                            }
+                        },
                         saved_studio_url: hub_config.read().studio_url.clone(),
                         error_message: sign_in_error.read().clone(),
                     }
