@@ -90,6 +90,18 @@ pub fn is_process_group_leader() -> bool {
 /// Grace period between the SIGTERM and the SIGKILL escalation.
 pub const TEARDOWN_GRACE_SECS: u64 = 2;
 
+/// Bounded re-verification of the child's process group after spawn
+/// (review of #116, nit T1): std runs `setpgid` in the child's `pre_exec`,
+/// so a `getpgid` read in the fork→exec window can still see the
+/// INHERITED group. Re-read until the child is observed leading its own
+/// group; 25 × 2 ms = ≤ ~50 ms worst case, and connector spawns are rare
+/// (health-check churn ~18 s), so the stall is not observable in practice.
+#[cfg(unix)]
+const PGID_VERIFY_MAX_ATTEMPTS: u32 = 25;
+
+#[cfg(unix)]
+const PGID_VERIFY_RETRY: std::time::Duration = std::time::Duration::from_millis(2);
+
 /// A child process StrikeHub spawned and must collect on exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrackedChild {
@@ -153,14 +165,27 @@ pub fn spawn_tracked(cmd: &mut tokio::process::Command) -> std::io::Result<tokio
             "spawned child has no usable pid; cannot register for tree teardown",
         ));
     };
-    // process_group(0) => the new group is the child's own pid. Verify with
-    // getpgid (a connector that immediately setpgid/setsid itself would
-    // otherwise leave us tracking a stale group — the descendant walk in
-    // teardown covers that case).
-    let pgid = unsafe {
-        let g = libc::getpgid(pid as libc::pid_t);
-        if g > 0 { g } else { pid as libc::pid_t }
-    };
+    // process_group(0) => the new group is the child's own pid, but std
+    // runs the setpgid in the child's `pre_exec` — a getpgid read in the
+    // fork→exec window can race it and still see the inherited (parent's)
+    // group (review of #116, nit T1). Re-verify until the child is
+    // observed leading its own group; if it still hasn't after the bound
+    // (child preempted the whole window, or re-parented itself via
+    // setpgid/setsid), track the last observed group — the direct-pid
+    // passes plus the descendant walk in teardown cover the rest.
+    let mut pgid = pid as libc::pid_t;
+    for _ in 0..PGID_VERIFY_MAX_ATTEMPTS {
+        // SAFETY: getpgid on a pid we just spawned; the child is alive
+        // (we hold its handle) for the whole loop.
+        let g = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if g > 0 {
+            pgid = g;
+            if g == pid as libc::pid_t {
+                break; // child leads its own group — the expected steady state
+            }
+        }
+        std::thread::sleep(PGID_VERIFY_RETRY);
+    }
     track_child(pid, pgid);
     Ok(child)
 }
@@ -372,14 +397,11 @@ pub fn teardown_process_tree() {
     // Poll for the grace period.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TEARDOWN_GRACE_SECS);
     let clean = loop {
-        let ok = {
-            let mut ok = targets.iter().all(|p| !pid_alive(*p));
-            #[cfg(unix)]
-            {
-                ok = ok && groups.iter().all(|g| !group_alive(*g));
-            }
-            ok
-        };
+        // (unix additionally requires every tracked group to be dead)
+        #[cfg(unix)]
+        let ok = targets.iter().all(|p| !pid_alive(*p)) && groups.iter().all(|g| !group_alive(*g));
+        #[cfg(not(unix))]
+        let ok = targets.iter().all(|p| !pid_alive(*p));
         if ok || std::time::Instant::now() >= deadline {
             break ok;
         }

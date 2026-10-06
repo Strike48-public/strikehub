@@ -10,12 +10,18 @@ pub mod error;
 pub mod ipc;
 pub mod ipc_runner;
 #[cfg(windows)]
-mod job;
+pub mod job;
 pub mod matrix_ws;
 pub mod oauth;
 pub mod ott;
 pub mod preflight;
-#[cfg(unix)]
+// NOT cfg-gated on purpose: `pub use process::{...}` below and the
+// cross-platform call sites (`ipc_runner` spawn, `sh-ui` main teardown +
+// ProcessTreeGuard) exist on every platform. The unix-only pieces inside
+// are individually cfg-gated. (Review of #116: the old `#[cfg(unix)]` here
+// made `pub use process::...` an unresolved import — and the whole crate —
+// fail to compile for x86_64-pc-windows-msvc, which no PR CI job ever
+// checked because the MSVC MSI build is main-gated.)
 pub mod process;
 pub mod proxy;
 pub mod registry;

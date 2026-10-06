@@ -174,3 +174,91 @@ pub fn pid_alive(pid: u32) -> bool {
     unsafe { CloseHandle(h) };
     true
 }
+
+#[cfg(test)]
+mod tests {
+    // Runtime tests for the Job Object teardown — exercised by the CI
+    // `Check (Windows)` job (`cargo test -p sh-core --target
+    // x86_64-pc-windows-msvc job`). No mocks: every test drives the real
+    // Windows API through the production functions above (`CreateJobObjectW`
+    // / `SetInformationJobObject(KILL_ON_CLOSE)` / `AssignProcessToJobObject`
+    // / `TerminateJobObject`), with real child processes.
+    use super::*;
+
+    /// Spawn a long-lived leaf process (no children of its own, so the
+    /// assignment is deterministic — `AssignProcessToJobObject` refuses a
+    /// process that has already spawned children).
+    fn spawn_long_lived_leaf() -> std::process::Child {
+        std::process::Command::new("ping")
+            .args(["-n", "120", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn ping")
+    }
+
+    fn wait_for_death(pid: u32, secs: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if !pid_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        !pid_alive(pid)
+    }
+
+    /// End-to-end: the lazy job creation (KILL_ON_CLOSE armed) +
+    /// `assign_pid_to_job` + `terminate_job` must kill the assigned process.
+    #[test]
+    fn terminate_job_kills_assigned_process() {
+        let mut child = spawn_long_lived_leaf();
+        let pid = child.id();
+        // Sanity: the child is actually alive before we touch the job.
+        assert!(pid_alive(pid), "child died before assignment");
+        assert!(
+            assign_pid_to_job(pid),
+            "assignment failed — job creation or OpenProcess/Assign broke"
+        );
+        terminate_job();
+        assert!(
+            wait_for_death(pid, 5),
+            "TerminateJobObject did not kill the assigned process within 5 s"
+        );
+        let _ = child.wait();
+    }
+
+    /// Error path: assigning a pid that no longer exists must fail cleanly
+    /// (OpenProcess error) and return `false` — never panic.
+    #[test]
+    fn assign_pid_to_job_rejects_dead_pid() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cmd");
+        let pid = child.id();
+        child.wait().expect("wait for cmd to exit");
+        assert!(
+            !assign_pid_to_job(pid),
+            "assign_pid_to_job must return false for a dead pid (OpenProcess failure path)"
+        );
+    }
+
+    /// `terminate_job` must be safe to call any number of times (empty job,
+    /// populated job, concurrent teardown passes) — it must never panic,
+    /// and a second call after a kill is a no-op.
+    #[test]
+    fn terminate_job_is_idempotent_and_safe() {
+        terminate_job();
+        let mut child = spawn_long_lived_leaf();
+        let pid = child.id();
+        if assign_pid_to_job(pid) {
+            terminate_job();
+            assert!(wait_for_death(pid, 5), "child survived terminate_job");
+        }
+        terminate_job(); // no-op: nothing left in the job (or empty job)
+        let _ = child.wait();
+    }
+}
