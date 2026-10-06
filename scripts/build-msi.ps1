@@ -77,11 +77,12 @@ if (-not (Test-Path "dist\strikehub.exe")) {
 # (see wix\main.wxs). The DLLs are NOT vendored in git; they are copied at
 # build time from the build host, searching in order:
 #   1. $env:SHVCREDIST_DIR  - operator override (a dir holding the DLLs directly)
-#   2. <VS 2022 flavor>\VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT - the
-#      VC++ redistributable folder (newest MSVC <ver> wins). Canonical on the
-#      GitHub-hosted Windows runners, where VS 2022 Enterprise is installed
-#      under "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\".
-#   3. <VS 2022 flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>  (toolset bin)
+#   2. <VS year>\<flavor>\VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT -
+#      the VC++ redistributable folder (newest MSVC <ver> wins). Canonical on
+#      the GitHub-hosted Windows runners, where VS is installed under
+#      "C:\Program Files (x86)\Microsoft Visual Studio\<year>\<flavor>\"
+#      (the year dir moves with runner re-bakes: 2022, 2025, ...).
+#   3. <VS year>\<flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>  (toolset bin)
 #   4. C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>  (SDK bin)
 #   5. C:\Windows\System32 - the VC++ redist MSI's install location; its
 #      copies are the identical redistributable bits (license-equivalent).
@@ -112,18 +113,20 @@ Write-Host "Staging VC++ runtime DLLs (app-local) for $crtArchDir..." -Foregroun
 $crtRoots = @()
 # (1) Operator override stays first: a directory holding the DLLs directly.
 if ($env:SHVCREDIST_DIR) { $crtRoots += $env:SHVCREDIST_DIR }
-# (2) VS 2022 VC++ redistributable folder (Microsoft.VC143.CRT). This is the
-# canonical location on the GitHub-hosted Windows runners, where VS 2022
-# (Enterprise) is installed under "C:\Program Files (x86)\Microsoft Visual
-# Studio\2022\<flavor>\" and the C++ workload ships the redist at
-# VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT. When several MSVC <ver>
+# (2) VS VC++ redistributable folder (Microsoft.VC143.CRT). This is the
+# canonical location on the GitHub-hosted Windows runners, where the C++
+# workload ships the redist at VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT
+# under "C:\Program Files (x86)\Microsoft Visual Studio\<year>\<flavor>". The
+# year directory moves with runner re-bakes (2022 -> 2025 -> ...), so probe a
+# range of years under both Program Files bases. When several MSVC <ver>
 # toolsets are installed, the newest one wins (its redist matches the
-# toolchain building the shipped binaries). Probe both Program Files bases so
-# non-default install locations keep working.
-$vsRedistBases = @(
-    "C:\Program Files (x86)\Microsoft Visual Studio\2022\*\VC\Redist\MSVC",
-    "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC"
-)
+# toolchain building the shipped binaries).
+$vsYears = @("2022", "2025", "2026")
+$vsRedistBases = @()
+foreach ($year in $vsYears) {
+    $vsRedistBases += "C:\Program Files (x86)\Microsoft Visual Studio\{0}*\*\VC\Redist\MSVC" -f $year
+    $vsRedistBases += "C:\Program Files\Microsoft Visual Studio\{0}*\*\VC\Redist\MSVC" -f $year
+}
 $redistToolsets = @()
 foreach ($rb in $vsRedistBases) {
     # The base is a wildcard pattern that resolves to the MSVC dir itself, so
@@ -138,13 +141,14 @@ if ($redistToolsets.Count -gt 0) {
         Select-Object -First 1
     $crtRoots += Join-Path $newestRedist.FullName "$crtArchDir\Microsoft.VC143.CRT"
 }
-# (3) VS 2022 toolset bin (legacy search roots, kept).
-$vsToolsetRoots = @(
-    "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
-    "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
-    "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC",
-    "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
-)
+# (3) VS toolset bin (legacy search roots, kept).
+$vsToolsetRoots = @()
+foreach ($year in $vsYears) {
+    $vsToolsetRoots += "C:\Program Files (x86)\Microsoft Visual Studio\{0}*\BuildTools\VC\Tools\MSVC" -f $year
+    $vsToolsetRoots += "C:\Program Files\Microsoft Visual Studio\{0}*\Community\VC\Tools\MSVC" -f $year
+    $vsToolsetRoots += "C:\Program Files\Microsoft Visual Studio\{0}*\Professional\VC\Tools\MSVC" -f $year
+    $vsToolsetRoots += "C:\Program Files\Microsoft Visual Studio\{0}*\Enterprise\VC\Tools\MSVC" -f $year
+}
 foreach ($vs in $vsToolsetRoots) {
     if (Test-Path $vs) {
         Get-ChildItem $vs -Directory -ErrorAction SilentlyContinue |
@@ -176,7 +180,7 @@ foreach ($dll in $requiredCrt) {
         Write-Host "ERROR: $dll not found on this build host." -ForegroundColor Red
         Write-Host "Searched roots (in order):" -ForegroundColor Yellow
         foreach ($root in $crtRoots) { Write-Host "  - $root" -ForegroundColor Yellow }
-        Write-Host ("Install Visual Studio 2022 with the C++ workload (provides VC\Redist\MSVC\<version>\{0}\Microsoft.VC143.CRT), or set SHVCREDIST_DIR to a directory containing the {0} VC++ runtime DLLs." -f $crtArchDir) -ForegroundColor Yellow
+        Write-Host ("Install Visual Studio (any recent year) with the C++ workload (provides VC\Redist\MSVC\<version>\{0}\Microsoft.VC143.CRT), or set SHVCREDIST_DIR to a directory containing the {0} VC++ runtime DLLs." -f $crtArchDir) -ForegroundColor Yellow
         exit 1
     }
     $machine = Get-PeMachine $found

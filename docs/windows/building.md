@@ -96,15 +96,15 @@ installs** (app-local deployment; see `wix\main.wxs`). Verify any binary's
 imports with:
 
 ```powershell
-& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\dumpbin.exe" /dependents strikehub.exe
+& "C:\Program Files (x86)\Microsoft Visual Studio\<year>\BuildTools\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\dumpbin.exe" /dependents strikehub.exe
 ```
 
 `scripts\build-msi.ps1` stages the DLLs into `redist\` **at build time**
 (never vendored in git). Provenance, in search order:
 
 1. `$env:SHVCREDIST_DIR` (explicit override: a directory containing the DLLs)
-2. `<VS 2022 flavor>\VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT\` — the VC++ redistributable folder (newest `MSVC\<ver>` wins). This is the canonical location on the GitHub-hosted Windows runners, where VS 2022 Enterprise is installed under `C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\`.
-3. `<VS 2022 flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>\` (Build Tools / Community / Professional / Enterprise)
+2. `<VS year>\<flavor>\VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT\` — the VC++ redistributable folder (newest `MSVC\<ver>` wins). This is the canonical location on the GitHub-hosted Windows runners, where VS is installed under `C:\Program Files (x86)\Microsoft Visual Studio\<year>\<flavor>\`. The year directory moves with runner re-bakes (2022, 2025, ...), so the script probes a range of years under both Program Files bases.
+3. `<VS year>\<flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>\` (Build Tools / Community / Professional / Enterprise)
 4. `C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>\`
 5. `C:\Windows\System32\` — where the VC++ redist MSI installs the identical redistributable bits (license-equivalent copies)
 
@@ -114,8 +114,10 @@ run its host tools. Each staged DLL is PE-machine-verified
 If the DLLs cannot be found, the MSI build fails loudly — do not work around
 it by deleting the check.
 
-CI additionally runs `scripts\verify-crt-coverage.ps1`, which `dumpbin`
-scans every shipped exe and fails the build if any import is neither
+CI additionally runs `scripts\verify-crt-coverage.ps1`, which locates
+`dumpbin` at runtime (vswhere first, then VS install globs across the
+supported year directories under both Program Files bases, then PATH) and
+scans every shipped exe, failing the build if any import is neither
 OS-provided nor staged in `redist\`. If a future binary starts importing a
 new non-OS DLL (e.g. `MSVCP140.dll`), extend `VC_RUNTIME_DLLS` in
 `crates/sh-core/src/connector_seed.rs`, the staging list in
