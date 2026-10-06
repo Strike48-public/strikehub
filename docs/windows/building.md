@@ -103,11 +103,13 @@ imports with:
 (never vendored in git). Provenance, in search order:
 
 1. `$env:SHVCREDIST_DIR` (explicit override: a directory containing the DLLs)
-2. `<VS 2022 flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>\` (Build Tools / Community / Professional / Enterprise)
-3. `C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>\`
+2. `<VS 2022 flavor>\VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT\` — the VC++ redistributable folder (newest `MSVC\<ver>` wins). This is the canonical location on the GitHub-hosted Windows runners, where VS 2022 Enterprise is installed under `C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\`.
+3. `<VS 2022 flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>\` (Build Tools / Community / Professional / Enterprise)
+4. `C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>\`
+5. `C:\Windows\System32\` — where the VC++ redist MSI installs the identical redistributable bits (license-equivalent copies)
 
-Both (2) and (3) hold the identical redistributable CRT the toolchain itself
-uses to run its host tools. Each staged DLL is PE-machine-verified
+All of these hold the same redistributable CRT the toolchain itself uses to
+run its host tools. Each staged DLL is PE-machine-verified
 (`0x8664` x64 / `0xAA64` arm64) and its SHA256 is printed to the build log.
 If the DLLs cannot be found, the MSI build fails loudly — do not work around
 it by deleting the check.
