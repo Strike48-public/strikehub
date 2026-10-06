@@ -75,23 +75,29 @@ fn main() {
 
     // Leave the launching session's process group (Unix) BEFORE anything is
     // spawned: when launched from a desktop launcher (GNOME app grid, dock,
-    // ...) the process starts in the LAUNCHER's process group, and the
-    // shutdown handler's killpg would then SIGTERM the launcher (e.g. GNOME
-    // Shell) — project-management#380 (377 finding 7), HIGH. After this call
-    // StrikeHub leads its own group; child connectors inherit it, so
-    // signalling it on shutdown reaches only StrikeHub and its children.
-    // (Windows has no process-group semantics; the Ctrl+C path below is
-    // unchanged.)
+    // ...) the process starts in the LAUNCHER's process group —
+    // project-management#380 (377 finding 7), HIGH. Since #115 every
+    // connector is additionally spawned in its OWN process group (see
+    // sh_core::process::spawn_tracked) and teardown signals those tracked
+    // groups on close, so the launcher's group is never signalled — but we
+    // still detach so the hub's own group stays private (terminal SIGINT
+    // delivery, defensive killpg paths).
     #[cfg(unix)]
     sh_core::detach_process_group();
 
-    // Install a Ctrl+C / SIGTERM handler so the process shuts down cleanly.
-    // On Unix this sends SIGTERM to OUR process group (see the setpgid call
-    // above), which kills any child connector processes that are still in it.
-    // On all platforms,
-    // kill_on_drop(true) on the tokio::process::Child handles provides a
-    // secondary safety net when the Child handle is dropped.
+    // Install a Ctrl+C / SIGTERM / SIGTRAP handler so the process shuts
+    // down cleanly. Since #115 the handler SIGTERMs every tracked child
+    // process group (see sh_core::process::signal_kill_tracked_groups),
+    // waits ~2 s, then SIGKILLs survivors — children are no longer reached
+    // via the hub's own group because each connector leads its own group.
+    // On all platforms, kill_on_drop(true) on the tokio::process::Child
+    // handles provides a further safety net when a Child handle is dropped.
     install_signal_handler();
+
+    // Exit fallback (#115): if we ever leave main without the explicit
+    // teardown below (panic, early return), the guard drops and tears the
+    // spawned tree down. Idempotent with the explicit call.
+    let _process_tree_guard = sh_core::process::ProcessTreeGuard::new();
 
     // Extract bundled connector binaries (Windows: next to exe; other: no-op).
     sh_core::embedded::extract_bundled_binaries();
@@ -173,6 +179,19 @@ fn main() {
         ))
         .launch(sh_ui::App);
 
+    // Normal close (last window closed / quit): tear down the ENTIRE
+    // spawned process tree before we exit — every tracked connector
+    // process group (SIGTERM → ~2 s grace → SIGKILL) plus a best-effort
+    // descendant walk for anything that escaped its group via setsid.
+    //
+    // This is the path issue #115 is about: kill_on_drop only ever signals
+    // the DIRECT child pid (never grandchildren), and on Linux a WebKitGTK
+    // window close can kill the hub with SIGTRAP before any destructor
+    // runs — the SIGTRAP handler below covers that death; this covers the
+    // clean one. (Windows: TerminateJobObject + the KILL_ON_JOB_CLOSE
+    // guarantee, same call site.)
+    sh_core::process::teardown_process_tree();
+
     // Window close: end the Release Health session and flush pending data
     // (including the final session update) before the guard is dropped. A
     // killed process never gets this far, which is why explicit end-and-
@@ -183,16 +202,19 @@ fn main() {
 
 #[cfg(feature = "desktop")]
 fn install_signal_handler() {
-    // On Unix, send SIGTERM to our process group so all child connector
-    // processes are terminated, then exit. This covers Ctrl+C and external
-    // SIGTERM delivery where Dioxus might not get a chance to run Drop impls.
+    // On Unix, send SIGTERM to every tracked child process group, wait ~2 s,
+    // SIGKILL survivors, then exit. This covers Ctrl+C, external SIGTERM,
+    // and (issue #115) the SIGTRAP death a WebKitGTK window close causes on
+    // Linux — all paths where Dioxus/tokio never get to run Drop impls.
     #[cfg(unix)]
     {
         use std::sync::atomic::{AtomicBool, Ordering};
         static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
         // SAFETY: signal handler only calls async-signal-safe functions
-        // (getpgrp, getpid, killpg, sleep, _exit).
+        // (kill, sleep, _exit) plus the bounded try_lock in
+        // sh_core::process::signal_kill_tracked_groups (no allocation on
+        // the hot path).
         unsafe {
             libc::signal(
                 libc::SIGINT,
@@ -202,39 +224,52 @@ fn install_signal_handler() {
                 libc::SIGTERM,
                 signal_handler as *const () as libc::sighandler_t,
             );
+            // #115: on Linux (WebKitGTK) a NORMAL window close kills the
+            // hub with an intentional SIGTRAP after the webview teardown —
+            // a signal death runs no destructors, so kill_on_drop never
+            // fired and the connectors were orphaned (issue #115 Linux
+            // repro, exit 133). Route that death through the same group
+            // teardown as SIGINT/SIGTERM. (If the webview stack installs
+            // its own SIGTRAP handler after us, it wins and this is a
+            // no-op.)
+            libc::signal(
+                libc::SIGTRAP,
+                signal_handler as *const () as libc::sighandler_t,
+            );
         }
 
         extern "C" fn signal_handler(sig: libc::c_int) {
-            // Guard against re-entry if a second signal arrives while we're
-            // shutting down.
+            // Guard against re-entry if a second signal arrives while
+            // we're shutting down.
             if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
                 unsafe { libc::_exit(128 + sig) };
             }
             unsafe {
-                // Only killpg when we actually LEAD our process group. We set
-                // that up at startup (sh_core::detach_process_group calls
-                // setpgid(0,0)), and child connectors inherit the group, so
-                // the group then contains exactly StrikeHub + its children —
-                // never the launching session's group (GNOME Shell et al.).
-                // If the detach failed and we are still in the launcher's
-                // group, signalling it would kill the launcher — the
-                // regression this exists to prevent — so skip the group kill
-                // and rely on PR_SET_PDEATHSIG (SIGHUP on parent death) and
-                // kill_on_drop to clean the connectors up instead.
-                if sh_core::is_process_group_leader() {
-                    libc::killpg(libc::getpgrp(), libc::SIGTERM);
-                    // Give children a brief moment to exit, then force-exit.
-                    // sleep() is async-signal-safe per POSIX.
-                    libc::sleep(1);
-                }
+                // Since #115 every connector is spawned in its OWN process
+                // group (sh_core::process::spawn_tracked) and registered in
+                // the process-tree registry, and the hub detached from the
+                // launcher's group at startup (#110) — so the hub's own
+                // group now contains only the hub itself. We therefore do
+                // NOT killpg(our own group) here: that would signal
+                // ourselves and race the escalation below, and signalling
+                // an inherited (launcher's) group is exactly the #110
+                // hazard. The tracked groups below reach every child.
+                sh_core::process::signal_kill_tracked_groups(libc::SIGTERM);
+                // Grace: ~2 s for connectors (and their own children) to
+                // exit. sleep() is async-signal-safe per POSIX.
+                libc::sleep(sh_core::process::TEARDOWN_GRACE_SECS as libc::c_uint);
+                // Escalation: SIGKILL any tracked group still alive.
+                sh_core::process::signal_kill_tracked_groups(libc::SIGKILL);
                 libc::_exit(128 + sig);
             }
         }
     }
 
     // On Windows, the default Ctrl+C behaviour terminates the process.
-    // kill_on_drop(true) on the tokio Child handles ensures connector
-    // processes are cleaned up when the runtime tears down.
+    // The Job Object (KILL_ON_JOB_CLOSE, see sh_core::job) kills every
+    // connector tree when the hub's process handle closes on ANY exit
+    // path, and kill_on_drop(true) on the tokio Child handles is the
+    // direct-child backstop when the runtime tears down.
 }
 
 #[cfg(not(feature = "desktop"))]

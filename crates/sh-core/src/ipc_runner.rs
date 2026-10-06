@@ -46,9 +46,12 @@ impl IpcConnectorRunner {
             cmd.env(k, v);
         }
 
-        // Ensure tokio kills the child process if the Child handle is dropped
-        // without an explicit wait/kill. This is the primary defense against
-        // orphaned connector processes when StrikeHub exits unexpectedly.
+        // Ensure tokio kills the child process if the Child handle is
+        // dropped without an explicit wait/kill. This is the DIRECT-CHILD
+        // backstop; the primary teardown since #115 is the process-tree
+        // registry + group/Job-Object kill (sh_core::process::spawn_tracked
+        // below and sh_core::process::teardown_process_tree on close),
+        // which also reaches grandchildren and survives signal deaths.
         cmd.kill_on_drop(true);
 
         // On Windows the desktop app is a GUI-subsystem binary with no console,
@@ -80,13 +83,17 @@ impl IpcConnectorRunner {
         }
 
         // On Unix, arrange for the child to receive SIGHUP when the parent
-        // process dies. This covers abrupt kills (SIGKILL, OOM, crash) where
-        // Drop destructors never run.
+        // process dies. This is a backstop net for abrupt kills (SIGKILL,
+        // OOM, crash) where Drop destructors never run — note the
+        // pentest-agent IGNORES SIGHUP (issue #115 Linux repro: SigIgn has
+        // bit 0), so the group kill / descendant walk in
+        // sh_core::process is the real cleanup, not this.
         #[cfg(unix)]
         {
-            // SAFETY: pre_exec runs in the forked child before exec.
-            // setsid/setpgid are not called, so the child remains in
-            // the parent's process group — no async-signal-safety concern.
+            // SAFETY: pre_exec runs in the forked child before exec. The
+            // child's OWN process group is set separately via
+            // process_group(0) in sh_core::process::spawn_tracked — see
+            // there for the #115 tree-teardown rationale.
             unsafe {
                 cmd.pre_exec(|| {
                     // On Linux, PR_SET_PDEATHSIG asks the kernel to send the
@@ -102,7 +109,11 @@ impl IpcConnectorRunner {
             }
         }
 
-        let child = cmd.spawn().map_err(|e| {
+        // Spawn with StrikeHub's child-lifecycle guarantees (issue #115):
+        // unix — child leads its OWN process group and is registered in the
+        // process-tree registry; windows — child is assigned to the shared
+        // Job Object (KILL_ON_JOB_CLOSE). See sh_core::process::spawn_tracked.
+        let child = crate::process::spawn_tracked(&mut cmd).map_err(|e| {
             span.record("outcome", "spawn_failed");
             span.record("startup_ms", start.elapsed().as_millis() as u64);
             HubError::Runner(format!("failed to spawn {}: {}", binary.display(), e))

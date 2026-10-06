@@ -47,3 +47,7 @@ sentry = ["dep:sentry", "dep:sentry-anyhow"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Job Object teardown for issue #115 (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE).
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

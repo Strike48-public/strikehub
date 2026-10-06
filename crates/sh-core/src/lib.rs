@@ -9,6 +9,8 @@ pub mod embedded;
 pub mod error;
 pub mod ipc;
 pub mod ipc_runner;
+#[cfg(windows)]
+mod job;
 pub mod matrix_ws;
 pub mod oauth;
 pub mod ott;
@@ -44,6 +46,10 @@ pub use ott::{
 pub use preflight::{
     AggregatePreflightResult, CheckStatus, ConnectorRuntime, HostOs, PreflightCheck,
     PreflightResult, run_preflight, run_preflight_all, run_preflight_full,
+};
+pub use process::{
+    ProcessTreeGuard, TEARDOWN_GRACE_SECS, TrackedChild, collect_descendants, spawn_tracked,
+    teardown_process_tree, tracked_children_snapshot,
 };
 #[cfg(unix)]
 pub use process::{detach_process_group, is_process_group_leader};
