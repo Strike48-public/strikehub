@@ -253,25 +253,83 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
     exit 1
 }
 
-# WiX Product/@Version is strictly numeric x.x.x.x (integers 0..65534); candle
-# rejects prerelease versions with CNDL0108 - e.g. 0.1.22-rc.1, which the
-# Release workflow's "Sync Cargo.toml to tag version" step writes for PRERELEASE
-# tags and the MSI step passes through as-is. Feed WiX only the leading numeric
-# groups; $Version stays raw for the output filename so the workflow's Move-Item
-# contract (StrikeHub-<rawVersion>-<arch>.msi) is unchanged.
-if ($Version -match '^(\d+(?:\.\d+){0,3})') {
-    $WixVersion = $Matches[1]
-} else {
-    $WixVersion = $Version   # non-numeric input: pass through (candle rejects as before)
+# ── Version mapping: human release version -> numeric MSI version ──────────
+# WiX Product/@Version and File-table versions must be strictly numeric (four
+# fields, each an integer 0..65534); candle rejects prerelease versions with
+# CNDL0108 - e.g. 0.1.23-rc.1, which the Release workflow's "Sync Cargo.toml
+# to tag version" step writes for PRERELEASE tags.
+#
+# The old behavior (strip the suffix, pass the leading numeric groups through)
+# mapped EVERY prerelease of the same release to the same 4-field version:
+# v0.1.23-rc.1 and v0.1.23-rc.2 both became 0.1.23.0. Windows Installer
+# compares NUMERIC versions to decide overwrite-on-upgrade, so the rc.2
+# InstallFiles step saw the installed rc.1 strikehub.exe as
+# "an equal version" -> "Won't Overwrite" and the rc.2 install left the rc.1
+# hub binary in place even though the MSI carried the genuine rc.2 binary
+# (Strike48/project-management#375, "RC.2 verification", 2026-10-07).
+#
+# The fix makes the 4th (revision) field unique and monotonic per build:
+#   v0.1.23-rc.N  ->  0.1.23.N     (rc.1 -> 0.1.23.1, rc.2 -> 0.1.23.2, ...)
+#   v0.1.23       ->  0.1.23.100   (headroom above every rc.N, N <= 99)
+# so rc.1 < rc.2 < ... < rc.99 < official < next X.Y.Z-rc.1: every forward
+# install is a numeric upgrade and MajorUpgrade/InstallFiles replace the old
+# files. rc.N is capped at 99 so an official build always upgrades over every
+# prerelease of the same X.Y.Z.
+#
+# The human string stays for display only: the output filename
+# (StrikeHub-<rawVersion>-<arch>.msi - the workflow's Move-Item contract is
+# unchanged) and ARPDV (Add/Remove Programs "Version" column). $DisplayVersion
+# below carries it; ConvertTo-MsiVersion (unit-tested by
+# scripts/test-msi-version.ps1) produces the machine versions.
+
+function ConvertTo-MsiVersion {
+    <#
+    .SYNOPSIS
+        Maps a release version to the numeric 4-field version WiX requires.
+    .DESCRIPTION
+        v?X.Y.Z-rc.N -> X.Y.Z.N     (N > 99 throws: the official build uses
+                                     .100 and must sort above every rc.N)
+        v?X.Y.Z      -> X.Y.Z.100   (official build)
+        v?X.Y.Z.R    -> X.Y.Z.R     (already a numeric 4-field version: pass
+                                     through unchanged)
+        Anything else throws - silently stripping a suffix is exactly what
+        produced the v0.1.23-rc.1/rc.2 collision (project-management#375).
+    #>
+    param([Parameter(Mandatory = $true)][string]$In)
+
+    $v = $In.Trim() -replace '^v', ''
+
+    if ($v -match '^(\d+)\.(\d+)\.(\d+)-rc\.(\d+)$') {
+        $rc = [int]$Matches[4]
+        if ($rc -gt 99) {
+            throw ("rc.{0} is out of range: the numeric revision field must stay <= 99 so the official build (X.Y.Z.100) always upgrades over every prerelease of X.Y.Z. Use a new X.Y.Z instead of rc.{0}." -f $rc)
+        }
+        return "$($Matches[1]).$($Matches[2]).$($Matches[3]).$rc"
+    }
+    if ($v -match '^(\d+)\.(\d+)\.(\d+)$') {
+        return "$($Matches[1]).$($Matches[2]).$($Matches[3]).100"
+    }
+    if ($v -match '^(\d+)\.(\d+)\.(\d+)\.(\d+)$') {
+        return $v
+    }
+    throw ("Unsupported version '{0}': expected X.Y.Z, X.Y.Z-rc.N, or X.Y.Z.R." -f $In)
 }
-if ($WixVersion -ne $Version) {
-    Write-Host "  (WiX ProductVersion mapped to numeric $WixVersion)" -ForegroundColor Yellow
+
+$WixVersion = ConvertTo-MsiVersion $Version
+# Display version (ARPDV - the Add/Remove Programs "Version" column): keep the
+# human-readable string (e.g. 0.1.23-rc.2). Only the machine versions above
+# are numeric-unique per build.
+$DisplayVersion = $Version.Trim() -replace '^v', ''
+if ($WixVersion -ne $DisplayVersion) {
+    Write-Host "  (WiX ProductVersion/FileVersion mapped to numeric $WixVersion; display $DisplayVersion)" -ForegroundColor Yellow
 }
 
 # Compile WiX source
 Write-Host "Compiling..." -ForegroundColor Yellow
 & "$wixDir\candle.exe" -nologo `
     -dVersion="$WixVersion" `
+    -dFileVersion="$WixVersion" `
+    -dDisplayVersion="$DisplayVersion" `
     -dPlatform="$WixPlatform" `
     -arch $WixArch `
     -out wix\main.wixobj `

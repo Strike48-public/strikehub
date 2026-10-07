@@ -423,6 +423,15 @@ jobs:
         if: matrix.installer == 'msi'
         run: choco install wixtoolset -y
 
+      # Guard the version mapping (rc.N -> X.Y.Z.N, official -> X.Y.Z.100) that
+      # keeps every build numerically unique for Windows Installer upgrades
+      # (project-management#375). Runs before candle so a mapping regression
+      # fails the job without burning a full installer build.
+      - name: Test MSI version mapping
+        if: matrix.installer == 'msi'
+        shell: pwsh
+        run: .\scripts\test-msi-version.ps1
+
       - name: Build MSI
         if: matrix.installer == 'msi'
         shell: pwsh

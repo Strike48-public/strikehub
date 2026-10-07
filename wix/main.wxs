@@ -21,8 +21,19 @@
             SummaryCodepage='1252'
             Platform='$(var.Platform)' />
 
+        <!-- Unique numeric ProductVersion per build (scripts/build-msi.ps1
+             ConvertTo-MsiVersion: rc.N -> X.Y.Z.N, official -> X.Y.Z.100), so
+             rc.1 -> rc.2 -> official are all NUMERIC upgrades: MajorUpgrade
+             removes the prior product and InstallFiles overwrites the files.
+             The old suffix-strip mapped every prerelease of one release to
+             the same version and the upgrade silently kept the old hub
+             binary (project-management#375). Same-version reinstalls (a
+             re-cut of the same tag) go through the upgrade path instead of
+             stalling as a no-op repair. Genuine downgrades stay blocked via
+             DowngradeErrorMessage. -->
         <MajorUpgrade
             Schedule='afterInstallInitialize'
+            AllowSameVersionsUpgrades='yes'
             DowngradeErrorMessage='A newer version of StrikeHub is already installed.' />
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1' />
@@ -48,9 +59,20 @@
         <DirectoryRef Id='INSTALLDIR'>
             <!-- Main executable -->
             <Component Id='StrikeHubExe' Guid='B1A34567-89AB-CDEF-0123-456789ABC001' Win64='yes'>
+                <!-- Explicit per-build-unique File version (from
+                     -dFileVersion in build-msi.ps1). Without it, candle takes
+                     the numeric part of the exe's own VERSIONINFO resource
+                     (0.1.23.0 for EVERY v0.1.23 prerelease), and InstallFiles
+                     refuses to replace an installed file of an equal version
+                     ("Won't Overwrite") - the rc.2 install that left the rc.1
+                     hub binary in place (project-management#375). The bundled
+                     connectors carry no version resource (0.0.0.0 => always
+                     replaced) and the CRT DLLs carry a stable redist version,
+                     so only the hub exe needs the pin. -->
                 <File Id='strikehub.exe'
                     Name='strikehub.exe'
                     Source='dist\strikehub.exe'
+                    Version='$(var.FileVersion)'
                     KeyPath='yes' />
             </Component>
             <!-- VC++ 2015-2022 runtime, app-local deployment. strikehub.exe is
@@ -200,6 +222,11 @@
 
         <!-- ── Add/Remove Programs metadata ─────────────────── -->
         <SetProperty Id='ARPINSTALLLOCATION' Value='[INSTALLDIR]' After='CostFinalize' />
+        <!-- ARPDV keeps the human-readable version string (e.g. 0.1.23-rc.2)
+             in the Control Panel "Version" column; the machine versions
+             (Product/@Version above and the File-table version) are the
+             numeric-unique build numbers from build-msi.ps1. -->
+        <Property Id='ARPDV' Value='$(var.DisplayVersion)' />
         <Property Id='ARPHELPLINK' Value='https://github.com/Strike48-public/strikehub' />
         <Property Id='ARPURLINFOABOUT' Value='https://www.strike48.com' />
 
