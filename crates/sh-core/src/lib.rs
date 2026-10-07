@@ -58,7 +58,10 @@ pub use process::{
     teardown_process_tree, tracked_children_snapshot,
 };
 #[cfg(unix)]
-pub use process::{detach_process_group, is_process_group_leader};
+pub use process::{
+    add_managed_root, atexit_teardown, detach_process_group, install_exit_handler, is_managed_exe,
+    is_process_group_leader, managed_roots, sweep_managed_roots,
+};
 pub use proxy::ConnectorProxy;
 pub use registry::{
     ConnectorManifest, DEFAULT_CONNECTOR_ID, all_manifests, builtin_manifests, merge_manifests,

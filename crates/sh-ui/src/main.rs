@@ -94,6 +94,22 @@ fn main() {
     // handles provides a further safety net when a Child handle is dropped.
     install_signal_handler();
 
+    // #115 RC-remainder QUIT-ROUTE WIRING: every GUI exit route funnels
+    // through std::process::exit — dioxus 0.6.3's launch() blocks in tao's
+    // EventLoop::run, and tao 0.30.8's run() is DIVERGING on all three
+    // platforms: it returns from the OS run loop (last-window-close
+    // ControlFlow::Exit, OR macOS applicationShouldTerminate — the
+    // application-terminate event fired by `osascript quit` / Cmd-Q / dock
+    // Quit) and then calls std::process::exit directly. That skips BOTH
+    // the explicit teardown after launch() below AND every Rust Drop impl
+    // (ProcessTreeGuard, kill_on_drop) — the exact route the RC
+    // verification REPRO orphaned a self-updated pentest-agent on. The
+    // C-level atexit hook is what delivers teardown_process_tree() there
+    // (process::exit runs atexit handlers; Rust Drops never run for it).
+    // Idempotent with the explicit call below and the signal-handler path.
+    #[cfg(unix)]
+    sh_core::process::install_exit_handler();
+
     // Exit fallback (#115): if we ever leave main without the explicit
     // teardown below (panic, early return), the guard drops and tears the
     // spawned tree down. Idempotent with the explicit call.
@@ -181,15 +197,20 @@ fn main() {
 
     // Normal close (last window closed / quit): tear down the ENTIRE
     // spawned process tree before we exit — every tracked connector
-    // process group (SIGTERM → ~2 s grace → SIGKILL) plus a best-effort
-    // descendant walk for anything that escaped its group via setsid.
+    // process group (SIGTERM → ~2 s grace → SIGKILL) plus the descendant
+    // walk for anything that escaped its group via setsid, plus the
+    // managed-root fallback sweep for self-update-respawned processes
+    // outside the registry.
     //
-    // This is the path issue #115 is about: kill_on_drop only ever signals
-    // the DIRECT child pid (never grandchildren), and on Linux a WebKitGTK
-    // window close can kill the hub with SIGTRAP before any destructor
-    // runs — the SIGTRAP handler below covers that death; this covers the
-    // clean one. (Windows: TerminateJobObject + the KILL_ON_JOB_CLOSE
-    // guarantee, same call site.)
+    // NOTE: in dioxus 0.6.3 this line is normally NOT the teardown that
+    // fires — tao's EventLoop::run ends in std::process::exit (see the
+    // QUIT-ROUTE WIRING comment above), and the atexit hook performs the
+    // teardown instead. This call covers any exit route that DOES return
+    // through main, and it is idempotent with the atexit pass. On Linux a
+    // WebKitGTK window close can kill the hub with SIGTRAP before any
+    // destructor runs — the SIGTRAP handler covers that death. (Windows:
+    // TerminateJobObject + the KILL_ON_JOB_CLOSE guarantee, same call
+    // site.)
     sh_core::process::teardown_process_tree();
 
     // Window close: end the Release Health session and flush pending data
