@@ -59,12 +59,13 @@ fn any_check_failed(reg_groups: &[PreflightResult]) -> bool {
 }
 
 /// The device checks a user would skip past, as "Connector: Check" lines, or
-/// `None` when every check passed and no confirmation is needed.
+/// `None` when every check passed and no confirmation is needed. Warnings are
+/// left out: they cannot pass, and the user may continue past them.
 fn skip_warning(device_groups: &[PreflightResult]) -> Option<Vec<String>> {
     let failing: Vec<String> = device_groups
         .iter()
         .flat_map(|g| g.checks.iter().map(move |c| (g, c)))
-        .filter(|(_, c)| c.status != CheckStatus::Passed)
+        .filter(|(_, c)| matches!(c.status, CheckStatus::Failed | CheckStatus::Checking))
         .map(|(g, c)| {
             let suffix = if c.status == CheckStatus::Checking {
                 " (still checking)"
@@ -503,7 +504,9 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
         CheckStatus::Checking => ("checking", "\u{23f3}"),
         CheckStatus::Passed => ("passed", "\u{2714}"),
         CheckStatus::Failed => ("failed", "\u{2718}"),
+        CheckStatus::Warning => ("warning", "\u{26a0}"),
     };
+    let shows_hint = matches!(check.status, CheckStatus::Failed | CheckStatus::Warning);
 
     let mut installing = use_signal(|| false);
     let mut install_output = use_signal(|| Option::<String>::None);
@@ -522,7 +525,7 @@ fn PreflightCheckItem(check: PreflightCheck) -> Element {
             div { class: "preflight-check-content",
                 div { class: "preflight-check-name", "{check.name}" }
                 div { class: "preflight-check-desc", "{check.description}" }
-                if check.status == CheckStatus::Failed && !check.install_hint.is_empty() {
+                if shows_hint && !check.install_hint.is_empty() {
                     pre { class: "preflight-install-hint", "{check.install_hint}" }
                 }
                 if check.status == CheckStatus::Failed && has_install_cmd {
@@ -734,6 +737,15 @@ mod tests {
                 "KubeStudio: kubectl (still checking)".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn skip_warning_leaves_out_platform_warnings() {
+        let groups = [
+            group_with("StrikeHub", &[("Platform", CheckStatus::Warning)]),
+            group_with("Pick", &[("Docker CLI", CheckStatus::Passed)]),
+        ];
+        assert_eq!(skip_warning(&groups), None);
     }
 
     #[test]
