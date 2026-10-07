@@ -554,6 +554,15 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
+      - name: Test MSI version mapping
+        if: matrix.installer == 'msi'
+        shell: pwsh
+        # Guards the version mapping (rc.N -> X.Y.Z.N, official -> X.Y.Z.100)
+        # that keeps every build numerically unique for Windows Installer
+        # upgrades (project-management#375). Runs before candle/light so a
+        # mapping regression fails the tag build, not the release.
+        run: .\scripts\test-msi-version.ps1
+
       - name: Build Windows MSI
         if: matrix.installer == 'msi'
         shell: pwsh
