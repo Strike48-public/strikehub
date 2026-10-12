@@ -275,15 +275,19 @@ fi
 # matching open GPU driver. User-set values win.
 : "\${WEBKIT_DISABLE_DMABUF_RENDERER:=1}"
 export WEBKIT_DISABLE_DMABUF_RENDERER
-# The graphics runtime is bundled (Phase 2d): mesa dlopens its DRI drivers
-# from LIBGL_DRIVERS_PATH and glvnd dlopens the vendor modules (libGLX_mesa/
-# libEGL_mesa, which live in \$APPDIR/usr/lib) from __GLX_DRIVERS_PATH. Point
-# both at the in-bundle copies so a stock host with no graphics stack can
-# software-render. User-set values win.
-: "\${__GLX_DRIVERS_PATH:=\$APPDIR/usr/lib}"
-export __GLX_DRIVERS_PATH
+# The graphics runtime is NOT the build host's mesa (Phase 2d): it is the
+# vendored, source-built software renderer in assets/gl-runtime — a classic
+# (non-glvnd) mesa (EGL+GLX, X11 platform, swrast-only DRI driver), built on
+# the oldest glibc we support so the bundle's glibc floor holds. The DRI
+# driver lives in the bundle's multiarch dri dir; force software rendering
+# so the WebProcess's mandatory EGL display (WebKitGTK >= 2.42 aborts without
+# one: "Could not create default EGL display: EGL_BAD_PARAMETER") comes up
+# on GPU-less hosts — Xvfb, containers, VMs whose X server has no DRI3.
+# User-set values win.
 : "\${LIBGL_DRIVERS_PATH:=\$APPDIR/${TRIPLET_LIBREL}/dri}"
 export LIBGL_DRIVERS_PATH
+: "\${LIBGL_ALWAYS_SOFTWARE:=1}"
+export LIBGL_ALWAYS_SOFTWARE
 cd "\${APPDIR}" 2>/dev/null || true
 HOOKEOF
 
@@ -389,10 +393,10 @@ done
 # load them. Walk the NEEDED closure of the webkit stack and copy whatever is
 # missing from the build host, each with an $ORIGIN rpath. The glibc/libstdc++
 # family stays host-provided (the floor is enforced by check-glibc-floor.sh);
-# the graphics stack (X11/GL/GBM/Wayland) is NOT left to the host — Phase 2d
-# bundles it (bundling only PART of the graphics stack is the failure mode
-# that used to break WebKit EGL init on newer hosts with EGL_BAD_PARAMETER,
-# so Phase 2d ships the whole family as one consistent set).
+# the GL/EGL stack is NOT taken from the host at all — Phase 2d installs the
+# vendored GL runtime as one consistent set (mixing build-host GL pieces with
+# host pieces was the failure mode that broke WebKit EGL init with
+# EGL_BAD_PARAMETER on newer hosts).
 HOST_LIBDIR="$(dirname "$WK_SRC")"   # the build host's multiarch lib dir
 host_provided() {
     case "$1" in
@@ -445,70 +449,58 @@ for rsvg in "$HOST_LIBDIR"/librsvg-2.so*; do
     echo "  bundled svg loader lib: $base"
 done
 
-# Phase 2d — bundle the graphics runtime closure (wayland + EGL + GL + glvnd +
-# mesa DRI) so a STOCK host with no graphics stack at all can run the app.
-# Field proof (real Ubuntu VMs): stock 22.04 exited 127 with
-# "strikehub-real: error while loading shared libraries: libwayland-client.so.0"
-# (ldd: libgbm.so.1 + libEGL.so.1 also missing; ks-connector missing
-# libwayland-client.so.0); stock 26.04 failed the same way on libEGL.so.1;
-# with the graphics stack installed the app launches to sign-in. CI never
-# caught it because the ubuntu-22.04 runners ship the wayland/mesa stack and
-# the verify step only ever asserted the gtk/webkit/xdo libs.
-#
-# What the bundle must carry, and why each piece:
-#   - libwayland-client: NEEDED by the app binaries (winit/tao), ks-connector,
-#     libgdk-3 and libwebkit2gtk themselves; libgbm: NEEDED by libwebkit2gtk
-#     and libgstgl; libEGL/libGL: NEEDED by libgstgl. These satisfy the
-#     dynamic linker on a stock host (the exit-127 class).
-#   - libEGL.so.1/libgbm.so.1 are ALSO dlopen'd by WebKit at startup
-#     (invisible to any NEEDED walk) — the web process aborts with
-#     "Could not create default EGL display" without them.
-#   - The glvnd dispatchers (libEGL/libGL/libGLX/libOpenGL + libGLdispatch)
-#     dlopen the mesa vendor modules (libEGL_mesa/libGLX_mesa) located via
-#     __GLX_DRIVERS_PATH (set by the AppRun hook); mesa then dlopens a DRI
-#     driver from LIBGL_DRIVERS_PATH. Without a bundled swrast_dri.so
-#     (llvmpipe, which NEEEds libLLVM) a GPU-less container/server image
-#     cannot render the webview at all.
-# The whole family ships as ONE consistent set from the build host (22.04-era
-# on CI): bundling only part of it mixes versions across the EGL boundary and
-# breaks init on hosts with a different mesa (the old EGL_BAD_PARAMETER bug).
-# Every copy gets a $ORIGIN rpath and the binaries already carry RUNPATHs into
-# usr/lib, so all lookups stay in-bundle on any host. Only the glibc family
-# stays host-provided (check-glibc-floor.sh enforces the floor).
-DRI_SRC="$(dirname "$(find -L "$HOST_LIBDIR" -maxdepth 2 -name swrast_dri.so 2>/dev/null | head -1)")"
-for core in libwayland-client.so.0 libwayland-egl.so.1 libgbm.so.1 libEGL.so.1 \
-            libGL.so.1 libGLX.so.0 libOpenGL.so.0 libGLdispatch.so.0 \
-            libGLX_mesa.so.0 libEGL_mesa.so.0 libdrm.so.2 libglapi.so.0; do
-    [ -e "$HOST_LIBDIR/$core" ] || {
-        echo "ERROR: $core not found on the build host ($HOST_LIBDIR) — cannot bundle the graphics runtime (install libegl1 libgbm1 libwayland-client0 libgl1 libgl1-mesa-dri)" >&2
-        exit 1
-    }
-done
-[ -n "$DRI_SRC" ] && [ -f "$DRI_SRC/swrast_dri.so" ] || {
-    echo "ERROR: no mesa DRI drivers (swrast_dri.so) under $HOST_LIBDIR — install libgl1-mesa-dri on the build host" >&2
+# Phase 2d — install the vendored GL runtime (assets/gl-runtime).
+# The build host's mesa is NOT used for the GL stack. Ubuntu 22.04's mesa
+# (23.2) cannot initialize an EGL display under Xvfb/no-DRI3 X servers at all
+# (its X11 swrast path needs the DRI2/DRI3 protocol), and every newer-mesa
+# distro binary is built against a glibc above our floor — so a GPU-less host
+# aborted with "Could not create default EGL display: EGL_BAD_PARAMETER"
+# before first paint. Instead we ship a small, source-built software renderer
+# (classic non-glvnd mesa, X11 platform, swrast driver — see
+# assets/gl-runtime/README.md for provenance and the exact build recipe) and
+# replace the host mesa bits linuxdeploy copied into usr/lib. Everything is
+# one consistent set with $ORIGIN rpaths, and the DRI driver gets an rpath to
+# the flat usr/lib so its dependencies resolve in-bundle (the old bundle's
+# swrast_dri.so had NO rpath: its libLLVM-15.so.1 dependency never resolved —
+# "MESA-LOADER: failed to open swrast: libLLVM-15.so.1 ... not found").
+# The AppRun hook points LIBGL_DRIVERS_PATH at the dri dir and sets
+# LIBGL_ALWAYS_SOFTWARE=1 (default-only) for the same reason.
+GL_RUNTIME_TAR="$(dirname "$0")/../assets/gl-runtime/gl-runtime-${ARCH}.tar.xz"
+GL_RUNTIME_SUM="$(dirname "$0")/../assets/gl-runtime/gl-runtime-${ARCH}.tar.xz.sha256"
+if [ ! -f "$GL_RUNTIME_TAR" ]; then
+    echo "ERROR: vendored GL runtime not found: $GL_RUNTIME_TAR" >&2
+    exit 1
+fi
+echo "Verifying vendored GL runtime checksum..."
+EXPECTED="$(awk '{print $1}' "$GL_RUNTIME_SUM")"
+ACTUAL="$(sha256sum "$GL_RUNTIME_TAR" | awk '{print $1}')"
+[ "$EXPECTED" = "$ACTUAL" ] || {
+    echo "ERROR: GL runtime checksum mismatch (expected $EXPECTED, got $ACTUAL)" >&2
     exit 1
 }
+echo "Removing build-host GL stack from the AppDir..."
+rm -f "$APPDIR/usr/lib/libEGL.so.1"* "$APPDIR/usr/lib/libEGL.so" \
+      "$APPDIR/usr/lib/libGL.so.1"* "$APPDIR/usr/lib/libGL.so" \
+      "$APPDIR/usr/lib/libGLX.so.0"* "$APPDIR/usr/lib/libOpenGL.so.0"* \
+      "$APPDIR/usr/lib/libGLdispatch.so.0"* \
+      "$APPDIR/usr/lib/libEGL_mesa.so.0"* "$APPDIR/usr/lib/libGLX_mesa.so.0"* \
+      "$APPDIR/usr/lib/libgbm.so.1"* "$APPDIR/usr/lib/libglapi.so.0"* \
+      "$APPDIR/usr/lib/libdrm.so.2"* "$APPDIR/usr/lib/libLLVM-"*.so* \
+      "$APPDIR/usr/lib/libgallium-"*.so*
+rm -rf "$APPDIR/$TRIPLET_LIBREL/dri" 2>/dev/null
+rm -rf "$APPDIR/usr/lib/x86_64-linux-gnu/dri" 2>/dev/null
+rm -rf "$APPDIR/usr/lib/aarch64-linux-gnu/dri" 2>/dev/null
+echo "Installing vendored GL runtime..."
+tar xJf "$GL_RUNTIME_TAR" -C "$APPDIR"
+echo "Vendored GL runtime installed:"
+find "$APPDIR/usr/lib" -maxdepth 1 -name '*.so*' | grep -E 'EGL|GL|drm|gallium' | sed 's/^/  /'
 
-# Copy the core family members themselves. The NEEDED walk below only copies
-# what is NEEDED by something; the glvnd vendor modules (libEGL_mesa/
-# libGLX_mesa) and libOpenGL are dlopen'd at runtime — never NEEDED — so they
-# would be silently missed and dlopen would fall through to the (stock host's
-# empty) system paths: "Could not create default EGL display".
-for core in libwayland-client.so.0 libwayland-egl.so.1 libgbm.so.1 libEGL.so.1 \
-            libGL.so.1 libGLX.so.0 libOpenGL.so.0 libGLdispatch.so.0 \
-            libGLX_mesa.so.0 libEGL_mesa.so.0 libdrm.so.2 libglapi.so.0; do
-    if [ ! -e "$APPDIR/usr/lib/$core" ]; then
-        cp -L "$HOST_LIBDIR/$core" "$APPDIR/usr/lib/$core"
-        patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/$core"
-        echo "  bundled graphics core lib: $core"
-    fi
-done
-
-echo "Bundling graphics runtime closure from $HOST_LIBDIR ..."
-# Walk the NEEDED closure of the graphics family (same walk as Phase 2c, but
-# the ONLY exclusion is the glibc family: X11/xcb/LLVM companions of the new
-# libs are bundled too, so nothing graphics-related resolves to the host).
-graphics_host_provided() {
+# Walk the NEEDED closure of the vendored set and copy anything missing from
+# the build host (the vendored set links the usual X11/xcb family — e.g. the
+# classic libGL NEEDs libxcb-glx.so.0 — which linuxdeploy's closure walk and
+# Phase 2c never saw: both ran before the vendored set was installed). Same
+# glibc-family exclusion as Phase 2c; every copy gets an $ORIGIN rpath.
+gl_host_provided() {
     case "$1" in
         libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libresolv.so*|libutil.so*|\
         libstdc++.so*|libgcc_s.so*|ld-linux-*)
@@ -516,51 +508,33 @@ graphics_host_provided() {
         *) return 1 ;;
     esac
 }
-g_queue=("$HOST_LIBDIR/libwayland-client.so.0" "$HOST_LIBDIR/libwayland-egl.so.1" \
-         "$HOST_LIBDIR/libgbm.so.1" "$HOST_LIBDIR/libEGL.so.1" "$HOST_LIBDIR/libGL.so.1" \
-         "$HOST_LIBDIR/libGLX.so.0" "$HOST_LIBDIR/libOpenGL.so.0" "$HOST_LIBDIR/libGLdispatch.so.0" \
-         "$HOST_LIBDIR/libGLX_mesa.so.0" "$HOST_LIBDIR/libEGL_mesa.so.0" \
-         "$HOST_LIBDIR/libdrm.so.2" "$HOST_LIBDIR/libglapi.so.0" \
-         "$DRI_SRC/swrast_dri.so")
-declare -A seen_graphics
-while [ "${#g_queue[@]}" -gt 0 ]; do
-    g_next=()
-    for lib in "${g_queue[@]}"; do
+gl_queue=()
+for lib in "$APPDIR"/usr/lib/libEGL.so.1 "$APPDIR"/usr/lib/libGL.so.1 \
+           "$APPDIR"/usr/lib/libgallium-*.so "$APPDIR"/usr/lib/libgbm.so.1 \
+           "$APPDIR"/usr/lib/libdrm.so.2 "$APPDIR/$TRIPLET_LIBREL/dri/swrast_dri.so"; do
+    [ -e "$lib" ] && gl_queue+=("$lib")
+done
+declare -A seen_gl
+while [ "${#gl_queue[@]}" -gt 0 ]; do
+    gl_next=()
+    for lib in "${gl_queue[@]}"; do
         while IFS= read -r need; do
             [ -z "$need" ] && continue
-            [ -n "${seen_graphics[$need]:-}" ] && continue
-            seen_graphics[$need]=1
-            graphics_host_provided "$need" && continue
+            [ -n "${seen_gl[$need]:-}" ] && continue
+            seen_gl[$need]=1
+            gl_host_provided "$need" && continue
             if [ -e "$APPDIR/usr/lib/$need" ]; then
-                # Already bundled (linuxdeploy or Phase 2c) — walk it so gaps
-                # behind it are found, but keep the existing copy.
-                g_next+=("$APPDIR/usr/lib/$need")
+                gl_next+=("$APPDIR/usr/lib/$need")
             elif [ -e "$HOST_LIBDIR/$need" ]; then
                 cp -L "$HOST_LIBDIR/$need" "$APPDIR/usr/lib/$need"
                 patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/$need"
-                echo "  bundled graphics lib: $need"
-                g_next+=("$APPDIR/usr/lib/$need")
+                echo "  bundled gl-closure lib: $need"
+                gl_next+=("$APPDIR/usr/lib/$need")
             fi
         done < <(readelf -d "$lib" 2>/dev/null | awk -F'[][]' '/NEEDED/ {print $2}')
     done
-    g_queue=("${g_next[@]}")
+    gl_queue=("${gl_next[@]}")
 done
-
-# Mesa DRI driver dir: on 22.04 every driver name is a hardlink of one ~32MB
-# gallium blob (SONAME libgallium_dri.so, llvmpipe included). Preserve the
-# hardlinks so the AppDir holds a single copy (mksquashfs dedupes anyway).
-DRI_REL="${DRI_SRC#/}"
-mkdir -p "$APPDIR/$DRI_REL"
-copied_dri=0
-for d in "$DRI_SRC"/*_dri.so; do
-    [ -e "$d" ] || continue
-    base="$(basename "$d")"
-    [ -e "$APPDIR/$DRI_REL/$base" ] && continue
-    cp -al "$d" "$APPDIR/$DRI_REL/$base" 2>/dev/null || cp -L "$d" "$APPDIR/$DRI_REL/$base"
-    copied_dri=$((copied_dri + 1))
-done
-[ "$copied_dri" -gt 0 ] || { echo "ERROR: no DRI driver files copied from $DRI_SRC" >&2; exit 1; }
-echo "Bundled DRI drivers: $copied_dri driver names -> $APPDIR/$DRI_REL (incl. swrast software renderer)"
 
 # Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
 # --runtime-file pins the embedded runtime to the checked static FUSE-3
