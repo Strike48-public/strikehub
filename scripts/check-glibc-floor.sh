@@ -4,15 +4,15 @@
 # floors decide which distros can run StrikeHub at all; a runner image
 # upgrade raised the glibc floor silently once.
 #
-# Defaults match Ubuntu 22.04 (glibc 2.35, GCC 12 libstdc++ = GLIBCXX 3.4.30),
+# Defaults match Ubuntu 24.04 (glibc 2.39, GCC 13 libstdc++ = GLIBCXX 3.4.32),
 # which also covers Debian 12.
 #
 # Usage: check-glibc-floor.sh <extracted-appimage-dir> [glibc-floor] [glibcxx-floor]
 set -euo pipefail
 
 ROOT=${1:?usage: check-glibc-floor.sh <extracted-appimage-dir> [glibc-floor] [glibcxx-floor]}
-GLIBC_FLOOR=${2:-2.35}
-GLIBCXX_FLOOR=${3:-3.4.30}
+GLIBC_FLOOR=${2:-2.39}
+GLIBCXX_FLOOR=${3:-3.4.32}
 
 # Highest version of symbol PREFIX_x.y that FILE requires, or empty.
 highest() {

@@ -36,7 +36,7 @@ sudo apt-get install -y \
 The graphics stack (`libegl1 libgbm1 libwayland-client0 libgl1 libgl1-mesa-dri`)
 is bundled **into** the AppImage (Phase 2d of the build script), so the build
 host must have it — the script fails loudly if any piece is missing.
-**Build on the oldest supported glibc (Ubuntu 22.04)** so the bundled libs
+**Build on the oldest supported glibc (Ubuntu 24.04)** so the bundled libs
 stay inside the floor enforced by `scripts/check-glibc-floor.sh`.
 
 ### Build Process
@@ -121,9 +121,9 @@ previously hung startup on hosts like ubuntu 26.04 where the system WebKit is
 newer than the bundled one).
 
 **Support target: the AppImage runs with zero extra packages on stock Ubuntu
-22.04/26.04, including minimal/server images.** Verified on pristine
-`ubuntu:22.04` and `ubuntu:26.04` containers (only Xvfb installed, no
-graphics packages): before the graphics stack was bundled, stock 22.04 exited
+24.04/26.04, including minimal/server images.** Verified on pristine
+`ubuntu:24.04` and `ubuntu:26.04` containers (only Xvfb installed, no
+graphics packages): before the graphics stack was bundled, stock 24.04 exited
 127 on `libwayland-client.so.0` (ldd also missing `libgbm.so.1` +
 `libEGL.so.1`; `ks-connector` missing `libwayland-client.so.0`) and stock
 26.04 failed the same way on `libEGL.so.1`; with the bundled closure the app
@@ -136,7 +136,7 @@ No host FUSE **library** is required: the AppImage embeds the static FUSE-3
 type-2 runtime (see below), which only uses `fusermount3` (present on stock
 Ubuntu 24.04+ and most current distros).
 
-- glibc floor: GLIBC 2.35 / GLIBCXX 3.4.30 (enforced by `scripts/check-glibc-floor.sh`).
+- glibc floor: GLIBC 2.39 / GLIBCXX 3.4.32 (enforced by `scripts/check-glibc-floor.sh`).
 - A display server is required (X11; Xvfb works for headless testing).
 - `ca-certificates` must be present for TLS (native-tls) — preinstalled on
   every normal image, including the minimal ones above.

@@ -358,7 +358,7 @@ PY
 #     built against 2.50.4): the helper linked the host lib while the UI
 #     process ran the bundled one -> IPC version mismatch, the web process
 #     never became ready, the sign-in UI never mapped (startup hang, 4/4).
-#   - host has NO webkit (pristine ubuntu 22.04): the helper's exec failed in
+#   - host has NO webkit (pristine ubuntu 24.04): the helper's exec failed in
 #     the loader — "error while loading shared libraries: libwebkit2gtk-4.1.so.0"
 #     -> black webview / "Failed to spawn child process" abort.
 # An rpath lives in the ELF, so it survives env sanitizing and CWD moves.
@@ -382,7 +382,7 @@ done
 
 # Phase 2c — complete the webkit closure inside the bundle.
 # linuxdeploy's ldd-closure copy leaves out libraries it considers
-# build-host-common (on the ubuntu 22.04 build host: libharfbuzz, libfribidi,
+# build-host-common (on the ubuntu 24.04 build host: libharfbuzz, libfribidi,
 # libfreetype, libfontconfig, libexpat, libz). A minimal host WITHOUT
 # webkit2gtk installed does not have those, so the bundled libwebkit could not
 # load them. Walk the NEEDED closure of the webkit stack and copy whatever is
