@@ -4,8 +4,9 @@
 # floors decide which distros can run StrikeHub at all; a runner image
 # upgrade raised the glibc floor silently once.
 #
-# Defaults match Ubuntu 24.04 (glibc 2.39, GCC 13 libstdc++ = GLIBCXX 3.4.32),
-# which also covers Debian 12.
+# Defaults match Ubuntu 24.04 (glibc 2.39, GCC 13 libstdc++ = GLIBCXX
+# 3.4.32) — the supported floor; 22.04 (2.35) and Debian 12 (2.36) are
+# below it and unsupported.
 #
 # Usage: check-glibc-floor.sh <extracted-appimage-dir> [glibc-floor] [glibcxx-floor]
 set -euo pipefail

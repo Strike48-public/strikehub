@@ -312,16 +312,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux builds run on 22.04 to keep the glibc floor at 2.35 (glibc is
-          # not bundled). Checked by the "Verify glibc/libstdc++ floor" step.
-          - os: ubuntu-22.04
+          # Linux builds run on 24.04 (noble) to keep the glibc floor at 2.39
+          # (glibc is not bundled; 22.04 support was dropped). Checked by the
+          # "Verify glibc/libstdc++ floor" step.
+          - os: ubuntu-24.04
             name: AppImage x86_64
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             artifact: strikehub-appimage-x86_64
             installer: appimage
             binary_name: strikehub
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             name: AppImage aarch64
             target: aarch64-unknown-linux-gnu
             arch: aarch64
@@ -398,8 +399,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # NOTE: libwebkit2gtk-4.1-dev is deliberately NOT installed here —
+          # the "Pin WebKitGTK 2.44.0-2" step below must be the first to
+          # install it (apt refuses to downgrade 2.52.6 -> 2.44.0-2 without
+          # --allow-downgrades).
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             libxdo-dev \
@@ -408,7 +412,28 @@ jobs:
             wget \
             imagemagick \
             librsvg2-bin \
-            libfuse2
+            libfuse2t64
+
+      # Pin WebKitGTK to 2.44.0-2 from the LIVE noble base pocket (main/
+      # universe) — no snapshot.ubuntu.com dependency. WebKit >= 2.46 makes
+      # EGL mandatory in the web process and has no CPU fallback — on
+      # GPU-less hosts (Xvfb, containers, servers) the window stays black.
+      # 2.44 is the last pre-mandatory-EGL release: the non-compositing
+      # shared-memory path still works (the AppRun hook defaults
+      # WEBKIT_DISABLE_COMPOSITING_MODE=1), so the app renders with no GL
+      # stack at all. The noble-updates candidate is 2.52.6, so pin ALL SIX
+      # packages together (pinning only -dev breaks apt's dependency
+      # resolution); noble has no libwpe binary packages (webkit 2.44
+      # dropped that dep) and libfuse2 is libfuse2t64 there. The arm64 noble
+      # pockets ship the same 2.44.0-2 set. This step is the FIRST installer
+      # of libwebkit2gtk-4.1-* on the runner (see the deps step note above).
+      - name: Pin WebKitGTK 2.44.0-2 (GPU-less render fix)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-0=2.44.0-2 libwebkit2gtk-4.1-dev=2.44.0-2 gir1.2-webkit2-4.1=2.44.0-2 \
+            libjavascriptcoregtk-4.1-0=2.44.0-2 libjavascriptcoregtk-4.1-dev=2.44.0-2 gir1.2-javascriptcoregtk-4.1=2.44.0-2
+          pkg-config --modversion webkit2gtk-4.1 | grep -qx 2.44.0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -474,21 +499,19 @@ jobs:
           chmod +x "$AI"
           # Assert the runtime is bundled — if these libs aren't inside, the
           # AppImage relies on the host and isn't portable (the bug we fixed).
-          # The graphics stack (wayland/EGL/GBM/glvnd/mesa) had to be added
-          # explicitly: stock Ubuntu (incl. minimal/server images) ships none
-          # of it, and the build runners DO, which is why it was missing for
-          # years without CI complaining.
+          # The wayland/gbm/EGL load-time deps had to be added explicitly:
+          # stock Ubuntu (incl. minimal/server images) ships none of them, and
+          # the build runners DO, which is why it was missing for years
+          # without CI complaining. NOTE: no GL/mesa/DRI libs are checked
+          # (and not expected) — the GL stack is intentionally NOT bundled;
+          # rendering uses the non-compositing software path.
           export APPIMAGE_EXTRACT_AND_RUN=1
           ./"$AI" --appimage-extract >/dev/null
           MISSING=0
           for lib in libwebkit2gtk-4.1.so.0 libgtk-3.so.0 libxdo.so.3 \
-              libwayland-client libwayland-egl libgbm libEGL libGL libGLX libOpenGL \
-              libGLdispatch libGLX_mesa libEGL_mesa libdrm libglapi libLLVM; do
+              libwayland-client libwayland-egl libgbm libEGL; do
             find squashfs-root -name "$lib*" | grep -q . || { echo "MISSING bundled lib: $lib"; MISSING=1; }
           done
-          # The software renderer must be bundled, else GPU-less stock hosts
-          # (containers, minimal/server images) cannot render the webview.
-          find squashfs-root -path '*dri/swrast_dri.so' | grep -q . || { echo "MISSING DRI software renderer (swrast_dri.so)"; MISSING=1; }
           find squashfs-root -name 'WebKitNetworkProcess' | grep -q . || { echo "MISSING WebKitNetworkProcess helper"; MISSING=1; }
           # The hardcoded absolute WebKit exec path must be patched out, else the
           # web process can't spawn on a host without webkit at that fixed path.
@@ -522,7 +545,7 @@ jobs:
           AI=$(ls StrikeHub-*.AppImage | head -1)
           export APPIMAGE_EXTRACT_AND_RUN=1
           ./"$AI" --appimage-extract >/dev/null
-          scripts/check-glibc-floor.sh squashfs-root 2.35 3.4.30
+          scripts/check-glibc-floor.sh squashfs-root 2.39 3.4.32
           rm -rf squashfs-root
 
       - name: Generate checksum (AppImage)
@@ -886,7 +909,7 @@ jobs:
 
             All packages include bundled connectors (`ks-connector` and `pentest-agent`) and pre-configured environment variables.
             - **`.msi`** — Windows installer with Start Menu, desktop shortcut, and system env vars
-            - **`.AppImage`** — Portable Linux package: runs out of the box on stock Ubuntu 22.04/26.04, including minimal/server images (zero extra packages — the full GTK/WebKit/graphics runtime is bundled). Building from source instead? Install `libegl1 libgbm1 libwayland-client0 ca-certificates libwebkit2gtk-4.1-0` first (desktop)
+            - **`.AppImage`** — Portable Linux package: runs out of the box on stock Ubuntu 24.04/26.04, including minimal/server images (zero extra packages — the GTK/WebKit runtime + wayland/gbm/EGL load-time deps are bundled; no GL stack needed, rendering uses the non-compositing software path). Building from source instead? Install `libegl1 libgbm1 libwayland-client0 ca-certificates libwebkit2gtk-4.1-0` first (desktop)
 
             <!--
             Docker instructions hidden from the rendered release until the published

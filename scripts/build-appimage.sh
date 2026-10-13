@@ -193,11 +193,6 @@ export DEPLOY_GTK_VERSION=3
 # pinned static FUSE-3 runtime — never a downloaded default (#382).
 export APPIMAGETOOL_RUNTIME_FILE="$PWD/${TYPE2_RUNTIME}"
 
-# The build host's multiarch lib dir (e.g. /usr/lib/x86_64-linux-gnu). Needed
-# here for the hook's in-bundle DRI path (below) and by Phase 2d (HOST_LIBDIR).
-HOST_TRIPLET_DIR="$(find /usr/lib -maxdepth 1 -type d -name '*-linux-gnu' 2>/dev/null | head -1)"
-[ -n "$HOST_TRIPLET_DIR" ] || { echo "ERROR: no multiarch lib dir under /usr/lib — cannot determine the host triplet" >&2; exit 1; }
-TRIPLET_LIBREL="${HOST_TRIPLET_DIR#/}"
 
 # Env + CWD as an AppRun hook. linuxdeploy's generated AppRun sources
 # apprun-hooks/*.sh in ALPHABETICAL order before exec'ing the app, and it only
@@ -266,19 +261,16 @@ if [ -z "\${XDG_RUNTIME_DIR:-}" ]; then
     chmod 755 "\$XDG_RUNTIME_DIR" 2>/dev/null || true
     export XDG_RUNTIME_DIR
 fi
-# WebKit's dmabuf/EGL-GBM renderer needs a host GPU with userspace that
-# matches the *bundled* mesa (e.g. NVIDIA GPUs have none on a stock machine)
-# — exactly the pairing a stock install cannot guarantee; it dies with
-# "Could not create default EGL display: EGL_BAD_PARAMETER". Force the GLX
-# path instead: glvnd dispatches into the bundled mesa (vendor modules + DRI
-# drivers from this AppImage), falling back to llvmpipe where the host has no
-# matching open GPU driver. User-set values win.
-# old-webkit render fix: WebKitGTK 2.40 (the build-pinned webkit, see CI)
-# still has a non-compositing software path in the web process. With
-# compositing disabled the web process paints via shared memory and never
-# touches GL/EGL, so the bundle ships NO GL/mesa/DRI stack at all (Phase 2d
-# bundles only the wayland/gbm/EGL libs the binaries NEED at load time).
-# User-set values win.
+# old-webkit render fix: WebKitGTK 2.44 (the build-pinned webkit, see CI)
+# still has a non-compositing software path in the web process, while
+# WebKit >= 2.46 made the dmabuf/EGL-GBM renderer MANDATORY in the web
+# process — it needs a working host EGL display (a host GPU whose userspace
+# matches the bundled webkit, which a stock/minimal install cannot guarantee)
+# and otherwise dies with "Could not create default EGL display:
+# EGL_BAD_PARAMETER". With compositing disabled the web process paints via
+# shared memory and never touches GL/EGL, so the bundle ships NO
+# GL/mesa/DRI stack at all (Phase 2d bundles only the wayland/gbm/EGL libs
+# the binaries NEED at load time). User-set values win.
 : "\${WEBKIT_DISABLE_COMPOSITING_MODE:=1}"
 export WEBKIT_DISABLE_COMPOSITING_MODE
 : "\${WEBKIT_DISABLE_DMABUF_RENDERER:=1}"
@@ -358,7 +350,7 @@ PY
 #     built against 2.50.4): the helper linked the host lib while the UI
 #     process ran the bundled one -> IPC version mismatch, the web process
 #     never became ready, the sign-in UI never mapped (startup hang, 4/4).
-#   - host has NO webkit (pristine ubuntu 24.04): the helper's exec failed in
+#   - host has NO webkit (pristine ubuntu 22.04): the helper's exec failed in
 #     the loader — "error while loading shared libraries: libwebkit2gtk-4.1.so.0"
 #     -> black webview / "Failed to spawn child process" abort.
 # An rpath lives in the ELF, so it survives env sanitizing and CWD moves.
@@ -446,7 +438,7 @@ done
 
 # Phase 2d — bundle the REDUCED graphics runtime closure (wayland family +
 # gbm + the glvnd EGL dispatcher only). With the build pinned to WebKitGTK
-# 2.40 (see CI) and WEBKIT_DISABLE_COMPOSITING_MODE=1 defaulted in the AppRun
+# 2.44 (see CI) and WEBKIT_DISABLE_COMPOSITING_MODE=1 defaulted in the AppRun
 # hook, the web process renders via shared-memory compositing and never needs
 # a GL context — verified on a GPU-less host with NO GL/mesa/webkit packages:
 # the app launches and paints the sign-in UI. So the GL half of the old
@@ -517,8 +509,12 @@ while [ "${#g_queue[@]}" -gt 0 ]; do
 done
 
 # NOTE: no DRI driver dir is bundled any more. With compositing disabled the
-# web process never loads a DRI driver; if it ever tries (user overrode the
-# default), mesa on the HOST resolves it — the bundle has no GL to fix up.
+# web process never loads a DRI driver. If a user re-enables compositing,
+# rendering goes through the bundled glvnd libEGL + libgbm pairing with the
+# host's GL driver — a mixed-version pairing that is UNVERIFIED (the same
+# mismatch class the pre-2.46 EGL_BAD_PARAMETER crash had); the supported
+# default is compositing off, and detect-and-choose compositing on GPU hosts
+# is a follow-up.
 
 # Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
 # --runtime-file pins the embedded runtime to the checked static FUSE-3

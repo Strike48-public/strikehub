@@ -18,24 +18,33 @@ AppImage is a format for distributing portable software on Linux without needing
 # FUSE-3 type-2 runtime (only fusermount3 is used at run time, and it is
 # present on stock Ubuntu 24.04+).
 sudo apt-get update
+# Pin the full six-package WebKitGTK set to 2.44.0-2 to match CI — building
+# against a newer webkit (>= 2.46) produces an AppImage whose web process
+# requires EGL and black-screens GPU-less hosts.
 sudo apt-get install -y \
-    libwebkit2gtk-4.1-dev \
+    libwebkit2gtk-4.1-0=2.44.0-2 \
+    libwebkit2gtk-4.1-dev=2.44.0-2 \
+    gir1.2-webkit2-4.1=2.44.0-2 \
+    libjavascriptcoregtk-4.1-0=2.44.0-2 \
+    libjavascriptcoregtk-4.1-dev=2.44.0-2 \
+    gir1.2-javascriptcoregtk-4.1=2.44.0-2 \
     libgtk-3-dev \
     libayatana-appindicator3-dev \
     libxdo-dev \
     libegl1 \
     libgbm1 \
     libwayland-client0 \
-    libgl1 \
-    libgl1-mesa-dri \
     wget \
     file \
     imagemagick
 ```
 
-The graphics stack (`libegl1 libgbm1 libwayland-client0 libgl1 libgl1-mesa-dri`)
-is bundled **into** the AppImage (Phase 2d of the build script), so the build
-host must have it — the script fails loudly if any piece is missing.
+The reduced graphics runtime (`libegl1 libgbm1 libwayland-client0` — the
+glvnd libEGL dispatcher, GBM and wayland clients the binaries NEED at load
+time) is bundled **into** the AppImage (Phase 2d of the build script), so
+the build host must have it — the script fails loudly if any piece is
+missing. No GL stack (libgl1/mesa/DRI) is needed at build time or bundled:
+rendering uses the non-compositing software path.
 **Build on the oldest supported glibc (Ubuntu 24.04)** so the bundled libs
 stay inside the floor enforced by `scripts/check-glibc-floor.sh`.
 
@@ -111,24 +120,29 @@ chmod +x StrikeHub-*.AppImage
 
 ## Host runtime requirements
 
-The AppImage bundles the GTK3 + WebKitGTK 4.1 runtime, including WebKit's
-out-of-process helpers, **and the full graphics stack** (wayland client, EGL,
-GL/glvnd, mesa DRI drivers with the swrast/llvmpipe software renderer). Their
-`rpath` points inside the bundle, so the bundled runtimes are always the ones
-used — no system `libwebkit2gtk-4.1-0`, mesa, or wayland packages are
-required, and differently-versioned system copies are ignored (which is what
-previously hung startup on hosts like ubuntu 26.04 where the system WebKit is
-newer than the bundled one).
+The AppImage bundles the GTK3 + WebKitGTK 4.1 runtime (pinned to 2.44.0-2,
+the last pre-mandatory-EGL release), including WebKit's out-of-process
+helpers, **and the reduced graphics runtime** (wayland client, the glvnd
+libEGL dispatcher, libgbm — the load-time deps the binaries NEED). **No GL
+stack is bundled**: with `WEBKIT_DISABLE_COMPOSITING_MODE=1` (the AppRun
+hook default) the web process renders via the non-compositing shared-memory
+path and never touches GL/EGL, so GPU-less hosts need no GL packages. The
+bundled libs' `rpath` points inside the bundle, so the bundled runtimes are
+always the ones used — no system `libwebkit2gtk-4.1-0` or wayland packages
+are required, and differently-versioned system copies are ignored (which is
+what previously hung startup on hosts like ubuntu 26.04 where the system
+WebKit is newer than the bundled one).
 
 **Support target: the AppImage runs with zero extra packages on stock Ubuntu
-24.04/26.04, including minimal/server images.** Verified on pristine
-`ubuntu:24.04` and `ubuntu:26.04` containers (only Xvfb installed, no
-graphics packages): before the graphics stack was bundled, stock 24.04 exited
-127 on `libwayland-client.so.0` (ldd also missing `libgbm.so.1` +
-`libEGL.so.1`; `ks-connector` missing `libwayland-client.so.0`) and stock
-26.04 failed the same way on `libEGL.so.1`; with the bundled closure the app
-launches to the sign-in screen and `ldd` on the extracted binary reports no
-missing libraries. (Building from source instead requires `libegl1 libgbm1
+24.04/26.04, including minimal/server images** (22.04 and Debian 12 fall
+below the 2.39 glibc floor). Verified on a strict zero-GL `ubuntu:24.04`
+container (no GL/mesa/webkit packages at all) and an Ubuntu 26.04 VM (bare
+launch, all webkit env combinations), plus the NixOS host: the app launches
+to the sign-in UI and `ldd` on the extracted binaries reports no missing
+libraries. (Historical note: before the wayland/EGL closure was bundled,
+stock 22.04 exited 127 on `libwayland-client.so.0` — ldd also missing
+`libgbm.so.1` + `libEGL.so.1` — and stock 26.04 failed the same way on
+`libEGL.so.1`.) (Building from source instead requires `libegl1 libgbm1
 libwayland-client0 ca-certificates libwebkit2gtk-4.1-0` on the desktop.
 )`
 
