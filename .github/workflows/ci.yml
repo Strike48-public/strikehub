@@ -219,7 +219,10 @@ jobs:
 
   build-installers:
     name: Build ${{ matrix.name }}
-    if: github.repository_owner == 'Strike48-public' && github.ref == 'refs/heads/main'
+    # TEMP (review verification on #127): allow the fix branch; REVERT after
+    # green. github.head_ref (not github.ref) is what matches on
+    # pull_request events.
+    if: github.repository_owner == 'Strike48-public' && (github.ref == 'refs/heads/main' || github.head_ref == 'fix/linux-webkit-244-noble')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
