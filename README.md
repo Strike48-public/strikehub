@@ -57,14 +57,14 @@ This creates a portable AppImage that includes:
 - Default configuration for Strike48 API
 
 > **Linux support target:** the AppImage runs with **zero extra packages on
-> stock Ubuntu 22.04/26.04 — including minimal/server images** (the full
-> runtime, GTK/WebKit + graphics stack, is bundled). Verified on pristine
-> `ubuntu:22.04` and `ubuntu:26.04` containers with only an X server (Xvfb):
-> stock 22.04/26.04 previously exited 127 on missing `libwayland-client.so.0`
-> / `libgbm.so.1` / `libEGL.so.1`; with the bundled closure `ldd` on the
-> extracted binaries shows no missing libraries on both, and on 22.04 the app
-> launches to the sign-in screen (26.04 rendering to be confirmed on a real
-> desktop — see PR). If you build from source instead, install
+> stock Ubuntu 24.04/26.04 — including minimal/server images** (the GTK/WebKit
+> runtime + the wayland/gbm/EGL load-time deps are bundled; no GL stack is
+> needed — rendering uses the non-compositing software path). Verified on a
+> strict zero-GL `ubuntu:24.04` container and an Ubuntu 26.04 VM (plus the
+> NixOS host): the app launches to the sign-in UI bare, with no GL packages
+> present. (Historical: stock 22.04 previously exited 127 on missing
+> `libwayland-client.so.0` / `libgbm.so.1` / `libEGL.so.1`; 22.04 now falls
+> below the 2.39 glibc floor.) If you build from source instead, install
 > `libegl1 libgbm1 libwayland-client0 ca-certificates libwebkit2gtk-4.1-0`
 > (desktop).
 
