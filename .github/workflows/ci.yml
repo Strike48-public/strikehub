@@ -225,16 +225,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux builds run on 22.04 to keep the glibc floor at 2.35 (glibc is
-          # not bundled). Checked by the "Verify glibc/libstdc++ floor" step.
-          - os: ubuntu-22.04
+          # Linux builds run on 24.04 (noble) to keep the glibc floor at 2.39
+          # (glibc is not bundled; 22.04 support was dropped). Checked by the
+          # "Verify glibc/libstdc++ floor" step.
+          - os: ubuntu-24.04
             name: AppImage x86_64
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             artifact: strikehub-appimage-x86_64
             installer: appimage
             binary_name: strikehub
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             name: AppImage aarch64
             target: aarch64-unknown-linux-gnu
             arch: aarch64
@@ -299,7 +300,27 @@ jobs:
             wget \
             imagemagick \
             librsvg2-bin \
-            libfuse2
+            libfuse2t64
+
+      # Pin WebKitGTK to 2.44.0-2 from the LIVE noble base pocket (main/
+      # universe) — no snapshot.ubuntu.com dependency. WebKit >= 2.46 makes
+      # EGL mandatory in the web process and has no CPU fallback — on
+      # GPU-less hosts (Xvfb, containers, servers) the window stays black.
+      # 2.44 is the last pre-mandatory-EGL release: the non-compositing
+      # shared-memory path still works (the AppRun hook defaults
+      # WEBKIT_DISABLE_COMPOSITING_MODE=1), so the app renders with no GL
+      # stack at all. The noble-updates candidate is 2.52.6, so pin ALL SIX
+      # packages together (pinning only -dev breaks apt's dependency
+      # resolution); noble has no libwpe binary packages (webkit 2.44
+      # dropped that dep) and libfuse2 is libfuse2t64 there. The arm64 noble
+      # pockets ship the same 2.44.0-2 set.
+      - name: Pin WebKitGTK 2.44.0-2 (GPU-less render fix)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-0=2.44.0-2 libwebkit2gtk-4.1-dev=2.44.0-2 gir1.2-webkit2-4.1=2.44.0-2 \
+            libjavascriptcoregtk-4.1-0=2.44.0-2 libjavascriptcoregtk-4.1-dev=2.44.0-2 gir1.2-javascriptcoregtk-4.1=2.44.0-2
+          pkg-config --modversion webkit2gtk-4.1 | grep -qx 2.44.0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -409,7 +430,7 @@ jobs:
           AI=$(ls StrikeHub-*.AppImage | head -1)
           export APPIMAGE_EXTRACT_AND_RUN=1
           ./"$AI" --appimage-extract >/dev/null
-          scripts/check-glibc-floor.sh squashfs-root 2.35 3.4.30
+          scripts/check-glibc-floor.sh squashfs-root 2.39 3.4.32
           rm -rf squashfs-root
 
       - uses: actions/upload-artifact@v4
