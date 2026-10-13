@@ -298,8 +298,37 @@ jobs:
             file \
             wget \
             imagemagick \
+            libwpe-1.0-1 \
+            libwpebackend-fdo-1.0-1 \
             librsvg2-bin \
             libfuse2
+
+      # Pin WebKitGTK to 2.40.5 (jammy-security, Sep 2023). WebKit >= 2.42
+      # REQUIRES a working EGL display in the web process and has no CPU
+      # fallback — on GPU-less hosts (Xvfb, containers, servers) the window
+      # stays black with "Could not create default EGL display". 2.40 still
+      # has the non-compositing shared-memory path (the AppRun hook defaults
+      # WEBKIT_DISABLE_COMPOSITING_MODE=1), so the app renders with no GL
+      # stack at all. Current jammy pockets only offer 2.36 (below wry's
+      # >= 2.40 floor) and 2.50.x, so pull the 2.40.5 binaries from Ubuntu's
+      # snapshot service.
+      - name: Pin WebKitGTK 2.40.5 (GPU-less render fix)
+        if: runner.os == 'Linux'
+        run: |
+          SNAP=https://snapshot.ubuntu.com/ubuntu/20230901T030400Z
+          WKVER=2.40.5-0ubuntu0.22.04.1
+          mkdir -p /tmp/wk && cd /tmp/wk
+          for f in \
+            pool/universe/w/webkit2gtk/libwebkit2gtk-4.1-0_${WKVER}_amd64.deb \
+            pool/universe/w/webkit2gtk/libwebkit2gtk-4.1-dev_${WKVER}_amd64.deb \
+            pool/universe/w/webkit2gtk/gir1.2-webkit2-4.1_${WKVER}_amd64.deb \
+            pool/main/w/webkit2gtk/libjavascriptcoregtk-4.1-0_${WKVER}_amd64.deb \
+            pool/main/w/webkit2gtk/libjavascriptcoregtk-4.1-dev_${WKVER}_amd64.deb \
+            pool/main/w/webkit2gtk/gir1.2-javascriptcoregtk-4.1_${WKVER}_amd64.deb; do
+            wget -q "$SNAP/$f"
+          done
+          sudo dpkg -i *.deb
+          pkg-config --modversion webkit2gtk-4.1 | grep -qx 2.40.5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
