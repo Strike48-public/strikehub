@@ -38,8 +38,22 @@ A native desktop shell that unifies Strike48 connector applications into a singl
 ### Prerequisites
 
 - **Rust 1.91.1+** (specified in `.tool-versions`)
-- **macOS or Linux**
+- **A supported platform** (see below)
 - **Matrix server** (optional, for authentication features)
+
+### Supported Platforms
+
+| OS | x86_64 | aarch64 |
+|----|--------|---------|
+| macOS | Yes | Yes |
+| Linux | Yes | Yes |
+| Windows | Yes | No (the x64 build runs under emulation) |
+
+The list lives in `SUPPORTED_PLATFORMS` (`crates/sh-core/src/platform.rs`) and must
+match the release matrix in `.github/workflows/release.yml`. On any other OS/CPU pair,
+the step-1 Device Posture screen shows a non-blocking Platform warning. On Windows the
+native CPU is read from the machine-wide registry, because an emulated x64 process
+reports x86_64 on ARM64 hardware.
 
 ### Quick Start
 
@@ -247,7 +261,9 @@ Before a connector starts, `sh-core` runs device prerequisite checks (kubectl,
 (WSL 2 or Docker) on Windows, etc.). Each `PreflightCheck` may carry an `install_command` the UI can run
 to fix a failed check; `PreflightCheck::is_start_action()` is true when that command
 starts an already-installed dependency whose daemon is stopped, so the wizard offers
-a "Start" button instead of "Install". See `crates/sh-core/src/preflight.rs`.
+a "Start" button instead of "Install". Checks may also report a non-blocking
+`Warning` (currently only the Platform check; see [Supported Platforms](#supported-platforms)).
+See `crates/sh-core/src/preflight.rs`.
 
 ### Observability
 
