@@ -14,6 +14,7 @@ pub mod job;
 pub mod matrix_ws;
 pub mod oauth;
 pub mod ott;
+pub mod platform;
 pub mod preflight;
 // NOT cfg-gated on purpose: `pub use process::{...}` below and the
 // cross-platform call sites (`ipc_runner` spawn, `sh-ui` main teardown +
