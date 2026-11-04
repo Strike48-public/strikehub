@@ -60,7 +60,9 @@ else
 fi
 grep -q '(2 name(s))' "$T/out" && ok "reports the count" || no "reports the count"
 grep -qE 'Zyx|Qvw' "$T/out" && no "a name was printed" || ok "no name is printed"
-[[ "$(stat -f %Lp "$DEST" 2>/dev/null || stat -c %a "$DEST")" == 600 ]] \
+# GNU stat first: on Linux `stat -f` means filesystem status and succeeds,
+# so the BSD form must be the fallback, not the first try.
+[[ "$(stat -c %a "$DEST" 2>/dev/null || stat -f %Lp "$DEST")" == 600 ]] \
     && ok "the list is owner-only (600)" || no "the list is owner-only (600)"
 grep -q '^api repos/Strike48/dev-secrets/contents/secrets/pii/names.sops.yaml ' "$T/gh.argv" \
     && ok "defaults to the dev-secrets file" || no "defaults to the dev-secrets file"
