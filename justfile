@@ -10,7 +10,7 @@ setup:
     git config core.hooksPath .githooks
     @echo "✓ git hooks installed (.githooks/pre-commit)"
 
-# Pull the shared PII name list into .pii-names.local (set PII_NAMES_REPO first)
+# Pull the shared PII name list into .pii-names.local (decrypts it from dev-secrets)
 pii-pull *args:
     scripts/get-pii-names.sh {{args}}
 
