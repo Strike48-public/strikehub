@@ -496,6 +496,15 @@ fn process_check(
                 display_name
             ),
         ),
+        Some(StartFailure::BinaryUnavailable(reason)) => failed(
+            format!("{} connector binary unavailable", display_name),
+            format!(
+                "StrikeHub could not download the {} connector binary and no cached copy \
+                 exists: {reason}.\nCheck your internet connection, then Re-check. If it \
+                 persists, share the logs below.",
+                display_name
+            ),
+        ),
         Some(StartFailure::SpawnFailed(err)) => failed(
             format!("{} connector failed to launch", display_name),
             format!(

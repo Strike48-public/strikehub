@@ -54,13 +54,16 @@ impl IpcConnectorRunner {
         // which also reaches grandchildren and survives signal deaths.
         cmd.kill_on_drop(true);
 
-        // On Windows the desktop app is a GUI-subsystem binary with no console,
-        // so inheriting stdio would make Windows allocate a visible console
-        // window per connector (and CREATE_NO_WINDOW alone would send the child's
-        // output nowhere). Route the child's stdout+stderr to a per-connector log
-        // file next to StrikeHub's own logs so the connector's tracing (e.g. the
-        // shell/PTY spawn path) is captured for debugging; fall back to null if
-        // the file can't be opened. CREATE_NO_WINDOW still suppresses the console.
+        // Route the child's stdout+stderr to a per-connector log file next to
+        // StrikeHub's own logs so the connector's tracing (e.g. the shell/PTY
+        // spawn path, an interrupted download, a panic) is captured for
+        // debugging and survives the connector dying. On Windows the desktop
+        // app is a GUI-subsystem binary with no console, so inheriting stdio
+        // would allocate a visible console window per connector; if the log
+        // file can't be opened there, output goes to null. On Unix a failed
+        // file capture falls back to inheriting the parent's stdio (the
+        // previous behavior) rather than nulling the output. CREATE_NO_WINDOW
+        // still suppresses the console on Windows.
         #[cfg(windows)]
         {
             match connector_log_file(id) {
@@ -77,9 +80,19 @@ impl IpcConnectorRunner {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         #[cfg(not(windows))]
-        {
-            cmd.stdout(std::process::Stdio::inherit());
-            cmd.stderr(std::process::Stdio::inherit());
+        match connector_log_file(id) {
+            Some((path, out, err)) => {
+                tracing::info!("connector '{}' stdout/stderr → {}", id, path.display());
+                cmd.stdout(out);
+                cmd.stderr(err);
+            }
+            None => {
+                // File capture failed (e.g. unwritable data dir) — keep the
+                // previous behavior (inherited terminal) instead of nulling
+                // the output.
+                cmd.stdout(std::process::Stdio::inherit());
+                cmd.stderr(std::process::Stdio::inherit());
+            }
         }
 
         // On Unix, arrange for the child to receive SIGHUP when the parent
@@ -218,22 +231,36 @@ impl Drop for IpcConnectorRunner {
     }
 }
 
-/// Build the per-connector stdout/stderr log destination on Windows.
+/// Build the per-connector stdout/stderr log destination.
 ///
 /// Returns the log path plus two independent `Stdio` handles (one for stdout,
 /// one for stderr) both pointing at the same file, or `None` if the directory
-/// or file can't be created (caller then falls back to `Stdio::null()`).
+/// or file can't be created (the caller then falls back to `Stdio::null()` on
+/// Windows — where there is no console to inherit — or `Stdio::inherit()` on
+/// Unix, where the inherited terminal remains a sensible last resort).
 ///
 /// The file lives alongside StrikeHub's own logs
-/// (`%LOCALAPPDATA%\StrikeHub\logs\connector-<id>.log`) and is truncated on each
-/// spawn so it reflects the current run rather than growing without bound.
-#[cfg(windows)]
+/// (`%LOCALAPPDATA%\StrikeHub\logs\connector-<id>.log` on Windows,
+/// `~/.local/share/StrikeHub/logs/connector-<id>.log` on Linux,
+/// `~/Library/Application Support/StrikeHub/logs/connector-<id>.log` on
+/// macOS) and is truncated on each spawn so it reflects the current run
+/// rather than growing without bound.
 fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::process::Stdio)> {
     let log_dir = crate::config::log_dir()?;
-    std::fs::create_dir_all(&log_dir).ok()?;
+    connector_log_file_in(&log_dir, id)
+}
 
-    // Sanitize the connector id so it can't escape the directory or produce an
-    // invalid filename (ids are normally simple slugs, but be defensive).
+/// Id-sanitization + open semantics, split from [`connector_log_file`] with an
+/// explicit directory so they are unit-testable (mirrors the `resolve_binary_in`
+/// pattern). Ids are normally simple slugs, but be defensive: characters that
+/// could escape the directory or produce an invalid filename are replaced.
+#[allow(dead_code)] // dead_code: used on all platforms; the allow guards test-only builds
+pub(crate) fn connector_log_file_in(
+    log_dir: &Path,
+    id: &str,
+) -> Option<(PathBuf, std::process::Stdio, std::process::Stdio)> {
+    std::fs::create_dir_all(log_dir).ok()?;
+
     let safe_id: String = id
         .chars()
         .map(|c| {
@@ -629,5 +656,49 @@ mod tests {
         assert_eq!(resolved, Path::new(BIN));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Per-connector log file: the id is sanitized, the file is created in the
+    /// log dir, and any stale content from a previous run is truncated on open
+    /// (issue #62: the connector's output must land in a file on every
+    /// platform, so an interrupted activity leaves a record).
+    #[test]
+    fn connector_log_file_sanitizes_id_and_truncates() {
+        let dir = unique_tmp("connector-log");
+        let path = dir.join("connector-pick.log");
+        std::fs::write(&path, b"stale content from a previous run").unwrap();
+
+        let (p, out, err) = connector_log_file_in(&dir, "pick").expect("log file handle");
+        assert_eq!(p, path);
+        // Drop both handles so the file closes before we inspect it.
+        drop(out);
+        drop(err);
+        assert!(
+            std::fs::read(&path).unwrap().is_empty(),
+            "a fresh spawn must truncate the previous run's output"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hostile or odd connector id must never escape the log directory
+    /// (path traversal) — every unsafe character becomes an underscore.
+    #[test]
+    fn connector_log_file_never_escapes_the_log_dir() {
+        let dir = unique_tmp("connector-log-escape");
+        let (p, out, err) =
+            connector_log_file_in(&dir, "../../evil").expect("log file handle");
+        drop(out);
+        drop(err);
+        assert!(
+            p.starts_with(&dir),
+            "log path {} escaped log dir {}",
+            p.display(),
+            dir.display()
+        );
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        assert!(!name.contains('/') && !name.contains('\\'));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
