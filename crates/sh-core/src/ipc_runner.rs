@@ -686,8 +686,7 @@ mod tests {
     #[test]
     fn connector_log_file_never_escapes_the_log_dir() {
         let dir = unique_tmp("connector-log-escape");
-        let (p, out, err) =
-            connector_log_file_in(&dir, "../../evil").expect("log file handle");
+        let (p, out, err) = connector_log_file_in(&dir, "../../evil").expect("log file handle");
         drop(out);
         drop(err);
         assert!(

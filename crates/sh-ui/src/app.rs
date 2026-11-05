@@ -884,8 +884,7 @@ pub fn App() -> Element {
             // to finish rather than racing ahead to spawn.
             #[cfg(feature = "desktop")]
             {
-                static FETCH_RESULTS:
-                    tokio::sync::OnceCell<Vec<(String, sh_core::EnsureResult)>> =
+                static FETCH_RESULTS: tokio::sync::OnceCell<Vec<(String, sh_core::EnsureResult)>> =
                     tokio::sync::OnceCell::const_new();
                 let fetch_results = FETCH_RESULTS
                     .get_or_init(|| async {
@@ -944,12 +943,11 @@ pub fn App() -> Element {
                     };
                     let mut updated = connectors.read().clone();
                     let mut changed = false;
-                    if let Some(c) = updated.iter_mut().find(|c| c.id == *id) {
-                        if c.start_failure.is_none() {
-                            c.start_failure =
-                                Some(StartFailure::BinaryUnavailable(reason));
-                            changed = true;
-                        }
+                    if let Some(c) = updated.iter_mut().find(|c| c.id == *id)
+                        && c.start_failure.is_none()
+                    {
+                        c.start_failure = Some(StartFailure::BinaryUnavailable(reason));
+                        changed = true;
                     }
                     if changed {
                         connectors.set(updated);
@@ -2728,8 +2726,7 @@ mod tests {
 
     #[test]
     fn start_failure_messages_are_operator_actionable() {
-        let no_creds =
-            start_failure_message(&StartFailure::NoCredentials);
+        let no_creds = start_failure_message(&StartFailure::NoCredentials);
         assert!(no_creds.contains("sign out and sign back in"));
 
         let no_binary =
