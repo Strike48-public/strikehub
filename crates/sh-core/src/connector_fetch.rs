@@ -23,7 +23,7 @@ pub(crate) fn should_download(binary_exists: bool, cached_ts: &str, release_ts: 
 }
 
 /// Result of ensuring a connector binary is available.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EnsureResult {
     /// Binary was already cached and up-to-date.
     AlreadyCurrent(PathBuf),

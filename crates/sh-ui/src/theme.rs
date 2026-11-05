@@ -441,6 +441,16 @@ pub fn app_css() -> &'static str {
             color: var(--ink-100);
         }
 
+        /* Issue #62: detail lines on the connector offline screen (went-offline
+           notice, last start failure). */
+        .content-offline-detail {
+            color: var(--status-warning, var(--ink-300));
+            font-size: 12px;
+            max-width: 480px;
+            text-align: center;
+            line-height: 1.5;
+        }
+
         .content-empty h2, .setup-view h2 { font-size: 18px; margin-bottom: 8px; }
         .content-offline h3 { font-size: 14px; }
 
@@ -1392,6 +1402,20 @@ pub fn app_css() -> &'static str {
         .account-sign-out-btn:hover {
             background: var(--status-critical);
             color: var(--accent-foreground);
+        }
+
+        /* Issue #62: one-click access to the log directory from the account
+           view. Neutral styling — opening logs is a diagnostic action, not a
+           destructive one (sign-out gets the critical color). */
+        .account-open-logs-btn {
+            border-color: var(--ink-500, var(--ink-400));
+            color: var(--ink-200, var(--ink-100));
+            margin-top: 8px;
+        }
+
+        .account-open-logs-btn:hover {
+            background: var(--ink-600, var(--ink-500));
+            color: var(--ink-100);
         }
 
         .rail-action.signed-in.active {

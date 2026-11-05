@@ -75,6 +75,38 @@ fn status_will_change(connectors: &[ConnectorConfig], id: &str, next: ConnectorS
         .is_some_and(|c| c.status != next)
 }
 
+/// UTC `HH:MM:SS` for `epoch_secs`. Pure (takes the epoch) so it is unit-
+/// testable; std-only on purpose — this workspace has no time crate, and a
+/// UTC label avoids local-timezone arithmetic (the caller says "UTC").
+fn utc_hhmmss(epoch_secs: u64) -> String {
+    let s = epoch_secs % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// Current time as a UTC `HH:MM:SS` string for connector offline notices
+/// (issue #62).
+fn offline_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    utc_hhmmss(secs)
+}
+
+/// Human-readable reason for a connector start failure (issue #62), shown on
+/// the connector's offline screen. Preflight renders its own richer wording;
+/// this is the short form for the main UI.
+fn start_failure_message(f: &StartFailure) -> String {
+    match f {
+        StartFailure::NoCredentials => {
+            "no credentials available and no registration token could be created — sign out and sign back in"
+                .to_string()
+        }
+        StartFailure::BinaryUnavailable(reason) => format!("binary unavailable: {reason}"),
+        StartFailure::SpawnFailed(err) => format!("launch failed: {err}"),
+    }
+}
+
 /// Connector IDs for which the "cannot authenticate" warning has already been
 /// emitted in the current failure episode. Process-level static: a component
 /// remount (e.g. browser refresh in server mode) must not re-warn about the
@@ -406,6 +438,7 @@ fn sync_config(
         if let Some(prev) = existing.get(&conn.id) {
             conn.status = prev.status;
             conn.start_failure = prev.start_failure.clone();
+            conn.offline_notice = prev.offline_notice.clone();
             conn.display_name = prev.display_name.clone();
             conn.icon = prev.icon.clone();
         }
@@ -851,8 +884,9 @@ pub fn App() -> Element {
             // to finish rather than racing ahead to spawn.
             #[cfg(feature = "desktop")]
             {
-                static FETCH_DONE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-                FETCH_DONE
+                static FETCH_RESULTS: tokio::sync::OnceCell<Vec<(String, sh_core::EnsureResult)>> =
+                    tokio::sync::OnceCell::const_new();
+                let fetch_results = FETCH_RESULTS
                     .get_or_init(|| async {
                         tracing::info!(
                             "[connector-start] fetching connector binaries before start"
@@ -890,8 +924,35 @@ pub fn App() -> Element {
                                 }
                             }
                         }
+                        results
                     })
-                    .await;
+                    .await
+                    .clone();
+
+                // Surface binary fetch failures on the connectors themselves
+                // (issue #62): an unavailable binary means the connector can
+                // never start this session — previously this was log-only. The
+                // write is guarded so an effect re-fire never re-marks (a later
+                // successful start clears the flag).
+                for (id, result) in &fetch_results {
+                    let Some(reason) = (match result {
+                        sh_core::EnsureResult::Unavailable(reason) => Some(reason.clone()),
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    let mut updated = connectors.read().clone();
+                    let mut changed = false;
+                    if let Some(c) = updated.iter_mut().find(|c| c.id == *id)
+                        && c.start_failure.is_none()
+                    {
+                        c.start_failure = Some(StartFailure::BinaryUnavailable(reason));
+                        changed = true;
+                    }
+                    if changed {
+                        connectors.set(updated);
+                    }
+                }
             }
 
             let mut env_vars = matrix_env_vars();
@@ -1344,11 +1405,31 @@ pub fn App() -> Element {
                         }
                     };
 
+                    // `conn.status` is still the PREVIOUS tick's status here
+                    // (`updated` is a clone of `current`), so capture the
+                    // online-before state before overwriting it.
+                    let was_online = conn.status == ConnectorStatus::Online;
+
                     conn.status = if healthy {
                         ConnectorStatus::Online
                     } else {
                         ConnectorStatus::Offline
                     };
+
+                    // Online -> failed health is the moment a running
+                    // connector died (kill, crash, host-app close) — possibly
+                    // mid-activity. Leave a visible, timestamped notice on the
+                    // connector (issue #62) instead of only flipping the status
+                    // dot; the per-connector log file keeps its output as the
+                    // durable record.
+                    if was_online && !healthy {
+                        conn.offline_notice =
+                            Some(format!("went offline at {} UTC", offline_timestamp()));
+                    } else if healthy {
+                        // Back online: a stale "went offline" notice no longer
+                        // describes this connector.
+                        conn.offline_notice = None;
+                    }
 
                     // ── Eviction check for managed runners ──────────────
                     // Skip custom IPC connectors — they are externally managed.
@@ -2389,6 +2470,14 @@ pub fn App() -> Element {
     let active_transport = active.as_ref().map(|c| c.transport);
     let active_conn_id = active.as_ref().map(|c| c.id.clone());
     let active_matrix_addr = active.as_ref().and_then(|c| c.matrix_app_address.clone());
+    // Issue #62 surfacing: a mid-activity offline transition and the last
+    // start failure (spawn/fetch) are rendered on the connector's offline
+    // screen instead of only living in logs.
+    let active_offline_notice = active.as_ref().and_then(|c| c.offline_notice.clone());
+    let active_start_failure = active
+        .as_ref()
+        .and_then(|c| c.start_failure.as_ref())
+        .map(start_failure_message);
     let current_proxy_port = *proxy_port.read();
 
     // In easy mode, drop KubeStudio from the connector cards (Settings + landing
@@ -2546,6 +2635,8 @@ pub fn App() -> Element {
                         active_name: active_name,
                         active_url: active_url,
                         active_status: active_status,
+                        active_offline_notice: active_offline_notice,
+                        active_start_failure: active_start_failure,
                         proxy_port: current_proxy_port,
                         active_port: active_port,
                         active_transport: active_transport,
@@ -2622,6 +2713,32 @@ async fn check_health_ipc(addr: &sh_core::IpcAddr) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn utc_hhmmss_formats_epoch_seconds() {
+        // 2020-01-01 00:00:00 UTC.
+        const EPOCH_2020: u64 = 1_577_836_800;
+        assert_eq!(utc_hhmmss(EPOCH_2020), "00:00:00");
+        assert_eq!(utc_hhmmss(EPOCH_2020 + 3_661), "01:01:01");
+        assert_eq!(utc_hhmmss(EPOCH_2020 + 86_399), "23:59:59");
+        // The day boundary wraps the clock (no date is shown).
+        assert_eq!(utc_hhmmss(EPOCH_2020 + 86_400), "00:00:00");
+    }
+
+    #[test]
+    fn start_failure_messages_are_operator_actionable() {
+        let no_creds = start_failure_message(&StartFailure::NoCredentials);
+        assert!(no_creds.contains("sign out and sign back in"));
+
+        let no_binary =
+            start_failure_message(&StartFailure::BinaryUnavailable("download failed".into()));
+        assert!(no_binary.contains("binary unavailable"));
+        assert!(no_binary.contains("download failed"));
+
+        let spawn = start_failure_message(&StartFailure::SpawnFailed("No such file".into()));
+        assert!(spawn.contains("launch failed"));
+        assert!(spawn.contains("No such file"));
+    }
+
     fn test_connector(id: &str, status: ConnectorStatus) -> ConnectorConfig {
         ConnectorConfig {
             id: id.to_string(),
@@ -2636,6 +2753,7 @@ mod tests {
             matrix_app_address: None,
             instance_id: String::new(),
             start_failure: None,
+            offline_notice: None,
         }
     }
 
