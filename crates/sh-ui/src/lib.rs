@@ -1,5 +1,6 @@
 pub mod app;
 pub mod components;
+pub mod inspector;
 pub mod theme;
 
 pub use app::App;
