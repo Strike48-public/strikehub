@@ -441,6 +441,7 @@ pub fn App() -> Element {
             easy_mode: None,
             allowlist: Default::default(),
             dynamic_connectors: Vec::new(),
+            attribution: Default::default(),
         });
         // Initialise the global allowlist from config (or compile-time defaults).
         let config_sources = if cfg.allowlist.sources.is_empty() {
@@ -1906,6 +1907,49 @@ pub fn App() -> Element {
                     connectors.set(updated);
                     let next = *auth_version.peek() + 1;
                     auth_version.set(next);
+
+                    // PLG download attribution (project-management#315 / item
+                    // #4114): on first launch after sign-in — or when the app
+                    // version/product changed — report product identity +
+                    // version + platform to Matrix. Identity, version, and
+                    // platform only: no user data rides along (the PLG privacy
+                    // model). Best-effort and guarded: a failed attempt is
+                    // logged, the record is NOT persisted, and the next launch
+                    // retries. Never a sign-in blocker.
+                    let attribution_slug = sh_core::url_slug(&api_url);
+                    let attribution_record = sh_core::attribution::current_record();
+                    let attribution_stale = hub_config.read().attribution.get(&attribution_slug)
+                        != Some(&attribution_record);
+                    if attribution_stale {
+                        match sh_core::attribution::report(
+                            &auth,
+                            ws_client.as_deref(),
+                            &attribution_record,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "PLG download attribution recorded ({} {} {})",
+                                    attribution_record.product,
+                                    attribution_record.version,
+                                    attribution_record.platform
+                                );
+                                let mut cfg = hub_config.write();
+                                cfg.attribution.insert(attribution_slug, attribution_record);
+                                if let Err(e) = cfg.save() {
+                                    tracing::warn!(
+                                        "failed to persist attribution record, will re-report next launch: {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "PLG download attribution report failed, will retry next launch: {e}"
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // Signal sign-in AFTER tenant is in env and sandbox token is
