@@ -115,6 +115,22 @@ pub struct HubConfig {
     /// Dynamically defined connectors loaded from the config file.
     #[serde(default)]
     pub dynamic_connectors: Vec<DynamicConnectorDef>,
+    /// Last-reported PLG download attribution, keyed by Studio URL slug
+    /// (same per-URL-slug pattern as `instance_ids`). The report is re-sent
+    /// only when the stored record differs (app upgrade / product change),
+    /// so the mutation fires once per install — idempotent per install/user.
+    #[serde(default)]
+    pub attribution: BTreeMap<String, AttributionRecord>,
+}
+
+/// The last download-attribution record reported to Matrix for one install
+/// (project-management#315 / item #4114). Identity, version, and platform
+/// only — no user data, by design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttributionRecord {
+    pub product: String,
+    pub version: String,
+    pub platform: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +306,7 @@ impl HubConfig {
                 easy_mode: None,
                 allowlist: AllowlistConfig::default(),
                 dynamic_connectors: Vec::new(),
+                attribution: BTreeMap::new(),
             });
         }
         let contents = std::fs::read_to_string(&path)?;
@@ -642,6 +659,35 @@ asset_pattern = "my-tool-agent-{os}-{arch}.{ext}"
     }
 
     #[test]
+    fn test_config_attribution_roundtrip_and_backwards_compat() {
+        // Old config files without an [attribution] section still load.
+        let legacy: HubConfig = toml::from_str("setup_complete = true").unwrap();
+        assert!(legacy.attribution.is_empty());
+
+        // A stored attribution record survives a TOML round-trip.
+        let mut config = legacy;
+        config.attribution.insert(
+            "studio.strike48.com".to_string(),
+            AttributionRecord {
+                product: "pick".to_string(),
+                version: "0.1.15".to_string(),
+                platform: "macos-aarch64".to_string(),
+            },
+        );
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let config2: HubConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            config2.attribution.get("studio.strike48.com"),
+            Some(&AttributionRecord {
+                product: "pick".to_string(),
+                version: "0.1.15".to_string(),
+                platform: "macos-aarch64".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn test_config_backwards_compat_no_new_fields() {
         // Existing config without allowlist/dynamic_connectors should still parse
         let toml_str = r#"
@@ -680,6 +726,7 @@ transport = "ipc"
                 binary_hint: None,
                 asset_pattern: None,
             }],
+            attribution: BTreeMap::new(),
         };
         let errors = config.validate_dynamic_connectors();
         assert!(errors.len() == 1);
@@ -718,6 +765,7 @@ transport = "ipc"
                     asset_pattern: None,
                 },
             ],
+            attribution: BTreeMap::new(),
         };
         let errors = config.validate_dynamic_connectors();
         assert!(errors.iter().any(|e| e.contains("duplicate id")));
@@ -743,6 +791,7 @@ transport = "ipc"
                 binary_hint: None,
                 asset_pattern: None,
             }],
+            attribution: BTreeMap::new(),
         };
         let errors = config.validate_dynamic_connectors();
         assert!(errors.iter().any(|e| e.contains("owner/repo")));

@@ -122,6 +122,7 @@ async fn main() {
             easy_mode: None,
             allowlist: Default::default(),
             dynamic_connectors: Vec::new(),
+            attribution: Default::default(),
         }
     });
     let config_sources = if cfg.allowlist.sources.is_empty() {

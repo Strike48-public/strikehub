@@ -1,4 +1,5 @@
 pub mod allowlist;
+pub mod attribution;
 pub mod auth;
 pub mod bridge;
 pub mod config;
