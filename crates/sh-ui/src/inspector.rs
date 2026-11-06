@@ -45,18 +45,18 @@ pub fn maybe_start() {
 
 #[cfg(not(target_os = "macos"))]
 pub fn maybe_start() {
-    if let Ok(v) = std::env::var("STRIKEHUB_INSPECTOR") {
-        if v == "1" || v.eq_ignore_ascii_case("true") {
-            eprintln!("strikehub-inspect: STRIKEHUB_INSPECTOR is only supported on macOS; ignored");
-        }
+    if let Ok(v) = std::env::var("STRIKEHUB_INSPECTOR")
+        && (v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        eprintln!("strikehub-inspect: STRIKEHUB_INSPECTOR is only supported on macOS; ignored");
     }
 }
 
 #[cfg(target_os = "macos")]
 mod server {
     use std::io::{BufRead, Write};
-    use std::os::unix::net::{UnixListener, UnixStream};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -127,9 +127,7 @@ mod server {
     fn dispatch_cmd(request: &str) -> serde_json::Value {
         let req: serde_json::Value = match serde_json::from_str(request) {
             Ok(v) => v,
-            Err(e) => {
-                return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
-            }
+            Err(e) => return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") }),
         };
         let cmd = req.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
         match cmd {
@@ -171,22 +169,25 @@ mod server {
                 return;
             };
             let wv: &AnyObject = unsafe { &*wv_ptr };
-            let block: RcBlock<ObjCFn> = RcBlock::new(move |image: *mut AnyObject, err: *mut AnyObject| {
-                if image.is_null() {
-                    let _ = tx.send(Err(format!("takeSnapshot failed: {}", obj_c_error_message(err))));
-                    return;
-                }
-                match image_to_png_base64(image) {
-                    Ok(b64) => {
-                        let _ = tx.send(Ok(serde_json::json!({ "ok": true, "png_b64": b64 })));
+            let block: RcBlock<ObjCFn> =
+                RcBlock::new(move |image: *mut AnyObject, err: *mut AnyObject| {
+                    if image.is_null() {
+                        let _ = tx.send(Err(format!(
+                            "takeSnapshot failed: {}",
+                            obj_c_error_message(err)
+                        )));
+                        return;
                     }
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("png encode failed: {e}")));
+                    match image_to_png_base64(image) {
+                        Ok(b64) => {
+                            let _ = tx.send(Ok(serde_json::json!({ "ok": true, "png_b64": b64 })));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(format!("png encode failed: {e}")));
+                        }
                     }
-                }
-            });
-            let cfg: *const AnyObject =
-                unsafe { msg_send![class!(WKSnapshotConfiguration), new] };
+                });
+            let cfg: *const AnyObject = unsafe { msg_send![class!(WKSnapshotConfiguration), new] };
             unsafe {
                 let _: () = msg_send![wv,
                     takeSnapshotWithConfiguration: cfg,
@@ -365,7 +366,10 @@ mod server {
                 let desc: *const AnyObject = msg_send![obj, description];
                 let d = nsstring_to_string(desc);
                 // JS booleans bridge as NSNumber(__NSCFBoolean): "1"/"0".
-                if cls_name == "NSNumber" || cls_name == "__NSCFBoolean" || cls_name == "NSDecimalNumber" {
+                if cls_name == "NSNumber"
+                    || cls_name == "__NSCFBoolean"
+                    || cls_name == "NSDecimalNumber"
+                {
                     match d.as_str() {
                         "1" => return "true".to_string(),
                         "0" => return "false".to_string(),
@@ -446,7 +450,8 @@ mod server {
         }
         unsafe {
             // Match WKWebView *or subclasses* (wry uses its own WryWebView subclass).
-            let wk_class: *const AnyObject = class!(WKWebView) as *const objc2::runtime::AnyClass as *const AnyObject;
+            let wk_class: *const AnyObject =
+                class!(WKWebView) as *const objc2::runtime::AnyClass as *const AnyObject;
             let is_wk: bool = msg_send![view, isKindOfClass: wk_class];
             if is_wk {
                 return Some(view);
