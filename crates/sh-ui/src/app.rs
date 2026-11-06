@@ -1918,15 +1918,15 @@ pub fn App() -> Element {
                     // retries. Never a sign-in blocker.
                     let attribution_slug = sh_core::url_slug(&api_url);
                     let attribution_record = sh_core::attribution::current_record();
-                    let attribution_stale = hub_config
-                        .read()
-                        .attribution
-                        .get(&attribution_slug)
+                    let attribution_stale = hub_config.read().attribution.get(&attribution_slug)
                         != Some(&attribution_record);
                     if attribution_stale {
-                        match sh_core::attribution
-                            ::report(&auth, ws_client.as_deref(), &attribution_record)
-                            .await
+                        match sh_core::attribution::report(
+                            &auth,
+                            ws_client.as_deref(),
+                            &attribution_record,
+                        )
+                        .await
                         {
                             Ok(()) => {
                                 tracing::info!(
@@ -1936,8 +1936,7 @@ pub fn App() -> Element {
                                     attribution_record.platform
                                 );
                                 let mut cfg = hub_config.write();
-                                cfg.attribution
-                                    .insert(attribution_slug, attribution_record);
+                                cfg.attribution.insert(attribution_slug, attribution_record);
                                 if let Err(e) = cfg.save() {
                                     tracing::warn!(
                                         "failed to persist attribution record, will re-report next launch: {e}"

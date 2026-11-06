@@ -145,14 +145,14 @@ fn parse_response(raw: &str, record: &AttributionRecord) -> Result<(), String> {
     let v: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("invalid JSON response: {e}"))?;
 
-    if let Some(errors) = v.pointer("/errors").and_then(|e| e.as_array()) {
-        if !errors.is_empty() {
-            let msg = errors
-                .first()
-                .and_then(|e| e.pointer("/message").and_then(|m| m.as_str()))
-                .unwrap_or("unknown GraphQL error");
-            return Err(format!("GraphQL error: {msg}"));
-        }
+    if let Some(errors) = v.pointer("/errors").and_then(|e| e.as_array())
+        && !errors.is_empty()
+    {
+        let msg = errors
+            .first()
+            .and_then(|e| e.pointer("/message").and_then(|m| m.as_str()))
+            .unwrap_or("unknown GraphQL error");
+        return Err(format!("GraphQL error: {msg}"));
     }
 
     let echoed = v
@@ -162,7 +162,10 @@ fn parse_response(raw: &str, record: &AttributionRecord) -> Result<(), String> {
 
     match echoed.as_deref() {
         Some(p) if p == record.product => Ok(()),
-        Some(p) => Err(format!("Matrix recorded unexpected product {p:?} (sent {:?})", record.product)),
+        Some(p) => Err(format!(
+            "Matrix recorded unexpected product {p:?} (sent {:?})",
+            record.product
+        )),
         None => Err("response missing reportClientAttribution.product".into()),
     }
 }
@@ -228,7 +231,12 @@ mod tests {
         assert_eq!(input["product"], "pick");
         assert_eq!(input["version"], "0.1.15");
         assert_eq!(input["platform"], "macos-aarch64");
-        assert!(body["query"].as_str().unwrap().contains("reportClientAttribution"));
+        assert!(
+            body["query"]
+                .as_str()
+                .unwrap()
+                .contains("reportClientAttribution")
+        );
     }
 
     #[test]
