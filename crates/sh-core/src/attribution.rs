@@ -15,7 +15,7 @@
 //! and the record is NOT persisted, so the next launch retries (guarded
 //! retry). It never blocks sign-in or connector startup.
 
-use crate::auth::{AuthManager, resolve_tls_insecure};
+use crate::auth::AuthManager;
 use crate::config::AttributionRecord;
 use crate::registry::DEFAULT_CONNECTOR_ID;
 
@@ -116,13 +116,11 @@ pub async fn report(
     let base = auth.matrix_url().trim_end_matches('/');
     let url = format!("{base}/api/v1alpha/graphql");
 
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(resolve_tls_insecure(base))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-
-    let resp = client
+    // Reuse the app's shared HTTP client — its TLS policy (set once from the
+    // user's own insecure-TLS setting at AuthManager construction) already
+    // covers this target, so no new TLS decision is made here.
+    let resp = auth
+        .client()
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
         .json(&body)

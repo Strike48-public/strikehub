@@ -341,6 +341,11 @@ impl AuthManager {
         self.tls_insecure
     }
 
+    /// The shared HTTP client (TLS policy already applied at construction).
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     /// Spawn a background task that refreshes the token based on JWT TTL.
     ///
     /// Parses the `exp` claim from the current access token and sleeps for
