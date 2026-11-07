@@ -193,11 +193,6 @@ export DEPLOY_GTK_VERSION=3
 # pinned static FUSE-3 runtime — never a downloaded default (#382).
 export APPIMAGETOOL_RUNTIME_FILE="$PWD/${TYPE2_RUNTIME}"
 
-# The build host's multiarch lib dir (e.g. /usr/lib/x86_64-linux-gnu). Needed
-# here for the hook's in-bundle DRI path (below) and by Phase 2d (HOST_LIBDIR).
-HOST_TRIPLET_DIR="$(find /usr/lib -maxdepth 1 -type d -name '*-linux-gnu' 2>/dev/null | head -1)"
-[ -n "$HOST_TRIPLET_DIR" ] || { echo "ERROR: no multiarch lib dir under /usr/lib — cannot determine the host triplet" >&2; exit 1; }
-TRIPLET_LIBREL="${HOST_TRIPLET_DIR#/}"
 
 # Env + CWD as an AppRun hook. linuxdeploy's generated AppRun sources
 # apprun-hooks/*.sh in ALPHABETICAL order before exec'ing the app, and it only
@@ -266,24 +261,20 @@ if [ -z "\${XDG_RUNTIME_DIR:-}" ]; then
     chmod 755 "\$XDG_RUNTIME_DIR" 2>/dev/null || true
     export XDG_RUNTIME_DIR
 fi
-# WebKit's dmabuf/EGL-GBM renderer needs a host GPU with userspace that
-# matches the *bundled* mesa (e.g. NVIDIA GPUs have none on a stock machine)
-# — exactly the pairing a stock install cannot guarantee; it dies with
-# "Could not create default EGL display: EGL_BAD_PARAMETER". Force the GLX
-# path instead: glvnd dispatches into the bundled mesa (vendor modules + DRI
-# drivers from this AppImage), falling back to llvmpipe where the host has no
-# matching open GPU driver. User-set values win.
+# old-webkit render fix: WebKitGTK 2.44 (the build-pinned webkit, see CI)
+# still has a non-compositing software path in the web process, while
+# WebKit >= 2.46 made the dmabuf/EGL-GBM renderer MANDATORY in the web
+# process — it needs a working host EGL display (a host GPU whose userspace
+# matches the bundled webkit, which a stock/minimal install cannot guarantee)
+# and otherwise dies with "Could not create default EGL display:
+# EGL_BAD_PARAMETER". With compositing disabled the web process paints via
+# shared memory and never touches GL/EGL, so the bundle ships NO
+# GL/mesa/DRI stack at all (Phase 2d bundles only the wayland/gbm/EGL libs
+# the binaries NEED at load time). User-set values win.
+: "\${WEBKIT_DISABLE_COMPOSITING_MODE:=1}"
+export WEBKIT_DISABLE_COMPOSITING_MODE
 : "\${WEBKIT_DISABLE_DMABUF_RENDERER:=1}"
 export WEBKIT_DISABLE_DMABUF_RENDERER
-# The graphics runtime is bundled (Phase 2d): mesa dlopens its DRI drivers
-# from LIBGL_DRIVERS_PATH and glvnd dlopens the vendor modules (libGLX_mesa/
-# libEGL_mesa, which live in \$APPDIR/usr/lib) from __GLX_DRIVERS_PATH. Point
-# both at the in-bundle copies so a stock host with no graphics stack can
-# software-render. User-set values win.
-: "\${__GLX_DRIVERS_PATH:=\$APPDIR/usr/lib}"
-export __GLX_DRIVERS_PATH
-: "\${LIBGL_DRIVERS_PATH:=\$APPDIR/${TRIPLET_LIBREL}/dri}"
-export LIBGL_DRIVERS_PATH
 cd "\${APPDIR}" 2>/dev/null || true
 HOOKEOF
 
@@ -383,7 +374,7 @@ done
 
 # Phase 2c — complete the webkit closure inside the bundle.
 # linuxdeploy's ldd-closure copy leaves out libraries it considers
-# build-host-common (on the ubuntu 22.04 build host: libharfbuzz, libfribidi,
+# build-host-common (on the ubuntu 24.04 build host: libharfbuzz, libfribidi,
 # libfreetype, libfontconfig, libexpat, libz). A minimal host WITHOUT
 # webkit2gtk installed does not have those, so the bundled libwebkit could not
 # load them. Walk the NEEDED closure of the webkit stack and copy whatever is
@@ -445,58 +436,34 @@ for rsvg in "$HOST_LIBDIR"/librsvg-2.so*; do
     echo "  bundled svg loader lib: $base"
 done
 
-# Phase 2d — bundle the graphics runtime closure (wayland + EGL + GL + glvnd +
-# mesa DRI) so a STOCK host with no graphics stack at all can run the app.
-# Field proof (real Ubuntu VMs): stock 22.04 exited 127 with
-# "strikehub-real: error while loading shared libraries: libwayland-client.so.0"
-# (ldd: libgbm.so.1 + libEGL.so.1 also missing; ks-connector missing
-# libwayland-client.so.0); stock 26.04 failed the same way on libEGL.so.1;
-# with the graphics stack installed the app launches to sign-in. CI never
-# caught it because the ubuntu-22.04 runners ship the wayland/mesa stack and
-# the verify step only ever asserted the gtk/webkit/xdo libs.
+# Phase 2d — bundle the REDUCED graphics runtime closure (wayland family +
+# gbm + the glvnd EGL dispatcher only). With the build pinned to WebKitGTK
+# 2.44 (see CI) and WEBKIT_DISABLE_COMPOSITING_MODE=1 defaulted in the AppRun
+# hook, the web process renders via shared-memory compositing and never needs
+# a GL context — verified on a GPU-less host with NO GL/mesa/webkit packages:
+# the app launches and paints the sign-in UI. So the GL half of the old
+# graphics stack (libGL/libGLX/libOpenGL/libGLdispatch, the mesa vendor
+# modules, libdrm, the DRI driver tree incl. swrast + libLLVM) is NOT bundled
+# any more — that was ~468 MB of AppDir / ~25 MB of AppImage.
 #
-# What the bundle must carry, and why each piece:
-#   - libwayland-client: NEEDED by the app binaries (winit/tao), ks-connector,
-#     libgdk-3 and libwebkit2gtk themselves; libgbm: NEEDED by libwebkit2gtk
-#     and libgstgl; libEGL/libGL: NEEDED by libgstgl. These satisfy the
-#     dynamic linker on a stock host (the exit-127 class).
-#   - libEGL.so.1/libgbm.so.1 are ALSO dlopen'd by WebKit at startup
-#     (invisible to any NEEDED walk) — the web process aborts with
-#     "Could not create default EGL display" without them.
-#   - The glvnd dispatchers (libEGL/libGL/libGLX/libOpenGL + libGLdispatch)
-#     dlopen the mesa vendor modules (libEGL_mesa/libGLX_mesa) located via
-#     __GLX_DRIVERS_PATH (set by the AppRun hook); mesa then dlopens a DRI
-#     driver from LIBGL_DRIVERS_PATH. Without a bundled swrast_dri.so
-#     (llvmpipe, which NEEEds libLLVM) a GPU-less container/server image
-#     cannot render the webview at all.
-# The whole family ships as ONE consistent set from the build host (22.04-era
-# on CI): bundling only part of it mixes versions across the EGL boundary and
-# breaks init on hosts with a different mesa (the old EGL_BAD_PARAMETER bug).
-# Every copy gets a $ORIGIN rpath and the binaries already carry RUNPATHs into
-# usr/lib, so all lookups stay in-bundle on any host. Only the glibc family
-# stays host-provided (check-glibc-floor.sh enforces the floor).
-DRI_SRC="$(dirname "$(find -L "$HOST_LIBDIR" -maxdepth 2 -name swrast_dri.so 2>/dev/null | head -1)")"
-for core in libwayland-client.so.0 libwayland-egl.so.1 libgbm.so.1 libEGL.so.1 \
-            libGL.so.1 libGLX.so.0 libOpenGL.so.0 libGLdispatch.so.0 \
-            libGLX_mesa.so.0 libEGL_mesa.so.0 libdrm.so.2 libglapi.so.0; do
+# What still ships, and why:
+#   - libwayland-client/cursor/egl/server: NEEDED at load time by the app
+#     binaries (winit/tao), libgdk-3, libwebkit2gtk and ks-connector.
+#   - libgbm.so.1, libEGL.so.1: NEEDED by libwebkit2gtk/libgstgl and dlopen'd
+#     by WebKit at startup — without them the app exits 127 on a stock host.
+#   - The GL/mesa/DRI family is intentionally ABSENT: with compositing
+#     disabled nothing loads it, and bundling only part of it mixes versions
+#     across the EGL boundary (the old EGL_BAD_PARAMETER bug).
+for core in libwayland-client.so.0 libwayland-egl.so.1 libwayland-server.so.0 \
+            libwayland-cursor.so.0 libgbm.so.1 libEGL.so.1; do
     [ -e "$HOST_LIBDIR/$core" ] || {
-        echo "ERROR: $core not found on the build host ($HOST_LIBDIR) — cannot bundle the graphics runtime (install libegl1 libgbm1 libwayland-client0 libgl1 libgl1-mesa-dri)" >&2
+        echo "ERROR: $core not found on the build host ($HOST_LIBDIR) — cannot bundle the reduced graphics runtime (install libegl1 libgbm1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libwayland-server0)" >&2
         exit 1
     }
 done
-[ -n "$DRI_SRC" ] && [ -f "$DRI_SRC/swrast_dri.so" ] || {
-    echo "ERROR: no mesa DRI drivers (swrast_dri.so) under $HOST_LIBDIR — install libgl1-mesa-dri on the build host" >&2
-    exit 1
-}
 
-# Copy the core family members themselves. The NEEDED walk below only copies
-# what is NEEDED by something; the glvnd vendor modules (libEGL_mesa/
-# libGLX_mesa) and libOpenGL are dlopen'd at runtime — never NEEDED — so they
-# would be silently missed and dlopen would fall through to the (stock host's
-# empty) system paths: "Could not create default EGL display".
-for core in libwayland-client.so.0 libwayland-egl.so.1 libgbm.so.1 libEGL.so.1 \
-            libGL.so.1 libGLX.so.0 libOpenGL.so.0 libGLdispatch.so.0 \
-            libGLX_mesa.so.0 libEGL_mesa.so.0 libdrm.so.2 libglapi.so.0; do
+for core in libwayland-client.so.0 libwayland-egl.so.1 libwayland-server.so.0 \
+            libwayland-cursor.so.0 libgbm.so.1 libEGL.so.1; do
     if [ ! -e "$APPDIR/usr/lib/$core" ]; then
         cp -L "$HOST_LIBDIR/$core" "$APPDIR/usr/lib/$core"
         patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/$core"
@@ -504,10 +471,10 @@ for core in libwayland-client.so.0 libwayland-egl.so.1 libgbm.so.1 libEGL.so.1 \
     fi
 done
 
-echo "Bundling graphics runtime closure from $HOST_LIBDIR ..."
-# Walk the NEEDED closure of the graphics family (same walk as Phase 2c, but
-# the ONLY exclusion is the glibc family: X11/xcb/LLVM companions of the new
-# libs are bundled too, so nothing graphics-related resolves to the host).
+echo "Bundling reduced graphics runtime closure from $HOST_LIBDIR ..."
+# Walk the NEEDED closure of the reduced family so their own gaps (e.g. X11
+# companions behind libEGL) are bundled too; the ONLY exclusion is the glibc
+# family, so nothing left in the closure resolves to the host.
 graphics_host_provided() {
     case "$1" in
         libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libresolv.so*|libutil.so*|\
@@ -517,11 +484,8 @@ graphics_host_provided() {
     esac
 }
 g_queue=("$HOST_LIBDIR/libwayland-client.so.0" "$HOST_LIBDIR/libwayland-egl.so.1" \
-         "$HOST_LIBDIR/libgbm.so.1" "$HOST_LIBDIR/libEGL.so.1" "$HOST_LIBDIR/libGL.so.1" \
-         "$HOST_LIBDIR/libGLX.so.0" "$HOST_LIBDIR/libOpenGL.so.0" "$HOST_LIBDIR/libGLdispatch.so.0" \
-         "$HOST_LIBDIR/libGLX_mesa.so.0" "$HOST_LIBDIR/libEGL_mesa.so.0" \
-         "$HOST_LIBDIR/libdrm.so.2" "$HOST_LIBDIR/libglapi.so.0" \
-         "$DRI_SRC/swrast_dri.so")
+         "$HOST_LIBDIR/libwayland-server.so.0" "$HOST_LIBDIR/libwayland-cursor.so.0" \
+         "$HOST_LIBDIR/libgbm.so.1" "$HOST_LIBDIR/libEGL.so.1")
 declare -A seen_graphics
 while [ "${#g_queue[@]}" -gt 0 ]; do
     g_next=()
@@ -532,8 +496,6 @@ while [ "${#g_queue[@]}" -gt 0 ]; do
             seen_graphics[$need]=1
             graphics_host_provided "$need" && continue
             if [ -e "$APPDIR/usr/lib/$need" ]; then
-                # Already bundled (linuxdeploy or Phase 2c) — walk it so gaps
-                # behind it are found, but keep the existing copy.
                 g_next+=("$APPDIR/usr/lib/$need")
             elif [ -e "$HOST_LIBDIR/$need" ]; then
                 cp -L "$HOST_LIBDIR/$need" "$APPDIR/usr/lib/$need"
@@ -546,21 +508,13 @@ while [ "${#g_queue[@]}" -gt 0 ]; do
     g_queue=("${g_next[@]}")
 done
 
-# Mesa DRI driver dir: on 22.04 every driver name is a hardlink of one ~32MB
-# gallium blob (SONAME libgallium_dri.so, llvmpipe included). Preserve the
-# hardlinks so the AppDir holds a single copy (mksquashfs dedupes anyway).
-DRI_REL="${DRI_SRC#/}"
-mkdir -p "$APPDIR/$DRI_REL"
-copied_dri=0
-for d in "$DRI_SRC"/*_dri.so; do
-    [ -e "$d" ] || continue
-    base="$(basename "$d")"
-    [ -e "$APPDIR/$DRI_REL/$base" ] && continue
-    cp -al "$d" "$APPDIR/$DRI_REL/$base" 2>/dev/null || cp -L "$d" "$APPDIR/$DRI_REL/$base"
-    copied_dri=$((copied_dri + 1))
-done
-[ "$copied_dri" -gt 0 ] || { echo "ERROR: no DRI driver files copied from $DRI_SRC" >&2; exit 1; }
-echo "Bundled DRI drivers: $copied_dri driver names -> $APPDIR/$DRI_REL (incl. swrast software renderer)"
+# NOTE: no DRI driver dir is bundled any more. With compositing disabled the
+# web process never loads a DRI driver. If a user re-enables compositing,
+# rendering goes through the bundled glvnd libEGL + libgbm pairing with the
+# host's GL driver — a mixed-version pairing that is UNVERIFIED (the same
+# mismatch class the pre-2.46 EGL_BAD_PARAMETER crash had); the supported
+# default is compositing off, and detect-and-choose compositing on GPU hosts
+# is a follow-up.
 
 # Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
 # --runtime-file pins the embedded runtime to the checked static FUSE-3
