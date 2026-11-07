@@ -408,6 +408,10 @@ jobs:
             wget \
             imagemagick \
             librsvg2-bin \
+            # libllvm15: the bundled software renderer (swrast_dri.so) NEEDEDs
+            # the build host's libLLVM-15.so.1; without it the AppImage aborts
+            # silently on GPU-less stock hosts (project-management#377).
+            libllvm15 \
             libfuse2
 
       - uses: dtolnay/rust-toolchain@stable
@@ -489,6 +493,15 @@ jobs:
           # The software renderer must be bundled, else GPU-less stock hosts
           # (containers, minimal/server images) cannot render the webview.
           find squashfs-root -path '*dri/swrast_dri.so' | grep -q . || { echo "MISSING DRI software renderer (swrast_dri.so)"; MISSING=1; }
+          # The software renderer must be ABLE TO LOAD the bundled libLLVM: mesa
+          # dlopens the DRI drivers with the driver's own rpath first, and stock
+          # GPU-less hosts ship no libLLVM (project-management#377: silent
+          # EGL_NOT_INITIALIZED abort). Assert the rpath when the driver links it.
+          SWRAST_AI=$(find squashfs-root -path '*dri/swrast_dri.so' | head -1)
+          if readelf -d "$SWRAST_AI" 2>/dev/null | awk -F'[][]' '/NEEDED/ {print $2}' | grep -qi '^libLLVM'; then
+            readelf -d "$SWRAST_AI" | grep -E '\(RPATH\)|\(RUNPATH\)' | grep -q 'ORIGIN' \
+              || { echo "MISSING: rpath into the bundle on swrast_dri.so (cannot find bundled libLLVM on GPU-less hosts)"; MISSING=1; }
+          fi
           find squashfs-root -name 'WebKitNetworkProcess' | grep -q . || { echo "MISSING WebKitNetworkProcess helper"; MISSING=1; }
           # The hardcoded absolute WebKit exec path must be patched out, else the
           # web process can't spawn on a host without webkit at that fixed path.

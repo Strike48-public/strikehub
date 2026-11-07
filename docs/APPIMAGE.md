@@ -28,6 +28,7 @@ sudo apt-get install -y \
     libwayland-client0 \
     libgl1 \
     libgl1-mesa-dri \
+    libllvm15 \
     wget \
     file \
     imagemagick
@@ -129,8 +130,19 @@ graphics packages): before the graphics stack was bundled, stock 22.04 exited
 26.04 failed the same way on `libEGL.so.1`; with the bundled closure the app
 launches to the sign-in screen and `ldd` on the extracted binary reports no
 missing libraries. (Building from source instead requires `libegl1 libgbm1
-libwayland-client0 ca-certificates libwebkit2gtk-4.1-0` on the desktop.
-)`
+libwayland-client0 libllvm15 ca-certificates libwebkit2gtk-4.1-0` on the
+desktop.)`
+
+The software renderer (swrast/llvmpipe) links the build host's LLVM runtime
+(`libLLVM-<N>.so.1`). Mesa `dlopen`s DRI drivers with the driver's own rpath
+first, so Phase 2d patches that rpath into the bundle for every driver that
+links libLLVM — without it, a stock GPU-less host (no host libLLVM) aborts
+silently with `Could not create surfaceless EGL display: EGL_NOT_INITIALIZED`
+(project-management#377, reproduced on a stock 24.04 VM; the build fails
+loudly if the build host lacks the matching `libllvm<N>` package). The AppRun
+hook additionally fails loudly with an actionable hint (`sudo apt install
+libllvm15` on Ubuntu) if a GPU-less host probe (ldd on the bundled swrast) finds
+the software renderer's closure incomplete.
 
 No host FUSE **library** is required: the AppImage embeds the static FUSE-3
 type-2 runtime (see below), which only uses `fusermount3` (present on stock

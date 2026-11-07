@@ -284,6 +284,29 @@ export WEBKIT_DISABLE_DMABUF_RENDERER
 export __GLX_DRIVERS_PATH
 : "\${LIBGL_DRIVERS_PATH:=\$APPDIR/${TRIPLET_LIBREL}/dri}"
 export LIBGL_DRIVERS_PATH
+# Loud-fail preflight (Strike48/project-management#377): on a GPU-less host
+# the webview can only render via the bundled software renderer
+# (swrast/llvmpipe). If THIS bundle's swrast cannot resolve its own
+# libraries, WebKit died silently ("Could not create surfaceless EGL display:
+# EGL_NOT_INITIALIZED"). Fail with an actionable message instead. The probe
+# never blocks launch on its own failure: no ldd (or any probe error) simply
+# skips the check.
+if [ ! -e /dev/dri/renderD128 ] && [ ! -e /dev/dri/renderD129 ]; then
+    _sh_swrast="\${LIBGL_DRIVERS_PATH:-}/swrast_dri.so"
+    if [ -n "\${_sh_swrast:-}" ] && [ -e "\$_sh_swrast" ] && command -v ldd >/dev/null 2>&1; then
+        # Probe WITHOUT LD_LIBRARY_PATH: that is exactly mesa's view when it
+        # dlopens the DRI driver (driver rpath -> host cache). A broken bundle
+        # with the lib present-but-unreachable must fail this probe.
+        _sh_missing="$(ldd "\$_sh_swrast" 2>/dev/null | awk '/not found/ {print \$1}' | grep -vE '^(libc\.|libm\.|libpthread\.|libdl\.|librt\.|libresolv\.|libutil\.|libstdc\+\+\.|libgcc_s\.|ld-linux)' || true)"
+        if [ -n "\$_sh_missing" ]; then
+            echo "error: StrikeHub cannot start: this machine has no GPU render node and the software renderer bundled in this AppImage is missing libraries:" >&2
+            printf '       %s\n' \$_sh_missing >&2
+            echo "       Reinstall the latest AppImage, or install the host package, e.g.:" >&2
+            echo "         Ubuntu 22.04/24.04:  sudo apt install libllvm15" >&2
+            exit 1
+        fi
+    fi
+fi
 cd "\${APPDIR}" 2>/dev/null || true
 HOOKEOF
 
@@ -488,6 +511,21 @@ done
     echo "ERROR: no mesa DRI drivers (swrast_dri.so) under $HOST_LIBDIR — install libgl1-mesa-dri on the build host" >&2
     exit 1
 }
+# The software renderer (swrast_dri.so / llvmpipe) dynamically links the
+# build host's LLVM runtime (libLLVM-<N>.so.1). The NEEDED walk below bundles
+# it — but only if it is present on the build host. Without it, a GPU-less
+# stock host cannot load the bundled swrast and WebKit aborts SILENTLY with
+# "Could not create surfaceless EGL display: EGL_NOT_INITIALIZED"
+# (Strike48/project-management#377, reproduced on a stock 24.04 VM). Fail the
+# build loudly instead of shipping that.
+LLVM_SONAME="$(readelf -d "$DRI_SRC/swrast_dri.so" 2>/dev/null | awk -F'[][]' '/NEEDED/ {print $2}' | grep -i '^libLLVM' | head -1)"
+if [ -n "$LLVM_SONAME" ] && [ ! -e "$HOST_LIBDIR/$LLVM_SONAME" ]; then
+    echo "ERROR: $LLVM_SONAME is NEEDED by the bundled software renderer (swrast_dri.so)" >&2
+    echo "       but is not present on the build host ($HOST_LIBDIR)." >&2
+    echo "       Install the matching package, e.g.: sudo apt install libllvm15  (Ubuntu 22.04/24.04)" >&2
+    echo "       (without it, GPU-less stock hosts cannot render — see project-management#377)" >&2
+    exit 1
+fi
 
 # Copy the core family members themselves. The NEEDED walk below only copies
 # what is NEEDED by something; the glvnd vendor modules (libEGL_mesa/
@@ -561,6 +599,32 @@ for d in "$DRI_SRC"/*_dri.so; do
 done
 [ "$copied_dri" -gt 0 ] || { echo "ERROR: no DRI driver files copied from $DRI_SRC" >&2; exit 1; }
 echo "Bundled DRI drivers: $copied_dri driver names -> $APPDIR/$DRI_REL (incl. swrast software renderer)"
+
+# DRI drivers are dlopen'd by mesa at runtime, so their NEEDED libs resolve
+# via the driver's OWN rpath first — the $ORIGIN rpaths on the bundled core
+# libs do NOT reach them. Stock GPU-less Ubuntu ships no libLLVM, so without
+# an rpath of their own pointing into the bundle, swrast's NEEDED
+# libLLVM-<N>.so.1 resolves against the host, the dlopen fails, and WebKit
+# aborts silently (project-management#377; on a stock 24.04 VM:
+# "MESA-LOADER: failed to open swrast: libLLVM-15.so.1: cannot open shared
+# object file" -> "Could not create surfaceless EGL display: EGL_NOT_INITIALIZED.
+# Aborting..."). Give every driver that links libLLVM an
+# rpath into the bundled usr/lib. De-hardlink first: the DRI files are
+# hardlinks of the build host's gallium blob and patchelf writes in place.
+# (mksquashfs dedupes the identical patched copies — no AppImage size cost.)
+if [ -n "$LLVM_SONAME" ]; then
+    DRI_LIB_REL="$(realpath -m --relative-to="$APPDIR/$DRI_REL" "$APPDIR/usr/lib")"
+    patched_dri=0
+    for f in "$APPDIR/$DRI_REL"/*_dri.so; do
+        [ -e "$f" ] || continue
+        readelf -d "$f" 2>/dev/null | awk -F'[][]' '/NEEDED/ {print $2}' | grep -qx "$LLVM_SONAME" || continue
+        cp -L "$f" "$f.strike48-rpath"
+        patchelf --set-rpath '$ORIGIN/'"$DRI_LIB_REL" "$f.strike48-rpath"
+        mv "$f.strike48-rpath" "$f"
+        patched_dri=$((patched_dri + 1))
+    done
+    echo "Patched libLLVM rpath into $patched_dri DRI driver(s): \$ORIGIN/$DRI_LIB_REL"
+fi
 
 # Phase 3 — package the fully-populated AppDir (linuxdeploy already wrote AppRun).
 # --runtime-file pins the embedded runtime to the checked static FUSE-3
