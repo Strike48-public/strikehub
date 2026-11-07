@@ -297,7 +297,7 @@ if [ ! -e /dev/dri/renderD128 ] && [ ! -e /dev/dri/renderD129 ]; then
         # Probe WITHOUT LD_LIBRARY_PATH: that is exactly mesa's view when it
         # dlopens the DRI driver (driver rpath -> host cache). A broken bundle
         # with the lib present-but-unreachable must fail this probe.
-        _sh_missing="$(ldd "\$_sh_swrast" 2>/dev/null | awk '/not found/ {print \$1}' | grep -vE '^(libc\.|libm\.|libpthread\.|libdl\.|librt\.|libresolv\.|libutil\.|libstdc\+\+\.|libgcc_s\.|ld-linux)' || true)"
+        _sh_missing="\$(ldd "\$_sh_swrast" 2>/dev/null | awk '/not found/ {print \$1}' | grep -vE '^(libc\.|libm\.|libpthread\.|libdl\.|librt\.|libresolv\.|libutil\.|libstdc\+\+\.|libgcc_s\.|ld-linux)' || true)"
         if [ -n "\$_sh_missing" ]; then
             echo "error: StrikeHub cannot start: this machine has no GPU render node and the software renderer bundled in this AppImage is missing libraries:" >&2
             printf '       %s\n' \$_sh_missing >&2
