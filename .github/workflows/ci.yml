@@ -90,8 +90,9 @@ jobs:
         with:
           key: aarch64-pc-windows-msvc-check
       # Compile proof for the arm64 Windows target (native ARM runner):
-      # the Windows ARM MSI is gated to main/tag pushes, so without this,
-      # PRs could land with the arm64 half of the app never compiled.
+      # the Windows ARM MSI is only built by release.yml (tag pushes or a
+      # workflow_dispatch dry run), so without this, PRs could land with
+      # the arm64 half of the app never compiled.
       - name: cargo check (aarch64-pc-windows-msvc)
         run: cargo check --all-targets -p sh-core --target aarch64-pc-windows-msvc
       - name: cargo test — Job Object runtime (aarch64-pc-windows-msvc)
@@ -131,7 +132,11 @@ jobs:
           - os: macos-15-intel
             arch: x86_64
             target: x86_64-apple-darwin
-          - os: macos-14
+          # macos-26: the current GA ARM Mac image (macos-latest since
+          # 2026-06); the old label's ARM pool was retired by GitHub, which
+          # cancelled the aarch64 DMG on the 2026-11-07 main build. macOS 26
+          # is arm64-only, so the Intel build stays on macos-15-intel.
+          - os: macos-26
             arch: aarch64
             target: aarch64-apple-darwin
     steps:

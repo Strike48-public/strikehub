@@ -22,15 +22,21 @@ if (-not $PickVersion) {
 }
 
 # Map arch to Rust target triple and WiX arch identifiers.
-# $UpgradeCode MUST differ per architecture: Windows Installer treats
-# products sharing an UpgradeCode as the same product, so an arm64 MSI with
-# the x64 code would fight the x86_64 install on ARM Windows (Prism) hosts.
-# The x64 code is unchanged so existing x64 installs keep upgrading in place.
+# $UpgradeCode is SHARED across architectures on purpose: Windows Installer
+# treats products with the same UpgradeCode as one product line, so an arm64
+# MSI on an ARM (Prism) box that already runs the x64 install is a major
+# upgrade - MajorUpgrade (wix/main.wxs, Schedule=afterInstallInitialize)
+# removes the x64 product first, and the arm64 install then owns the same
+# Program Files dir and the same stable component GUIDs. No coexistence, no
+# GUID conflict; same-version installs of the other arch are the only no-op
+# ("already installed"), and the next release bumps over them. The x64 code
+# is unchanged so existing x64 installs keep upgrading in place.
 switch ($Arch) {
-    "x86_64"  { $Target = "x86_64-pc-windows-msvc";  $WixArch = "x64";   $WixPlatform = "x64";   $UpgradeCode = "A8E5B4C7-3D92-4E89-B1F3-926789ABCDEF" }
-    "aarch64" { $Target = "aarch64-pc-windows-msvc";  $WixArch = "arm64"; $WixPlatform = "arm64"; $UpgradeCode = "ACAD070A-5B8C-41D1-9918-B3378C36CB1C" }
+    "x86_64"  { $Target = "x86_64-pc-windows-msvc";  $WixArch = "x64";   $WixPlatform = "x64" }
+    "aarch64" { $Target = "aarch64-pc-windows-msvc";  $WixArch = "arm64"; $WixPlatform = "arm64" }
     default   { Write-Host "Unsupported arch: $Arch" -ForegroundColor Red; exit 1 }
 }
+$UpgradeCode = "A8E5B4C7-3D92-4E89-B1F3-926789ABCDEF"
 # Release asset arch token: pick/kubestudio publish ...-windows-x86_64 / -arm64
 $AssetArch = if ($Arch -eq "aarch64") { "arm64" } else { "x86_64" }
 

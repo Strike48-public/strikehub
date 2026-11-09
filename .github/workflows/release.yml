@@ -338,8 +338,9 @@ jobs:
             binary_name: strikehub.exe
           # Native ARM Windows runner (GA since 2025): builds strikehub.exe +
           # the connectors from source at the pinned refs for arm64, and WiX
-          # links an arm64 MSI (build-msi.ps1 maps aarch64 -> arm64, incl. a
-          # distinct per-arch UpgradeCode so x64/arm64 installs coexist).
+          # links an arm64 MSI (build-msi.ps1 maps aarch64 -> arm64). The MSI
+          # shares the x64 UpgradeCode, so on an ARM box it upgrades over an
+          # existing x64 install instead of coexisting with it.
           - os: windows-11-arm
             name: MSI arm64
             target: aarch64-pc-windows-msvc
