@@ -4,7 +4,7 @@
     <Product
         Id='*'
         Name='StrikeHub'
-        UpgradeCode='A8E5B4C7-3D92-4E89-B1F3-926789ABCDEF'
+        UpgradeCode='$(var.UpgradeCode)'
         Manufacturer='Strike48'
         Language='1033'
         Codepage='1252'

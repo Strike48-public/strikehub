@@ -80,6 +80,23 @@ jobs:
       - name: cargo test — Job Object runtime (x86_64-pc-windows-msvc)
         run: cargo test -p sh-core --target x86_64-pc-windows-msvc job
 
+  check-windows-arm64:
+    name: Check (Windows arm64)
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-pc-windows-msvc-check
+      # Compile proof for the arm64 Windows target (native ARM runner):
+      # the Windows ARM MSI is gated to main/tag pushes, so without this,
+      # PRs could land with the arm64 half of the app never compiled.
+      - name: cargo check (aarch64-pc-windows-msvc)
+        run: cargo check --all-targets -p sh-core --target aarch64-pc-windows-msvc
+      - name: cargo test — Job Object runtime (aarch64-pc-windows-msvc)
+        run: cargo test -p sh-core --target aarch64-pc-windows-msvc job
+
   build-server:
     name: Build Server
     runs-on: ubuntu-latest

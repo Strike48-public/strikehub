@@ -336,6 +336,17 @@ jobs:
             artifact: strikehub-windows-x86_64
             installer: msi
             binary_name: strikehub.exe
+          # Native ARM Windows runner (GA since 2025): builds strikehub.exe +
+          # the connectors from source at the pinned refs for arm64, and WiX
+          # links an arm64 MSI (build-msi.ps1 maps aarch64 -> arm64, incl. a
+          # distinct per-arch UpgradeCode so x64/arm64 installs coexist).
+          - os: windows-11-arm
+            name: MSI arm64
+            target: aarch64-pc-windows-msvc
+            arch: aarch64
+            artifact: strikehub-windows-arm64
+            installer: msi
+            binary_name: strikehub.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -650,7 +661,12 @@ jobs:
             arch: x86_64
             target: x86_64-apple-darwin
             connector_suffix: darwin-x86_64
-          - os: macos-15
+          # macos-26: the current GA ARM Mac image (macos-latest since 2026-06).
+          # The previous label, macos-15, had its ARM pool config retired by
+          # GitHub ("configuration 'macos-14-arm64-us-default' is not supported")
+          # and cancelled the Mac ARM DMG on the 2026-11-07 main build.
+          # macOS 26 is arm64-only, so the Intel build stays on macos-15-intel.
+          - os: macos-26
             arch: aarch64
             target: aarch64-apple-darwin
             connector_suffix: darwin-aarch64
@@ -906,6 +922,7 @@ jobs:
             | Linux AppImage | x86_64 | `StrikeHub-*-x86_64.AppImage` |
             | Linux AppImage | aarch64 | `StrikeHub-*-aarch64.AppImage` |
             | Windows MSI | x86_64 | `strikehub-windows-x86_64.msi` |
+            | Windows MSI | arm64 | `strikehub-windows-arm64.msi` |
 
             All packages include bundled connectors (`ks-connector` and `pentest-agent`) and pre-configured environment variables.
             - **`.msi`** — Windows installer with Start Menu, desktop shortcut, and system env vars

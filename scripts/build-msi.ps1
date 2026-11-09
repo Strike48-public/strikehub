@@ -21,12 +21,18 @@ if (-not $PickVersion) {
     }
 }
 
-# Map arch to Rust target triple and WiX arch identifier
+# Map arch to Rust target triple and WiX arch identifiers.
+# $UpgradeCode MUST differ per architecture: Windows Installer treats
+# products sharing an UpgradeCode as the same product, so an arm64 MSI with
+# the x64 code would fight the x86_64 install on ARM Windows (Prism) hosts.
+# The x64 code is unchanged so existing x64 installs keep upgrading in place.
 switch ($Arch) {
-    "x86_64"  { $Target = "x86_64-pc-windows-msvc";  $WixArch = "x64";   $WixPlatform = "x64" }
-    "aarch64" { $Target = "aarch64-pc-windows-msvc";  $WixArch = "arm64"; $WixPlatform = "arm64" }
+    "x86_64"  { $Target = "x86_64-pc-windows-msvc";  $WixArch = "x64";   $WixPlatform = "x64";   $UpgradeCode = "A8E5B4C7-3D92-4E89-B1F3-926789ABCDEF" }
+    "aarch64" { $Target = "aarch64-pc-windows-msvc";  $WixArch = "arm64"; $WixPlatform = "arm64"; $UpgradeCode = "ACAD070A-5B8C-41D1-9918-B3378C36CB1C" }
     default   { Write-Host "Unsupported arch: $Arch" -ForegroundColor Red; exit 1 }
 }
+# Release asset arch token: pick/kubestudio publish ...-windows-x86_64 / -arm64
+$AssetArch = if ($Arch -eq "aarch64") { "arm64" } else { "x86_64" }
 
 Write-Host "Building StrikeHub MSI installer v$Version ($Arch)" -ForegroundColor Cyan
 Write-Host "==========================================="
@@ -200,7 +206,7 @@ if (-not (Test-Path "dist\ks-connector.exe")) {
     Write-Host "Downloading ks-connector..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Path dist -Force | Out-Null
     try {
-        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/v0.1.1/ks-connector-windows-x86_64.zip"
+        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/v0.1.1/ks-connector-windows-$AssetArch.zip"
         Invoke-WebRequest -Uri $ksUrl -OutFile "dist\ks-connector.zip"
         Expand-Archive -Path "dist\ks-connector.zip" -DestinationPath "dist" -Force
         Remove-Item "dist\ks-connector.zip"
@@ -216,7 +222,7 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
     try {
         # Pick v0.1.9 renamed the release archive pentest-agent-* -> pick-agent-*.
         # The binary inside is still pentest-agent.exe, so downstream stays the same.
-        $paUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/pick-agent-windows-x86_64.zip"
+        $paUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/pick-agent-windows-$AssetArch.zip"
         Invoke-WebRequest -Uri $paUrl -OutFile "dist\pentest-agent.zip"
 
         # Verify against the release's SHA256SUMS.txt before trusting the archive:
@@ -225,15 +231,15 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
         $sumsUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/SHA256SUMS.txt"
         Invoke-WebRequest -Uri $sumsUrl -OutFile "dist\SHA256SUMS.txt"
         $expected = Get-Content "dist\SHA256SUMS.txt" |
-            Where-Object { $_ -match '\s+pick-agent-windows-x86_64\.zip\s*$' } |
+            Where-Object { $_ -match "\s+pick-agent-windows-$AssetArch\.zip\s*$" } |
             ForEach-Object { ($_ -split '\s+')[0] } |
             Select-Object -First 1
         if (-not $expected) {
-            throw "no SHA256 entry for pick-agent-windows-x86_64.zip in pick $PickVersion"
+            throw "no SHA256 entry for pick-agent-windows-$AssetArch.zip in pick $PickVersion"
         }
         $actual = (Get-FileHash "dist\pentest-agent.zip" -Algorithm SHA256).Hash
         if ($actual -ne $expected.Trim().ToUpper()) {
-            throw "SHA256 checksum mismatch for pick-agent-windows-x86_64.zip"
+            throw "SHA256 checksum mismatch for pick-agent-windows-$AssetArch.zip"
         }
         Remove-Item "dist\SHA256SUMS.txt"
 
@@ -249,7 +255,7 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
 # a failed download must not silently produce an MSI without pentest-agent.
 if (-not (Test-Path "dist\pentest-agent.exe")) {
     Write-Host "ERROR: dist\pentest-agent.exe is missing - cannot build a working MSI." -ForegroundColor Red
-    Write-Host "Pre-stage it in dist\ or ensure pick $PickVersion publishes pick-agent-windows-x86_64.zip." -ForegroundColor Yellow
+    Write-Host "Pre-stage it in dist\ or ensure pick $PickVersion publishes pick-agent-windows-$AssetArch.zip." -ForegroundColor Yellow
     exit 1
 }
 
@@ -273,6 +279,7 @@ Write-Host "Compiling..." -ForegroundColor Yellow
 & "$wixDir\candle.exe" -nologo `
     -dVersion="$WixVersion" `
     -dPlatform="$WixPlatform" `
+    -dUpgradeCode="$UpgradeCode" `
     -arch $WixArch `
     -out wix\main.wixobj `
     wix\main.wxs
