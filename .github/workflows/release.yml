@@ -338,7 +338,8 @@ jobs:
             binary_name: strikehub.exe
           # Native ARM Windows runner (GA since 2025): builds strikehub.exe +
           # the connectors from source at the pinned refs for arm64, and WiX
-          # links an arm64 MSI (build-msi.ps1 maps aarch64 -> arm64). The MSI
+          # links an arm64 MSI (build-msi.ps1 maps aarch64 -> arm64; the ARM
+          # image ships no WiX, so a job step installs it first). The MSI
           # shares the x64 UpgradeCode, so on an ARM box it upgrades over an
           # existing x64 install instead of coexisting with it.
           - os: windows-11-arm
@@ -588,6 +589,21 @@ jobs:
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+
+      # The windows-11-arm image does not bundle the WiX Toolset (the x64
+      # image ships v3.14 at the candidate paths build-msi.ps1 checks).
+      # Install it via Chocolatey so the script's PATH fallback finds it.
+      - name: Install WiX Toolset v3 (windows-11-arm)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.installer == 'msi'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset --version 3.14.1 -y
+            # refresh PATH for the choco shims added by the install
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                        [System.Environment]::GetEnvironmentVariable("Path", "User")
+          }
+          & candle.exe -nologo -version
 
       - name: Build Windows MSI
         if: matrix.installer == 'msi'
