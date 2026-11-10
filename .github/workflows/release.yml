@@ -591,19 +591,27 @@ jobs:
           timestamp-digest: SHA256
 
       # The windows-11-arm image does not bundle the WiX Toolset (the x64
-      # image ships v3.14 at the candidate paths build-msi.ps1 checks).
-      # Install it via Chocolatey so the script's PATH fallback finds it.
+      # image ships v3.14 preinstalled). The choco package runs the official
+      # MSI, which installs to Program Files but does NOT add the bin dir to
+      # the runner PATH - locate it and export it via GITHUB_ENV so later
+      # steps (and build-msi.ps1's PATH fallback) find candle/light.
       - name: Install WiX Toolset v3 (windows-11-arm)
         if: runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.installer == 'msi'
         shell: pwsh
         run: |
-          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+          if (-not (Test-Path "C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe") -and
+              -not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
             choco install wixtoolset --version 3.14.1 -y
-            # refresh PATH for the choco shims added by the install
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                        [System.Environment]::GetEnvironmentVariable("Path", "User")
           }
-          & candle.exe -nologo -version
+          $wixBin = Get-ChildItem "C:\Program Files (x86)" -Directory -Filter "WiX Toolset*" |
+            ForEach-Object { Join-Path $_.FullName "bin" } |
+            Where-Object { Test-Path (Join-Path $_ "candle.exe") } |
+            Select-Object -First 1
+          if (-not $wixBin) {
+            throw "WiX Toolset v3 not found after install"
+          }
+          { "PATH=$wixBin;$env:Path" } | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          & "$wixBin\candle.exe" -nologo -version
 
       - name: Build Windows MSI
         if: matrix.installer == 'msi'
