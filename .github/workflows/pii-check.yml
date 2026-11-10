@@ -87,7 +87,13 @@ jobs:
           # one whose own text starts with '+' is not mistaken for the
           # '+++ b/<path>' header and skipped. The paths of added and renamed
           # files are scanned too: a file named after a customer leaks the name
-          # even when its content is clean.
+          # even when its content is clean. core.quotePath=false prints a
+          # non-ASCII path as-is instead of octal escapes the scanner cannot
+          # match. The scanner matches whole words, and '_' is a word
+          # character, so each path is scanned three ways: as-is, with '_' as
+          # a space, and with camelCase also split ('NameReport' -> 'Name
+          # Report'). The as-is line still matches a name that contains '_',
+          # and the spaced line one that is itself camelCase.
           # `|| true` keeps a deletion-only diff (grep finds nothing, exits 1)
           # from failing the step under the runner's `pipefail` shell.
           scope=(-- . ':!scripts/check-pii.sh' ':!.github/workflows/pii-check.yml')
@@ -95,8 +101,10 @@ jobs:
             git diff --output-indicator-new='>' "$BASE_SHA..$HEAD_SHA" "${scope[@]}" \
               | grep -E '^>' || true
           )"
-          paths="$(git diff --name-only --diff-filter=AR "$BASE_SHA..$HEAD_SHA" "${scope[@]}")"
-          printf '%s\n%s\n' "$added" "$paths" | scripts/check-pii.sh
+          paths="$(git -c core.quotePath=false diff --name-only --diff-filter=AR "$BASE_SHA..$HEAD_SHA" "${scope[@]}")"
+          spaced="$(printf '%s\n' "$paths" | tr '_' ' ')"
+          split="$(printf '%s\n' "$spaced" | sed -E 's/([a-z])([A-Z])/\1 \2/g; s/([A-Z])([A-Z][a-z])/\1 \2/g')"
+          printf '%s\n' "$added" "$paths" "$spaced" "$split" | scripts/check-pii.sh
 
   # Notice-only companion to check-pii for fork PRs, where the job above is
   # skipped because the PII_NAMES secret is withheld. It surfaces a clear
