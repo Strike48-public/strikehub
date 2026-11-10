@@ -59,7 +59,9 @@ if ! gh api "$api" -H "Accept: application/vnd.github.raw" > "$enc" 2>/dev/null;
 fi
 
 # sops errors name the file and key, never a value; jq gets only decrypted JSON.
-if ! sops -d --output-type json "$enc" | jq -er '.names[] | select(type == "string")' > "$tmp"; then
+# No `jq -e`: an empty names: list must reach the empty check below, which
+# reports it accurately. A missing names: key still fails here (null[] errors).
+if ! sops -d --output-type json "$enc" | jq -r '.names[] | select(type == "string")' > "$tmp"; then
     echo "ERROR: could not decrypt ${SRC_PATH} or read its names: list." >&2
     echo "Check that your age key is a recipient (SOPS_AGE_KEY_FILE or ~/.config/sops/age/keys.txt)." >&2
     exit 2

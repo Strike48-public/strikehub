@@ -4,7 +4,8 @@
 # Runs a copy of the script inside a temp tree (so it never touches your real
 # .pii-names.local) with stub gh and sops on PATH. Covers the fetch + decrypt
 # path, the refusal paths (fetch failure, decrypt failure, empty list), the
-# --ref passthrough, the owner-only file mode, and that no name is printed.
+# dropping of non-string entries, the --ref passthrough, the owner-only file
+# mode, and that no name is printed.
 #
 # Needs jq (as the script does). Exit 0 if all pass, 1 otherwise.
 # ok/no always return 0, so `cond && ok || no` cannot run both arms.
@@ -80,8 +81,14 @@ run SOPS_RC=1
     && ok "decrypt failure: exit 2, list untouched" || no "decrypt failure: exit 2, list untouched (rc=$rc)"
 
 run SOPS_JSON='{"names":[]}'
-[[ $rc == 2 && "$(cat "$DEST")" == "keep me" ]] && ok "empty list: exit 2, list untouched" \
-    || no "empty list: exit 2, list untouched (rc=$rc)"
+[[ $rc == 2 && "$(cat "$DEST")" == "keep me" ]] && grep -q 'is empty; not overwriting' "$T/out" \
+    && ok "empty list: exit 2, says empty, list untouched" \
+    || no "empty list: exit 2, says empty, list untouched (rc=$rc)"
+
+run SOPS_JSON='{"names":[123,"Zyx Planted Three"]}'
+[[ $rc == 0 && "$(cat "$DEST")" == "Zyx Planted Three" ]] && grep -q '(1 name(s))' "$T/out" \
+    && ok "non-string entries are dropped" || no "non-string entries are dropped (rc=$rc)"
+printf 'keep me\n' >"$DEST"
 
 run SOPS_JSON='{"other":["x"]}'
 [[ $rc == 2 && "$(cat "$DEST")" == "keep me" ]] && ok "no names: key: exit 2, list untouched" \
