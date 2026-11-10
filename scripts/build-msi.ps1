@@ -153,6 +153,24 @@ if ($redistToolsets.Count -gt 0) {
         Select-Object -First 1
     $crtRoots += Join-Path $newestRedist.FullName "$crtArchDir\Microsoft.VC143.CRT"
 }
+# (2b) ARM64-only: the GitHub-hosted windows-11-arm image ships no ARM64 VC
+# redist under the VS tree (its C++ workload is x64-hosted). Fall back to the
+# official Microsoft.VCRedist NuGet package — the same redistributable bits,
+# version-pinned, from nuget.org. Tried before the System32 last resort so the
+# PE machine check still guards what actually gets staged.
+if ($crtArchDir -eq "arm64") {
+    $nugetCrt = Join-Path $env:TEMP "msvc-arm64-crt\native"
+    if (-not (Test-Path $nugetCrt)) {
+        Write-Host "  ARM64 VC redist not in the VS tree — downloading Microsoft.VCRedist.14.40.arm64..." -ForegroundColor Yellow
+        $nugetRoot = Join-Path $env:TEMP "msvc-arm64-crt"
+        New-Item -ItemType Directory -Path $nugetCrt -Force | Out-Null
+        $nupkg = Join-Path $env:TEMP "Microsoft.VCRedist.14.40.arm64.nupkg"
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.VCRedist.14.40.arm64" -OutFile $nupkg
+        Expand-Archive -Path $nupkg -DestinationPath $nugetRoot -Force
+        Remove-Item $nupkg
+    }
+    $crtRoots += $nugetCrt
+}
 # (3) VS toolset bin (legacy search roots, kept).
 $vsToolsetRoots = @()
 foreach ($year in $vsYears) {
