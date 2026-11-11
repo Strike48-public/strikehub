@@ -189,19 +189,10 @@ jobs:
           mkdir -p dist
           cp /tmp/kubestudio/target/aarch64-pc-windows-msvc/release/ks-connector.exe dist/
 
-      # The windows-2022 image ships WiX Toolset 3.14 preinstalled (official
-      # image definition, "WiX Toolset 3.14.1.8722"), so no install step.
-      # -StaticCrt: skip the app-local redist staging entirely (there are no
-      # CRT DLLs to stage) and tell the WiX source to omit the redist
-      # components (-dIncludeCrt=no).
-      - name: Build MSI (static CRT, no app-local redist)
+      - name: Build MSI
         shell: pwsh
-        run: .\scripts\build-msi.ps1 -Version 0.0.0 -Arch aarch64 -StaticCrt
+        run: .\scripts\build-msi.ps1 -Version 0.0.0 -Arch aarch64
 
-      # Same CRT-coverage guard as the x64 leg and the Release workflow, in
-      # static mode: it fails if any shipped exe imports a DLL that is not
-      # OS-provided — with no redist\ staging, that is exactly the assertion
-      # "static CRT took effect for all three exes".
-      - name: Verify CRT coverage (static — expect zero non-OS imports)
+      - name: Verify app-local CRT coverage
         shell: pwsh
-        run: .\scripts\verify-crt-coverage.ps1 -NoCrtExpected
+        run: .\scripts\verify-crt-coverage.ps1
