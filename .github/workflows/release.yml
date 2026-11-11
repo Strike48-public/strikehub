@@ -610,8 +610,10 @@ jobs:
           if (-not $wixBin) {
             throw "WiX Toolset v3 not found after install"
           }
-          { "PATH=$wixBin;$env:Path" } | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-          & "$wixBin\candle.exe" -nologo -version
+          "PATH=$wixBin;$env:Path" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          if (-not (Test-Path (Join-Path $wixBin "light.exe"))) { throw "WiX light.exe not found in $wixBin" }
+          Write-Host "WiX Toolset v3 at $wixBin (candle v3 has no -version flag; both tools verified present)"
+          Write-Host "PATH for later steps: $wixBin"
 
       # The ARM64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) lives in
       # the VS tree only when the ARM64 C++ tools component is installed
