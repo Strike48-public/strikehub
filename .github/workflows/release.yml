@@ -629,16 +629,16 @@ jobs:
       #     vcruntime140.dll reads 0xAA64 (arm64, the only copy) while
       #     vcruntime140_1.dll in the SAME dir reads 0x8664 (an x64 shadow copy
       #     exists because the x64 redist is also installed).
-      #   * The aka.ms vc_redist.arm64.exe is an x86 downloader bundle: /layout
-      #     yields only the exe (no embedded payload MSI), but /install works.
-      # Solution: all PE reads of CRT files happen in an ARM64-NATIVE process
-      # (the image's toolcache Python, PE-verified 0xAA64), which sees the true
-      # native System32. Probe order: VS tree (any 15/16/17/18) -> stage from
-      # the native System32 view -> install the MS bundle and re-stage.
-      # Staged dirs are exported as SHVCREDIST_DIR (build-msi.ps1's root #1,
-      # consulted before its System32 root).
+      #   * aka.ms vc_redist.arm64.exe is an x86 DOWNLOADER bundle: /layout
+      #     yields only the exe (no embedded payload MSI), but /install runs.
+      # Solution: every PE read of a CRT file happens in an ARM64-NATIVE
+      # process (the image's toolcache Python, PE-verified 0xAA64 at
+      # runtime), which sees the true native System32. Probe order: VS tree
+      # (any 15/16/17/18) -> stage from the native System32 view -> install
+      # the MS bundle and re-stage. Verified dirs are exported as
+      # SHVCREDIST_DIR (build-msi.ps1's root #1, before its System32 root).
       - name: Ensure arm64 VC++ CRT redist (windows-11-arm)
-        if: {IF}
+        if: runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.installer == 'msi'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -648,38 +648,38 @@ jobs:
             try {
               $head = New-Object byte[] 4096
               [void]$fs.Read($head, 0, 4096)
-              if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) {{ return -1 }}
+              if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) { return -1 }
               $peOff = [BitConverter]::ToInt32($head, 0x3C)
-              if ($head[$peOff] -ne 0x50 -or $head[$peOff + 1] -ne 0x45) {{ return -1 }}
+              if ($head[$peOff] -ne 0x50 -or $head[$peOff + 1] -ne 0x45) { return -1 }
               return [int][BitConverter]::ToUInt16($head, $peOff + 4)
-            } finally {{ $fs.Close() }}
+            } finally { $fs.Close() }
           }
-          function Invoke-Native {{
+          function Invoke-Native {
             param([string]$Bin, [string[]]$Argv)
             $prev = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             $out = & $Bin @Argv 2>&1
             $code = $LASTEXITCODE
             $ErrorActionPreference = $prev
-            return @{{ Code = $code; Out = ($out | ForEach-Object {{ "$_" }}) }}
-          }}
+            return @{ Code = $code; Out = ($out | ForEach-Object { "$_" }) }
+          }
           # An ARM64-native interpreter: the only process class that sees the
           # true (non-fusion-redirected) System32 on this machine.
           $armPy = Get-ChildItem "C:\hostedtoolcache\windows\Python" -Directory -ErrorAction SilentlyContinue |
                    Sort-Object Name -Descending |
-                   ForEach-Object {{ Join-Path $_.FullName "arm64\python.exe" }} |
-                   Where-Object {{ Test-Path $_ }} |
+                   ForEach-Object { Join-Path $_.FullName "arm64\python.exe" } |
+                   Where-Object { Test-Path $_ } |
                    Select-Object -First 1
-          if (-not $armPy -or (Get-PeMachine $armPy) -ne 0xAA64) {{
-            throw "no arm64-native python in C:\\hostedtoolcache\\windows\\Python (found: $armPy) - cannot read the native System32 view"
-          }}
+          if (-not $armPy -or (Get-PeMachine $armPy) -ne 0xAA64) {
+            throw "no arm64-native python in C:\hostedtoolcache\windows\Python (found: $armPy) - cannot read the native System32 view"
+          }
           Write-Host "arm64-native interpreter: $armPy"
-          # Python helpers (run arm64-native). check <dir>: print the machine of
-          # <dir>\vcruntime140_1.dll. stage <stagedir>: verify BOTH redist DLLs
-          # are 0xAA64 in the native System32 view, copy them into <stagedir>,
-          # and re-verify the copies.
-          $pyCheck = @'
-import struct, sys
+          # Python helpers (run arm64-native). check <dir>: report the machine
+          # of <dir>\vcruntime140_1.dll. stage <stagedir>: verify BOTH redist
+          # DLLs are 0xAA64 in the native System32 view, copy them into
+          # <stagedir>, re-verify the copies.
+          $pyHelper = @'
+import shutil, struct, sys
 def machine(p):
     with open(p, "rb") as f:
         h = f.read(4096)
@@ -692,11 +692,11 @@ def machine(p):
 mode, arg = sys.argv[1], sys.argv[2]
 if mode == "check":
     m = machine(arg + "\\vcruntime140_1.dll")
-    print("MACHINE 0x%X" % m); sys.exit(0 if m == 0xAA64 else 1)
+    print("MACHINE 0x%X" % m)
+    sys.exit(0 if m == 0xAA64 else 1)
 if mode == "stage":
-    import shutil
     for n in ("vcruntime140.dll", "vcruntime140_1.dll"):
-        src = "C:\\Windows\\System32\\%s" % n
+        src = "C:\\Windows\\System32\\" + n
         m = machine(src)
         if m != 0xAA64:
             print("NATIVE_VIEW_FAIL %s 0x%X" % (n, m)); sys.exit(1)
@@ -706,34 +706,35 @@ if mode == "stage":
         if m2 != 0xAA64:
             print("COPY_CHECK_FAIL %s 0x%X" % (n, m2)); sys.exit(1)
         print("STAGED %s 0xAA64" % n)
-    print("NATIVE_VIEW_OK"); sys.exit(0)
+    print("NATIVE_VIEW_OK")
+    sys.exit(0)
 '@
           $stage = Join-Path $env:TEMP "crt-stage"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           # 1) VS tree, any version (15/16/17/18), both PF roots - PE-verified
-          #    in the arm64-native process (dir names lie on this image).
+          #    by the arm64-native process (dir names lie on this image).
           $vsCrt = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT",
                                  "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT" -ErrorAction SilentlyContinue |
-                   Where-Object {{ Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") }} |
+                   Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
                    Select-Object -First 1
-          if ($vsCrt) {{
+          if ($vsCrt) {
             $r = Invoke-Native -Bin $armPy -Argv @("check", $vsCrt.FullName)
-            Write-Host ("VS tree dir " + $vsCrt.FullName + " -> " + (($r.Out | ForEach-Object {{ "$_" }}) -join ' '))
-            if ($r.Code -eq 0) {{
+            Write-Host ("VS tree dir " + $vsCrt.FullName + " -> " + (($r.Out | ForEach-Object { "$_" }) -join ' '))
+            if ($r.Code -eq 0) {
               Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$($vsCrt.FullName)"
               Write-Host "arm64 CRT redist in VS tree (verified 0xAA64): $($vsCrt.FullName)"
               exit 0
-            }}
-          }}
+            }
+          }
           Write-Host "no usable arm64 CRT in the VS tree - staging from the native System32 view" -ForegroundColor Yellow
           # 2) stage both DLLs from the native System32 view (arm64 python)
           $r = Invoke-Native -Bin $armPy -Argv @("stage", $stage)
-          Write-Host (($r.Out | ForEach-Object {{ "$_" }}) -join "`n")
-          if ($r.Code -eq 0) {{
+          Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
+          if ($r.Code -eq 0) {
             Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
             Write-Host "arm64 CRT staged from native System32: $stage"
             exit 0
-          }}
+          }
           # 3) the ARM64 redist is not fully installed: install the official MS
           #    bundle (x86 launcher - Start-Process, it does run on this image)
           #    and re-stage.
@@ -748,14 +749,14 @@ if mode == "stage":
           $proc = $null
           $prev = $ErrorActionPreference
           $ErrorActionPreference = "Continue"
-          try {{ $proc = Start-Process -FilePath $exe -ArgumentList @("/install", "/quiet", "/norestart") -Wait -PassThru }}
-          catch {{ $launchErr = "$_" }}
+          try { $proc = Start-Process -FilePath $exe -ArgumentList @("/install", "/quiet", "/norestart") -Wait -PassThru }
+          catch { $launchErr = "$_" }
           $ErrorActionPreference = $prev
-          if ($launchErr -or $null -eq $proc) {{ throw "redist bundle could not start: $launchErr" }}
-          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {{ throw "redist bundle /install failed (exit $($proc.ExitCode))" }}
+          if ($launchErr -or $null -eq $proc) { throw "redist bundle could not start: $launchErr" }
+          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "redist bundle /install failed (exit $($proc.ExitCode))" }
           $r = Invoke-Native -Bin $armPy -Argv @("stage", $stage)
-          Write-Host (($r.Out | ForEach-Object {{ "$_" }}) -join "`n")
-          if ($r.Code -ne 0) {{ throw "arm64 CRT still missing from the native System32 view after bundle install" }}
+          Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
+          if ($r.Code -ne 0) { throw "arm64 CRT still missing from the native System32 view after bundle install" }
           Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
           Write-Host "arm64 CRT staged after bundle install: $stage"
 
