@@ -1,4 +1,4 @@
-name: ci: MSI arm64 (packaging gate)
+name: "ci: MSI arm64 (packaging gate)"
 
 # Path-scoped gate for the arm64 MSI PACKAGING path (CRT staging, connector
 # layout, WiX, upgrade rules) — the path that exists only in the Release
