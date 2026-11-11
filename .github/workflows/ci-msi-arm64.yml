@@ -1,0 +1,148 @@
+name: ci: MSI arm64 (packaging gate)
+
+# Path-scoped gate for the arm64 MSI PACKAGING path (CRT staging, connector
+# layout, WiX, upgrade rules) — the path that exists only in the Release
+# workflow and so could not fail on any PR before this file: a dead CRT
+# source URL survived every PR and 404'd on the first real release run
+# (build-msi.ps1:168, dry run 42905776882). Running the leg on every PR
+# costs ~7 min (measured; 5.4 of it is the aarch64 release build) on top of
+# the ~3 min suite, so it filters on the file set that can introduce the bug
+# class. Unsigned — Azure Trusted Signing stays release-only.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ci-msi-arm64.yml"
+      - ".github/workflows/release.yml"
+      - "scripts/build-msi.ps1"
+      - "scripts/verify-crt-coverage.ps1"
+      - "wix/**"
+      - "connector-versions.env"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ci-msi-arm64.yml"
+      - ".github/workflows/release.yml"
+      - "scripts/build-msi.ps1"
+      - "scripts/verify-crt-coverage.ps1"
+      - "wix/**"
+      - "connector-versions.env"
+
+permissions:
+  contents: read
+
+jobs:
+  build-msi-arm64:
+    name: Build MSI arm64 (unsigned, packaging gate)
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load connector refs
+        shell: bash
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-pc-windows-msvc-msi-arm64
+
+      - name: Build binary
+        run: cargo build --release --target aarch64-pc-windows-msvc --no-default-features --features desktop
+
+      # The arm64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) must come
+      # from Microsoft. Fast path: the VS tree, when the image ships the ARM64
+      # C++ tools component. Otherwise extract the official VC++ 2015-2022
+      # Redistributable (ARM64) bundle from Microsoft's own CDN (aka.ms) into
+      # a staging dir and hand it to build-msi.ps1 through its SHVCREDIST_DIR
+      # operator-override root. A PE machine-field check (0xAA64) guarantees
+      # the staged DLLs are the arm64 build. (No VS modification: the
+      # windows-11-arm image state is not guaranteed to carry VS at all.)
+      - name: Ensure arm64 VC++ CRT redist (windows-11-arm)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Get-PeMachine {
+            param([string]$Path)
+            $fs = [IO.File]::OpenRead($Path)
+            try {
+              $head = New-Object byte[] 4096
+              [void]$fs.Read($head, 0, 4096)
+              if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) { return -1 }
+              $peOff = [BitConverter]::ToInt32($head, 0x3C)
+              if ($head[$peOff] -ne 0x50 -or $head[$peOff + 1] -ne 0x45) { return -1 }
+              return [int][BitConverter]::ToUInt16($head, $peOff + 4)
+            } finally { $fs.Close() }
+          }
+          $vsCrt = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT",
+                                 "C:\Program Files\Microsoft Visual Studio\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT" -ErrorAction SilentlyContinue |
+                   Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
+                   Select-Object -First 1
+          if ($vsCrt) { Write-Host "arm64 CRT redist in VS tree: $($vsCrt.FullName)"; exit 0 }
+          Write-Host "arm64 CRT redist not in the VS tree - extracting the official VC++ ARM64 redist bundle (aka.ms)..." -ForegroundColor Yellow
+          $dl = Join-Path $env:TEMP "vc_redist.arm64"
+          New-Item -ItemType Directory -Path $dl -Force | Out-Null
+          $exe = Join-Path $dl "vc_redist.arm64.exe"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.arm64.exe" -OutFile $exe
+          $ver = (Get-Item $exe).VersionInfo.ProductVersion
+          Write-Host "vc_redist.arm64.exe product version: $ver"
+          $layout = Join-Path $dl "layout"
+          & $exe /layout $layout /quiet /norestart
+          if ($LASTEXITCODE -ne 0) { throw "vc_redist.arm64.exe /layout failed (exit $LASTEXITCODE)" }
+          $msi = Get-ChildItem $layout -Recurse -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw "redist layout produced no MSI: " + ((Get-ChildItem $layout -Recurse | Select-Object -ExpandProperty Name) -join ', ') }
+          $extract = Join-Path $dl "crt"
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          msiexec /a "$($msi.FullName)" /qn TARGETDIR="$extract"
+          if ($LASTEXITCODE -ne 0) { throw "msiexec /a failed (exit $LASTEXITCODE)" }
+          $one = Get-ChildItem $extract -Recurse -Filter vcruntime140_1.dll | Select-Object -First 1
+          if (-not $one) { throw "extraction produced no vcruntime140_1.dll" }
+          $m = Get-PeMachine $one.FullName
+          if ($m -ne 0xAA64) { throw "staged vcruntime140_1.dll machine is 0x$("{0:X4}" -f $m), expected 0xAA64 (arm64)" }
+          $dllDir = $one.Directory.FullName
+          foreach ($req in "vcruntime140.dll", "vcruntime140_1.dll") {
+            if (-not (Test-Path (Join-Path $dllDir $req))) { throw "$req missing from $dllDir" }
+          }
+          Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$dllDir"
+          Write-Host "arm64 CRT staged (SHVCREDIST_DIR=$dllDir)"
+
+      - name: Install WiX Toolset v3
+        run: choco install wixtoolset --version 3.14.1 -y
+
+      - name: Build MSI
+        shell: pwsh
+        run: .\scripts\build-msi.ps1 -Version 0.0.0 -Arch aarch64
+
+      # Same CRT-coverage guard as the x64 leg and the Release workflow.
+      - name: Verify app-local CRT coverage
+        shell: pwsh
+        run: .\scripts\verify-crt-coverage.ps1
