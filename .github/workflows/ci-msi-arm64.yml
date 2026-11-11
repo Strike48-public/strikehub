@@ -179,18 +179,29 @@ jobs:
           if (-not $install) { throw "vswhere found no Visual Studio installation" }
           $vcvarsall = Join-Path $install 'VC\Auxiliary\Build\vcvarsall.bat'
           $sdk = '${{ steps.arm64_toolchain.outputs.sdk_version }}'
-          $archArgs = 'amd64_arm64' + $(if ($sdk) { " $sdk" } else { '' })
-          # The action's technique: `set`, `cls` (emits a form feed),
-          # vcvarsall, `cls`, `set` — then export every changed variable.
-          $out = cmd /c "set & cls & `"$vcvarsall`" $archArgs & cls & set"
-          $parts = $out -split "`f"
-          if ($parts.Count -lt 3) { throw "vcvarsall output not found in cmd output" }
-          if ($parts[1] -match '\[ERROR') { throw "vcvarsall rejected its arguments: $($parts[1])" }
+          $archArgs = 'amd64_arm64'
+          if ($sdk) { $archArgs += " $sdk" }
+          # Technique (same as ilammy/msvc-dev-cmd, which this org's Actions
+          # policy blocks at admission): run `set`, vcvarsall, `set` in ONE
+          # cmd process — vcvarsall's environment changes only exist inside
+          # that process — and export every variable that changed. Unique
+          # marker lines delimit the three sections (more robust under pwsh's
+          # line-based capture than the action's `cls` form-feed trick).
+          $raw = (& cmd /c "set & echo __VCVARS_PRE__ & `"$vcvarsall`" $archArgs & echo __VCVARS_POST__ & set") -join "`n"
+          $parts = $raw -split '(?:__VCVARS_PRE__|__VCVARS_POST__)'
+          if ($parts.Count -lt 3) { throw "vcvarsall output not delimited in cmd output" }
+          $beforeText, $vcvarsOut, $afterText = $parts[0], $parts[1], $parts[2]
+          if ($vcvarsOut -match '\[ERROR') { throw "vcvarsall rejected its arguments:`n$vcvarsOut" }
+          $before = @{}
+          foreach ($line in $beforeText) {
+            if ($line -match '^(.+?)=(.*)$') { $before[$matches[1]] = $matches[2] }
+          }
           $changed = 0
-          foreach ($line in $parts[2]) {
+          foreach ($line in $afterText) {
             if ($line -match '^(.+?)=(.*)$') {
               $name, $value = $matches[1], $matches[2]
-              if ($value -ne $env:$name) {
+              $old = if ($before.ContainsKey($name)) { $before[$name] } else { $null }
+              if ($value -ne $old) {
                 [Environment]::SetEnvironmentVariable($name, $value, 'Process')
                 Set-Item -Path "env:$name" -Value $value
                 $changed++
