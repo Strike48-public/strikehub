@@ -678,18 +678,22 @@ jobs:
           $crtCheck = Join-Path (Get-Location).Path "scripts\crt_native_check.py"
           $stage = Join-Path $env:TEMP "crt-stage"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          # 1) VS tree, any version (15/16/17/18), both PF roots - PE-verified
-          #    by the arm64-native process (dir names lie on this image).
-          $vsCrt = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT",
-                                 "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT" -ErrorAction SilentlyContinue |
-                   Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
-                   Select-Object -First 1
-          if ($vsCrt) {
-            $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "check", $vsCrt.FullName)
-            Write-Host ("VS tree dir " + $vsCrt.FullName + " -> " + (($r.Out | ForEach-Object { "$_" }) -join ' '))
+          # 1) VS tree, any version (15/16/17/18), both PF roots. Check EVERY
+          #    candidate with the arm64-native process and use the first that
+          #    passes: the windows-11-arm image (VS2026 variant) ships the
+          #    VC.Runtimes.ARM64.Spectre component (verified against
+          #    actions/runner-images), but on this image the 14.29 "arm64"
+          #    dir holds X64 DLLs while the 14.44 dir holds the real arm64
+          #    CRT - first match in sort order is not ground truth.
+          $vsDirs = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT",
+                                "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT" -ErrorAction SilentlyContinue |
+                     Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") }
+          foreach ($d in $vsDirs) {
+            $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "check", $d.FullName)
+            Write-Host ("VS tree dir " + $d.FullName + " -> " + (($r.Out | ForEach-Object { "$_" }) -join ' '))
             if ($r.Code -eq 0) {
-              Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$($vsCrt.FullName)"
-              Write-Host "arm64 CRT redist in VS tree (verified 0xAA64): $($vsCrt.FullName)"
+              Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$($d.FullName)"
+              Write-Host "arm64 CRT redist in VS tree (verified 0xAA64): $($d.FullName)"
               exit 0
             }
           }
