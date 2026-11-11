@@ -94,6 +94,11 @@ if (-not (Test-Path "dist\strikehub.exe")) {
 #      the GitHub-hosted Windows runners, where VS is installed under
 #      "C:\Program Files (x86)\Microsoft Visual Studio\<year>\<flavor>\"
 #      (the year dir moves with runner re-bakes: 2022, 2025, ...).
+#      For arm64 this folder exists only when the VS ARM64 C++ tools
+#      component (Microsoft.VisualStudio.Component.VC.Tools.ARM64) is
+#      installed; the release workflow installs it on windows-11-arm when
+#      missing, so the CRT that ships inside the SIGNED MSI always comes
+#      from the Microsoft component channel — never a third-party package.
 #   3. <VS year>\<flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>  (toolset bin)
 #   4. C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>  (SDK bin)
 #   5. C:\Windows\System32 - the VC++ redist MSI's install location; its
@@ -152,24 +157,6 @@ if ($redistToolsets.Count -gt 0) {
         Sort-Object @{ Expression = { [Version](($_.Name -split '\.' | Select-Object -First 3) -join '.') } } -Descending |
         Select-Object -First 1
     $crtRoots += Join-Path $newestRedist.FullName "$crtArchDir\Microsoft.VC143.CRT"
-}
-# (2b) ARM64-only: the GitHub-hosted windows-11-arm image ships no ARM64 VC
-# redist under the VS tree (its C++ workload is x64-hosted). Fall back to the
-# official Microsoft.VCRedist NuGet package — the same redistributable bits,
-# version-pinned, from nuget.org. Tried before the System32 last resort so the
-# PE machine check still guards what actually gets staged.
-if ($crtArchDir -eq "arm64") {
-    $nugetCrt = Join-Path $env:TEMP "msvc-arm64-crt\native"
-    if (-not (Test-Path $nugetCrt)) {
-        Write-Host "  ARM64 VC redist not in the VS tree — downloading Microsoft.VCRedist.14.40.arm64..." -ForegroundColor Yellow
-        $nugetRoot = Join-Path $env:TEMP "msvc-arm64-crt"
-        New-Item -ItemType Directory -Path $nugetCrt -Force | Out-Null
-        $nupkg = Join-Path $env:TEMP "Microsoft.VCRedist.14.40.arm64.nupkg"
-        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.VCRedist.14.40.arm64" -OutFile $nupkg
-        Expand-Archive -Path $nupkg -DestinationPath $nugetRoot -Force
-        Remove-Item $nupkg
-    }
-    $crtRoots += $nugetCrt
 }
 # (3) VS toolset bin (legacy search roots, kept).
 $vsToolsetRoots = @()

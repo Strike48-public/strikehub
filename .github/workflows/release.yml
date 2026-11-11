@@ -613,6 +613,39 @@ jobs:
           { "PATH=$wixBin;$env:Path" } | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           & "$wixBin\candle.exe" -nologo -version
 
+      # The ARM64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) lives in
+      # the VS tree only when the ARM64 C++ tools component is installed
+      # (VC\Redist\MSVC\<ver>\arm64\Microsoft.VC143.CRT). The windows-11-arm
+      # image ships the x64-hosted C++ workload, so install the component when
+      # the folder is missing. These DLLs ship inside a SIGNED MSI, so the
+      # source must be the Microsoft component channel — never a third-party
+      # package (there is no official Microsoft.VCRedist nuget package).
+      - name: Ensure VS ARM64 C++ CRT redist (windows-11-arm)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.installer == 'msi'
+        shell: pwsh
+        run: |
+          function Get-Arm64CrtDir {
+            foreach ($base in "C:\Program Files (x86)\Microsoft Visual Studio", "C:\Program Files\Microsoft Visual Studio") {
+              Get-ChildItem "$base\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT" -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
+                Select-Object -First 1 | ForEach-Object { return $_.FullName }
+            }
+            $null
+          }
+          $crt = Get-Arm64CrtDir
+          if ($crt) { Write-Host "arm64 CRT redist present: $crt"; exit 0 }
+          $vs = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\20*", "C:\Program Files\Microsoft Visual Studio\20*" -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "VC") } | Select-Object -First 1
+          if (-not $vs) { throw "No Visual Studio installation found to add Microsoft.VisualStudio.Component.VC.Tools.ARM64" }
+          Write-Host "arm64 CRT redist missing — installing Microsoft.VisualStudio.Component.VC.Tools.ARM64 on $vs"
+          & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify `
+              --installPath $vs.FullName `
+              --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 `
+              --norestart --passive --wait
+          $crt = Get-Arm64CrtDir
+          if (-not $crt) { throw "VC.Tools.ARM64 installed but the arm64 CRT redist is still missing" }
+          Write-Host "arm64 CRT redist: $crt"
+
       - name: Build Windows MSI
         if: matrix.installer == 'msi'
         shell: pwsh
