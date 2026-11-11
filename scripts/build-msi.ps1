@@ -5,7 +5,15 @@ param(
     # dist/ (local/offline builds). CI builds pentest-agent from source instead,
     # so this only applies to manual builds. Empty means "read PICK_REF from
     # connector-versions.env" below, so this default can't drift from the pipeline.
-    [string]$PickVersion = ""
+    [string]$PickVersion = "",
+    # Static-CRT build (arm64 leg): the exes link the MSVC CRT statically
+    # (CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=
+    # +crt-static" in the workflow), so they import no vcruntime140*/msvcp140*
+    # DLL and the MSI must stage NONE — the arm64 VC++ redist is not
+    # obtainable from any hosted runner image (see the ci-msi-arm64.yml
+    # header). Pass this and the script skips the redist\ staging and tells
+    # the WiX source to omit the redist components (-dIncludeCrt=no).
+    [switch]$StaticCrt
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +27,17 @@ if (-not $PickVersion) {
         $m = Select-String -Path $verFile -Pattern '^\s*PICK_REF\s*=\s*(.+?)\s*$'
         if ($m) { $PickVersion = $m.Matches[0].Groups[1].Value }
     }
+}
+
+# The kubestudio pin lives in the same file (KUBESTUDIO_REF); the local-build
+# ks-connector fallback URL below must follow it, the way $PickVersion follows
+# PICK_REF (a hardcoded release tag here is exactly how the URL drifted to a
+# ref that predates the current connector).
+$KsVersion = "v0.2.1"
+$verFile = Join-Path $PSScriptRoot "..\connector-versions.env"
+if (Test-Path $verFile) {
+    $m = Select-String -Path $verFile -Pattern '^\s*KUBESTUDIO_REF\s*=\s*(.+?)\s*$'
+    if ($m) { $KsVersion = $m.Matches[0].Groups[1].Value }
 }
 
 # Map arch to Rust target triple and WiX arch identifiers.
@@ -81,6 +100,11 @@ if (-not (Test-Path "dist\strikehub.exe")) {
 }
 
 # -- Stage the VC++ 2015-2022 runtime DLLs (app-local deployment) ----------
+# (Dynamic-CRT builds only. The arm64 leg passes -StaticCrt: its exes link
+# the CRT statically, import no vcruntime140*/msvcp140* DLL, and the MSI
+# ships no redist — see the -StaticCrt param doc and the ci-msi-arm64.yml
+# header for why the arm64 redist cannot be sourced from a hosted runner.)
+if (-not $StaticCrt) {
 # strikehub.exe and the bundled connectors are built with the default MSVC
 # dynamic CRT, so they import VCRUNTIME140.dll (all) and VCRUNTIME140_1.dll
 # (strikehub) - verified with `dumpbin /dependents` on the release MSI
@@ -93,12 +117,9 @@ if (-not (Test-Path "dist\strikehub.exe")) {
 #      the VC++ redistributable folder (newest MSVC <ver> wins). Canonical on
 #      the GitHub-hosted Windows runners, where VS is installed under
 #      "C:\Program Files (x86)\Microsoft Visual Studio\<year>\<flavor>\"
-#      (the year dir moves with runner re-bakes: 2022, 2025, ...).
-#      For arm64 this folder exists only when the VS ARM64 C++ tools
-#      component (Microsoft.VisualStudio.Component.VC.Tools.ARM64) is
-#      installed; the release workflow installs it on windows-11-arm when
-#      missing, so the CRT that ships inside the SIGNED MSI always comes
-#      from the Microsoft component channel — never a third-party package.
+#      (the year dir moves with runner re-bakes: 2022, 2025, ...). This root
+#      only matters for x64: the arm64 leg is a static-CRT build (-StaticCrt)
+#      that stages no DLLs at all.
 #   3. <VS year>\<flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>  (toolset bin)
 #   4. C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>  (SDK bin)
 #   5. C:\Windows\System32 - the VC++ redist MSI's install location; its
@@ -211,13 +232,16 @@ foreach ($dll in $requiredCrt) {
     Write-Host ("  staged {0,-20} <- {1}  (machine 0x{2:X4}, sha256 {3}...)" -f $dll, $found, $machine, $hash.Substring(0, 16))
 }
 Write-Host "VC++ runtime staged in $crtStage\ (shipped app-locally by the MSI)" -ForegroundColor Green
+} else {
+    Write-Host "Static CRT build (-StaticCrt): no app-local VC++ redist DLLs staged; the MSI ships none." -ForegroundColor Cyan
+}
 
 # Download connectors if needed
 if (-not (Test-Path "dist\ks-connector.exe")) {
     Write-Host "Downloading ks-connector..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Path dist -Force | Out-Null
     try {
-        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/v0.1.1/ks-connector-windows-$AssetArch.zip"
+        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/$KsVersion/ks-connector-windows-$AssetArch.zip"
         Invoke-WebRequest -Uri $ksUrl -OutFile "dist\ks-connector.zip"
         Expand-Archive -Path "dist\ks-connector.zip" -DestinationPath "dist" -Force
         Remove-Item "dist\ks-connector.zip"
@@ -287,10 +311,15 @@ if ($WixVersion -ne $Version) {
 
 # Compile WiX source
 Write-Host "Compiling..." -ForegroundColor Yellow
+# WiX preprocessor switch: include the app-local redist components only for
+# dynamic-CRT builds (see the <?if ?> blocks in wix\main.wxs). Always passed,
+# so an unset $(var.IncludeCrt) can never silently compile an empty wix.
+$includeCrt = if ($StaticCrt) { "no" } else { "yes" }
 & "$wixDir\candle.exe" -nologo `
     -dVersion="$WixVersion" `
     -dPlatform="$WixPlatform" `
     -dUpgradeCode="$UpgradeCode" `
+    -dIncludeCrt="$includeCrt" `
     -arch $WixArch `
     -out wix\main.wixobj `
     wix\main.wxs

@@ -60,7 +60,12 @@
                  /dependents on the release binary); a clean Windows 10 machine
                  ships no VC++ redist, so the installer carries exactly those
                  DLLs next to the executable. build-msi.ps1 stages them from
-                 the build host's MSVC toolset (see redist\ provenance there). -->
+                 the build host's MSVC toolset (see redist\ provenance there).
+                 x64 leg only: the arm64 exes are static-CRT builds and the
+                 MSI compiles without these components ($(var.IncludeCrt) is
+                 set by build-msi.ps1 -dIncludeCrt=...; the WiX preprocessor
+                 strips the blocks entirely when it is 'no'). -->
+            <?if $(var.IncludeCrt) = 'yes' ?>
             <Component Id='VcRuntimeInstallDir' Guid='B1A34567-89AB-CDEF-0123-456789ABC040' Win64='yes'>
                 <File Id='vcruntime140InstallDir'
                     Name='vcruntime140.dll'
@@ -73,6 +78,7 @@
                     Source='redist\vcruntime140_1.dll'
                     KeyPath='yes' />
             </Component>
+            <?endif ?>
         </DirectoryRef>
 
         <DirectoryRef Id='ConnectorsDir'>
@@ -92,7 +98,10 @@
                  search for a process starts in ITS OWN directory, so the copies
                  next to strikehub.exe are invisible to executables running from
                  connectors\. (The runtime cache copy staged by seed_vc_runtime
-                 in sh-core covers the per-user cache dir.) -->
+                 in sh-core covers the per-user cache dir.) x64 leg only —
+                 static-CRT arm64 builds compile without these (see the block
+                 above). -->
+            <?if $(var.IncludeCrt) = 'yes' ?>
             <Component Id='VcRuntimeConnectorsDir' Guid='B1A34567-89AB-CDEF-0123-456789ABC042' Win64='yes'>
                 <File Id='vcruntime140ConnectorsDir'
                     Name='vcruntime140.dll'
@@ -105,6 +114,7 @@
                     Source='redist\vcruntime140_1.dll'
                     KeyPath='yes' />
             </Component>
+            <?endif ?>
         </DirectoryRef>
 
         <!-- ── Environment variables ────────────────────────── -->
@@ -182,16 +192,20 @@
             ConfigurableDirectory='INSTALLDIR'
             AllowAdvertise='no' Absent='disallow'>
             <ComponentRef Id='StrikeHubExe' />
+            <?if $(var.IncludeCrt) = 'yes' ?>
             <ComponentRef Id='VcRuntimeInstallDir' />
             <ComponentRef Id='VcRuntime1401InstallDir' />
+            <?endif ?>
             <ComponentRef Id='EnvVars' />
             <ComponentRef Id='StartMenuShortcut' />
 
             <Feature Id='Connectors' Title='Bundled Connectors' Level='1'>
                 <ComponentRef Id='KsConnector' />
                 <ComponentRef Id='PentestAgent' />
+                <?if $(var.IncludeCrt) = 'yes' ?>
                 <ComponentRef Id='VcRuntimeConnectorsDir' />
                 <ComponentRef Id='VcRuntime1401ConnectorsDir' />
+                <?endif ?>
             </Feature>
 
             <Feature Id='DesktopShortcutFeature' Title='Desktop Shortcut' Level='1'>
