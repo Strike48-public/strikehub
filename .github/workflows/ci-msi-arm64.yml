@@ -1,13 +1,32 @@
 name: "ci: MSI arm64 (packaging gate)"
 
-# Path-scoped gate for the arm64 MSI PACKAGING path (CRT staging, connector
-# layout, WiX, upgrade rules) — the path that exists only in the Release
-# workflow and so could not fail on any PR before this file: a dead CRT
-# source URL survived every PR and 404'd on the first real release run
-# (build-msi.ps1:168, dry run 42905776882). Running the leg on every PR
-# costs ~7 min (measured; 5.4 of it is the aarch64 release build) on top of
-# the ~3 min suite, so it filters on the file set that can introduce the bug
-# class. Unsigned — Azure Trusted Signing stays release-only.
+# Path-scoped gate for the arm64 MSI PACKAGING path (cross-compile, static
+# CRT, connector layout, WiX, upgrade rules) — the path that exists only in
+# the Release workflow and so could not fail on any PR before this file: a
+# dead CRT source URL survived every PR and 404'd on the first real release
+# run (build-msi.ps1:168, dry run 42905776882). Running the leg on every PR
+# would cost the whole aarch64 release build (5+ min) plus two connector
+# builds on top of the ~3 min suite, so it filters on the file set that can
+# introduce the bug class. Unsigned — Azure Trusted Signing stays
+# release-only.
+#
+# Why windows-2022 (x64) + static CRT, not windows-11-arm:
+#   The windows-11-arm image (VS2026 variant) was proven, run by run, to be
+#   unable to supply the arm64 VC++ redist the dynamic-CRT build needs:
+#   every "arm64" VC++ redist dir in its VS tree holds X64 PEs (0x8664),
+#   its System32 is mixed-arch (arm64 vcruntime140.dll + x64
+#   vcruntime140_1.dll), and the aka.ms vc_redist.arm64.exe bundle is an
+#   x86 Burn launcher that no-ops under x86 emulation (exit 0,
+#   WixBundleInstalled=0, zero payload downloads). So the arm64 exes are
+#   cross-compiled from x64 and link the MSVC CRT statically
+#   (-C target-feature=+crt-static): the MSI then ships ZERO redist DLLs,
+#   and verify-crt-coverage.ps1 -NoCrtExpected proves none of the shipped
+#   exes imports vcruntime140*/msvcp140*. This mirrors what the ecosystem
+#   does for arm64 Windows desktop releases (x64 cross-compile:
+#   wilson-anysphere/formula's weekly arm64 smoke; static CRT: lqxp/app,
+#   OpenLogi, Tauri's build.windows.staticVCRuntime). The x64 leg is
+#   unchanged: windows-latest + dynamic CRT + app-local redist DLLs.
+#   x64 minutes are also ~3x cheaper than ARM minutes.
 on:
   pull_request:
     paths:
@@ -30,10 +49,23 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # Ship the bundled pentest-agent easy-mode-first, matching release.yml.
+  # Read at BUILD time via option_env! in pick's config.rs, so it must be
+  # present when the connector compiles.
+  PICK_EASY_MODE: "true"
+  # Static MSVC CRT for the arm64 target ONLY (target-scoped: the x64 leg of
+  # release.yml is untouched). Every exe this leg ships — strikehub.exe and
+  # both connectors — is built with it, so the MSI carries no VC++ redist
+  # DLLs (the arm64 redist is not obtainable from any hosted runner image,
+  # see the header).
+  CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+
 jobs:
   build-msi-arm64:
     name: Build MSI arm64 (unsigned, packaging gate)
-    runs-on: windows-11-arm
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +87,7 @@ jobs:
             # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
             ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
             case "$ts" in ????-??-??T??:??:??Z) ;; *)
-              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts=""
             esac
             case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
             printf '%s' "$ts"
@@ -76,190 +108,156 @@ jobs:
         with:
           key: aarch64-pc-windows-msvc-msi-arm64
 
-      - name: T3c msvc-dev-cmd probe (v1.13.0, node20)
-        uses: ilammy/msvc-dev-cmd@v1.13.0
-        with:
-          arch: amd64_arm64
-
-      - name: Build binary
-        run: cargo build --release --target aarch64-pc-windows-msvc --no-default-features --features desktop
-
-      # The arm64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) must come
-      # from Microsoft AND be read from a trustworthy process. This image has
-      # proven, run by run:
-      #   * VS 18's tree dir named "arm64\Microsoft.VC142.CRT" contains X64 DLLs
-      #     (machine 0x8664) - directory names are not ground truth here.
-      #   * The x64-hosted pwsh process sees a FUSION-REDIRECTED System32:
-      #     vcruntime140.dll reads 0xAA64 (arm64, the only copy) while
-      #     vcruntime140_1.dll in the SAME dir reads 0x8664 (an x64 shadow copy
-      #     exists because the x64 redist is also installed).
-      #   * aka.ms vc_redist.arm64.exe is an x86 DOWNLOADER bundle: /layout
-      #     yields only the exe (no embedded payload MSI), but /install runs.
-      # Solution: every PE read of a CRT file happens in an ARM64-NATIVE
-      # process (the image's toolcache Python, PE-verified 0xAA64 at
-      # runtime), which sees the true native System32. Probe order: VS tree
-      # (any 15/16/17/18) -> stage from the native System32 view -> install
-      # the MS bundle and re-stage. Verified dirs are exported as
-      # SHVCREDIST_DIR (build-msi.ps1's root #1, before its System32 root).
-      - name: Ensure arm64 VC++ CRT redist (windows-11-arm)
+      # The windows-2022 image ships the x64 VS toolchain but not the ARM64
+      # cross tools (VC.Tools.ARM64) by default; the pattern below is the one
+      # proven by wilson-anysphere/formula's weekly aarch64-pc-windows-msvc
+      # smoke build on windows-2022. Also verify the Windows SDK has arm64
+      # um/ucrt libs (it does on stock images; install the newest SDK
+      # component if a future image re-bake drops them).
+      - name: Ensure MSVC ARM64 cross toolchain + SDK arm64 libs
+        id: arm64_toolchain
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          function Get-PeMachine {
-            param([string]$Path)
-            $fs = [IO.File]::OpenRead($Path)
-            try {
-              $head = New-Object byte[] 4096
-              [void]$fs.Read($head, 0, 4096)
-              if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) { return -1 }
-              $peOff = [BitConverter]::ToInt32($head, 0x3C)
-              if ($head[$peOff] -ne 0x50 -or $head[$peOff + 1] -ne 0x45) { return -1 }
-              return [int][BitConverter]::ToUInt16($head, $peOff + 4)
-            } finally { $fs.Close() }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (!(Test-Path $vswhere)) { throw "vswhere not found at $vswhere (expected on windows-2022)" }
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) { throw "no Visual Studio installation found via vswhere" }
+          Write-Host "VS install: $installPath"
+          $msvcRoot = Join-Path $installPath "VC\Tools\MSVC"
+          function Get-LatestMsVC { Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1 }
+          function Test-Arm64Toolchain([string]$msvcDir) {
+            (Test-Path (Join-Path $msvcDir "bin\Hostx64\arm64\cl.exe")) -and (Test-Path (Join-Path $msvcDir "lib\arm64"))
           }
-          function Invoke-Native {
-            param([string]$Bin, [string[]]$Argv)
-            $prev = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            $out = & $Bin @Argv 2>&1
-            $code = $LASTEXITCODE
-            $ErrorActionPreference = $prev
-            return @{ Code = $code; Out = ($out | ForEach-Object { "$_" }) }
+          $msvc = Get-LatestMsVC
+          if (-not (Test-Arm64Toolchain $msvc.FullName)) {
+            Write-Host "ARM64 cross toolchain missing in $($msvc.FullName); installing Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+            $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            if (!(Test-Path $vsInstaller)) { throw "vs_installer.exe not found" }
+            & $vsInstaller modify --installPath $installPath --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --passive --norestart
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { throw "vs_installer modify failed (exit $LASTEXITCODE)" }
+            $msvc = Get-LatestMsVC
+            if (-not (Test-Arm64Toolchain $msvc.FullName)) { throw "ARM64 cross toolchain (bin\Hostx64\arm64, lib\arm64) still missing after component install" }
           }
-          # An ARM64-native interpreter: the only process class that sees the
-          # true (non-fusion-redirected) System32 on this machine.
-          $armPy = Get-ChildItem "C:\hostedtoolcache\windows\Python" -Directory -ErrorAction SilentlyContinue |
-                   Sort-Object Name -Descending |
-                   ForEach-Object { Join-Path $_.FullName "arm64\python.exe" } |
-                   Where-Object { Test-Path $_ } |
-                   Select-Object -First 1
-          if (-not $armPy -or (Get-PeMachine $armPy) -ne 0xAA64) {
-            throw "no arm64-native python in C:\hostedtoolcache\windows\Python (found: $armPy) - cannot read the native System32 view"
+          Write-Host "ARM64 cross toolchain: $($msvc.FullName)"
+          # Windows SDK with ARM64 um/ucrt libs (the cross-linker needs both).
+          $sdkLibRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Lib"
+          function Get-FirstArm64Sdk([string]$root) {
+            Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+              Where-Object { (Test-Path (Join-Path $_.FullName "um\arm64")) -and (Test-Path (Join-Path $_.FullName "ucrt\arm64")) } |
+              Sort-Object Name -Descending | Select-Object -First 1
           }
-          Write-Host "arm64-native interpreter: $armPy"
-          # PE reader is a repo script, run with the arm64-native interpreter.
-          $crtCheck = Join-Path (Get-Location).Path "scripts\crt_native_check.py"
-          $stage = Join-Path $env:TEMP "crt-stage"
-          New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          # 1) VS tree, any version (15/16/17/18), both PF roots. Check EVERY
-          #    candidate with the arm64-native process and use the first that
-          #    passes: the windows-11-arm image (VS2026 variant) ships the
-          #    VC.Runtimes.ARM64.Spectre component (verified against
-          #    actions/runner-images), but on this image the 14.29 "arm64"
-          #    dir holds X64 DLLs while the 14.44 dir holds the real arm64
-          #    CRT - first match in sort order is not ground truth.
-          $vsDirs = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT",
-                                "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT" -ErrorAction SilentlyContinue |
-                     Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") }
-          foreach ($d in $vsDirs) {
-            $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "check", $d.FullName)
-            Write-Host ("VS tree dir " + $d.FullName + " -> " + (($r.Out | ForEach-Object { "$_" }) -join ' '))
-            if ($r.Code -eq 0) {
-              Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$($d.FullName)"
-              Write-Host "arm64 CRT redist in VS tree (verified 0xAA64): $($d.FullName)"
-              exit 0
-            }
+          $sdk = Get-FirstArm64Sdk $sdkLibRoot
+          if (-not $sdk) {
+            $allSdks = @(Get-ChildItem $sdkLibRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+            if ($allSdks.Count -eq 0) { throw "no Windows SDK under $sdkLibRoot" }
+            $sdkBuild = $allSdks[0].Name -replace '^10\.0\.(\d+).*', '$1'
+            Write-Host "no SDK with ARM64 um/ucrt libs; installing Microsoft.VisualStudio.Component.Windows11SDK.$sdkBuild"
+            & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath $installPath --add "Microsoft.VisualStudio.Component.Windows11SDK.$sdkBuild" --passive --norestart
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { throw "SDK component install failed (exit $LASTEXITCODE)" }
+            $sdk = Get-FirstArm64Sdk $sdkLibRoot
+            if (-not $sdk) { throw "no Windows SDK with ARM64 um/ucrt libs after component install" }
           }
-          Write-Host "no usable arm64 CRT in the VS tree - staging from the native System32 view" -ForegroundColor Yellow
-          # 2) stage both DLLs from the native System32 view (arm64 python)
-          $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "stage", $stage)
-          Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
-          if ($r.Code -eq 0) {
-            Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
-            Write-Host "arm64 CRT staged from native System32: $stage"
-            exit 0
-          }
-          # 3) the ARM64 redist is missing/corrupt on this image (observed:
-          #    System32 has the arm64 vcruntime140.dll but the X64
-          #    vcruntime140_1.dll; the VS tree's "arm64" dir holds x64).
-          #    Install the official MS bundle WITH a Burn log, re-stage, and
-          #    if the install did not land in System32, salvage the payload
-          #    MSI it downloaded and extract it (msiexec /a + PE-verified).
-          Write-Host "installing the official VC++ ARM64 redist bundle (aka.ms) with /log, re-staging" -ForegroundColor Yellow
-          $dl = Join-Path $env:TEMP "vc_redist.arm64"
-          New-Item -ItemType Directory -Path $dl -Force | Out-Null
-          $exe = Join-Path $dl "vc_redist.arm64.exe"
-          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.arm64.exe" -OutFile $exe
-          $exeInfo = Get-Item $exe
-          Write-Host ("vc_redist.arm64.exe: " + $exeInfo.Length + " bytes, product " + $exeInfo.VersionInfo.ProductVersion + ", PE machine 0x" + ("{0:X4}" -f (Get-PeMachine $exe)))
-          $log = Join-Path $dl "install.log"
-          $launchErr = $null
-          $proc = $null
-          $prev = $ErrorActionPreference
-          $ErrorActionPreference = "Continue"
-          try { $proc = Start-Process -FilePath $exe -ArgumentList @("/install", "/quiet", "/norestart", "/log", $log) -Wait -PassThru }
-          catch { $launchErr = "$_" }
-          $ErrorActionPreference = $prev
-          if ($launchErr -or $null -eq $proc) { throw "redist bundle could not start: $launchErr" }
-          Write-Host ("redist bundle /install exit: " + $proc.ExitCode + " (0=success, 3010=restart needed)")
-          if (Test-Path $log) {
-            Write-Host "--- burn log (last 15 lines) ---"
-            Get-Content $log -Tail 15 | ForEach-Object { Write-Host $_ }
-          } else {
-            Write-Host "no burn log produced at $log" -ForegroundColor Yellow
-          }
-          $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "stage", $stage)
-          Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
-          if ($r.Code -eq 0) {
-            Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
-            Write-Host "arm64 CRT staged after bundle install: $stage"
-            exit 0
-          }
-          # 4) salvage: Burn downloads the payload MSI to a temp dir before
-          #    installing; if it did not land in System32, extract the recent
-          #    MSI and stage from the verified extract.
-          Write-Host "salvaging the payload MSI from temp (msiexec /a + PE-verified stage)" -ForegroundColor Yellow
-          $recent = Get-ChildItem $env:TEMP, "C:\Users\runneradmin\AppData\Local\Temp" -Recurse -Filter *.msi -ErrorAction SilentlyContinue |
-                    Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-20) } |
-                    Sort-Object Length -Descending | Select-Object -First 5
-          Write-Host ("recent MSIs: " + ($(if ($recent) { ($recent | ForEach-Object { "$($_.FullName) ($($_.Length)B)" }) -join ' | ' } else { '<none>' })))
-          $extractRoot = Join-Path $dl "msi-extract"
-          $staged = $false
-          foreach ($msi in $recent) {
-            New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-            $r = Invoke-Native -Bin "msiexec" -Argv @("/a", "$($msi.FullName)", "/qn", "TARGETDIR=$extractRoot")
-            if ($null -eq $r.Code -or $r.Code -ne 0) { Write-Host ("msiexec /a failed on " + $msi.FullName + " (exit $($r.Code)): " + (($r.Out | Select-Object -Last 5) -join ' ')); continue }
-            $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "stagefrom", $extractRoot, $stage)
-            Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
-            if ($r.Code -eq 0) { $staged = $true; break }
-            Remove-Item $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
-          }
-          if ($staged) {
-            Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
-            Write-Host "arm64 CRT staged from salvaged MSI extract: $stage"
-            exit 0
-          }
-          throw "arm64 vcruntime140_1.dll (0xAA64) not obtainable on this image: native System32 view, VS tree, bundle install (burn log above) and MSI salvage all failed"
+          Write-Host "SDK (arm64 um/ucrt libs): $($sdk.Name)"
+          "sdk_version=$($sdk.Name)" | Out-File -Append $env:GITHUB_OUTPUT
 
-      # The windows-11-arm image ships no WiX (the x64 image preinstalls 3.14).
-      # Install from the official wixtoolset binary zip (single HTTPS download,
-      # pinned release) instead of choco: the choco route sat 20+ minutes on a
-      # windows-11-arm runner (source checks under throttling) and had never
-      # completed on this image class before.
-      - name: Install WiX Toolset v3 (windows-11-arm)
+      # Puts the Hostx64\arm64 MSVC environment (target cl/link + the SDK with
+      # arm64 um/ucrt libs) on PATH for the cargo builds below. Vendored from
+      # ilammy/msvc-dev-cmd's exact technique (run vcvarsall for the cross
+      # arch, capture the changed environment, export it) because `uses:` of
+      # that action deterministically fails THIS org's run admission with
+      # startup_failure (probed 2026-11-12: v1.9.0 tag, v1.9.0 commit, and
+      # v1.13.0 all startup_failure; the same action/SHA works in other orgs,
+      # so the block is org-policy-side). Only runner-image components are
+      # used: vswhere + the VS tree's own vcvarsall.bat.
+      - name: Setup MSVC cross environment (x64 host, arm64 target)
         shell: pwsh
         run: |
-          if (Get-Command candle.exe -ErrorAction SilentlyContinue) {
-            Write-Host "WiX already on PATH"
-            exit 0
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $install = & $vswhere -latest -products * -property installationPath
+          if (-not $install) { throw "vswhere found no Visual Studio installation" }
+          $vcvarsall = Join-Path $install 'VC\Auxiliary\Build\vcvarsall.bat'
+          $sdk = '${{ steps.arm64_toolchain.outputs.sdk_version }}'
+          $archArgs = 'amd64_arm64' + $(if ($sdk) { " $sdk" } else { '' })
+          # The action's technique: `set`, `cls` (emits a form feed),
+          # vcvarsall, `cls`, `set` — then export every changed variable.
+          $out = cmd /c "set & cls & `"$vcvarsall`" $archArgs & cls & set"
+          $parts = $out -split "`f"
+          if ($parts.Count -lt 3) { throw "vcvarsall output not found in cmd output" }
+          if ($parts[1] -match '\[ERROR') { throw "vcvarsall rejected its arguments: $($parts[1])" }
+          $changed = 0
+          foreach ($line in $parts[2]) {
+            if ($line -match '^(.+?)=(.*)$') {
+              $name, $value = $matches[1], $matches[2]
+              if ($value -ne $env:$name) {
+                [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+                Set-Item -Path "env:$name" -Value $value
+                $changed++
+              }
+            }
           }
-          $z = Join-Path $env:TEMP "wix314-binaries.zip"
-          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile $z
-          $ex = Join-Path $env:TEMP "wix314"
-          Expand-Archive -Path $z -DestinationPath $ex -Force
-          $candle = Get-ChildItem $ex -Recurse -Filter candle.exe | Select-Object -First 1
-          if (-not $candle -or -not (Test-Path (Join-Path $candle.Directory.FullName "light.exe"))) {
-            throw "candle.exe/light.exe not found in the WiX binaries zip"
+          if ($changed -eq 0) { throw "vcvarsall changed no environment variables" }
+          Write-Host "Exported $changed variables from vcvarsall ($archArgs)"
+          # Hard gate: the cross-target compiler/linker must resolve before
+          # the cargo builds that follow.
+          foreach ($tool in 'cl.exe', 'link.exe') {
+            $found = Get-Command $tool -ErrorAction SilentlyContinue
+            if (-not $found) { throw "$tool not found after vcvarsall" }
+            Write-Host "  $tool -> $($found.Source)"
           }
-          $wixBin = $candle.Directory.FullName
-          "PATH=$wixBin;$env:Path" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-          Write-Host "WiX Toolset v3.14.1 at $wixBin"
 
-      - name: Build MSI
-        shell: pwsh
-        run: .\scripts\build-msi.ps1 -Version 0.0.0 -Arch aarch64
+      # Static CRT (job env CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS):
+      # the arm64 exe has no vcruntime140* imports, so the MSI needs no
+      # app-local redist — the part of the arm64 leg no hosted runner could
+      # supply.
+      - name: Build binary
+        run: cargo build --release --target aarch64-pc-windows-msvc --no-default-features --features desktop
 
-      # Same CRT-coverage guard as the x64 leg and the Release workflow.
-      - name: Verify app-local CRT coverage
+      # Build the bundled connectors from source at the pinned refs (same
+      # source-of-truth as the Release workflow; build-msi.ps1 only downloads
+      # prebuilt zips as a LOCAL-build fallback, and no release publishes
+      # windows-arm64 connector zips).
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Checkout and build pentest-agent
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/pick.git /tmp/pick
+          git -C /tmp/pick checkout ${{ env.PICK_REF }}
+          cargo build --release --manifest-path /tmp/pick/Cargo.toml --bin pentest-agent --target aarch64-pc-windows-msvc
+          mkdir -p dist
+          cp /tmp/pick/target/aarch64-pc-windows-msvc/release/pentest-agent.exe dist/
+
+      - name: Checkout and build ks-connector
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Strike48-public/kubestudio.git /tmp/kubestudio
+          git -C /tmp/kubestudio checkout ${{ env.KUBESTUDIO_REF }}
+          cargo build --release --manifest-path /tmp/kubestudio/Cargo.toml --bin ks-connector --features connector --target aarch64-pc-windows-msvc
+          mkdir -p dist
+          cp /tmp/kubestudio/target/aarch64-pc-windows-msvc/release/ks-connector.exe dist/
+
+      # The windows-2022 image ships WiX Toolset 3.14 preinstalled (official
+      # image definition, "WiX Toolset 3.14.1.8722"), so no install step.
+      # -StaticCrt: skip the app-local redist staging entirely (there are no
+      # CRT DLLs to stage) and tell the WiX source to omit the redist
+      # components (-dIncludeCrt=no).
+      - name: Build MSI (static CRT, no app-local redist)
         shell: pwsh
-        run: .\scripts\verify-crt-coverage.ps1
+        run: .\scripts\build-msi.ps1 -Version 0.0.0 -Arch aarch64 -StaticCrt
+
+      # Same CRT-coverage guard as the x64 leg and the Release workflow, in
+      # static mode: it fails if any shipped exe imports a DLL that is not
+      # OS-provided — with no redist\ staging, that is exactly the assertion
+      # "static CRT took effect for all three exes".
+      - name: Verify CRT coverage (static — expect zero non-OS imports)
+        shell: pwsh
+        run: .\scripts\verify-crt-coverage.ps1 -NoCrtExpected
