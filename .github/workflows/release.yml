@@ -617,12 +617,13 @@ jobs:
 
       # The arm64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) must come
       # from Microsoft. Fast path: the VS tree, when the image ships the ARM64
-      # C++ tools component. Otherwise extract the official VC++ 2015-2022
-      # Redistributable (ARM64) bundle from Microsoft's own CDN (aka.ms) into
-      # a staging dir and hand it to build-msi.ps1 through its SHVCREDIST_DIR
-      # operator-override root. A PE machine-field check (0xAA64) guarantees
-      # the staged DLLs are the arm64 build. (No VS modification: the
-      # windows-11-arm image state is not guaranteed to carry VS at all.)
+      # C++ tools component. Otherwise download the official VC++ Redistributable
+      # (ARM64) bundle from Microsoft's own CDN (aka.ms), layout + admin-extract
+      # the payload MSI, PE machine-check the DLLs (0xAA64), and hand the dir to
+      # build-msi.ps1 through its SHVCREDIST_DIR operator-override root.
+      # Every external interaction runs under an EAP guard that captures stderr
+      # AND the exit code — a failure must say WHY (the /layout first attempt
+      # died with an empty $LASTEXITCODE and no captured output).
       - name: Ensure arm64 VC++ CRT redist (windows-11-arm)
         if: runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.installer == 'msi'
         shell: pwsh
@@ -640,29 +641,47 @@ jobs:
               return [int][BitConverter]::ToUInt16($head, $peOff + 4)
             } finally { $fs.Close() }
           }
+          function Invoke-Native {
+            # Run a native exe WITHOUT EAP=Stop mangling it: capture all output
+            # and the real exit code; a missing exit code means the process
+            # never ran — report that explicitly instead of a bare -ne 0.
+            param([string]$Bin, [string[]]$Argv)
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $out = & $Bin @Argv 2>&1
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            return @{ Code = $code; Out = ($out | ForEach-Object { "$_" }) }
+          }
           $vsCrt = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT",
                                  "C:\Program Files\Microsoft Visual Studio\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT" -ErrorAction SilentlyContinue |
                    Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
                    Select-Object -First 1
           if ($vsCrt) { Write-Host "arm64 CRT redist in VS tree: $($vsCrt.FullName)"; exit 0 }
-          Write-Host "arm64 CRT redist not in the VS tree - extracting the official VC++ ARM64 redist bundle (aka.ms)..." -ForegroundColor Yellow
+          Write-Host "arm64 CRT redist not in the VS tree" -ForegroundColor Yellow
+          $vsRoots = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio", "C:\Program Files\Microsoft Visual Studio" -Directory -ErrorAction SilentlyContinue |
+                     ForEach-Object { $_.FullName }
+          Write-Host ("VS roots present: " + ($(if ($vsRoots) { $vsRoots -join '; ' } else { '<none>' })))
+          Write-Host "extracting the official VC++ ARM64 redist bundle (aka.ms)..." -ForegroundColor Yellow
           $dl = Join-Path $env:TEMP "vc_redist.arm64"
           New-Item -ItemType Directory -Path $dl -Force | Out-Null
           $exe = Join-Path $dl "vc_redist.arm64.exe"
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.arm64.exe" -OutFile $exe
-          $ver = (Get-Item $exe).VersionInfo.ProductVersion
-          Write-Host "vc_redist.arm64.exe product version: $ver"
+          $exeInfo = Get-Item $exe
+          Write-Host ("vc_redist.arm64.exe: " + $exeInfo.Length + " bytes, product " + $exeInfo.VersionInfo.ProductVersion + ", PE machine 0x" + ("{0:X4}" -f (Get-PeMachine $exe)))
           $layout = Join-Path $dl "layout"
-          & $exe /layout $layout /quiet /norestart
-          if ($LASTEXITCODE -ne 0) { throw "vc_redist.arm64.exe /layout failed (exit $LASTEXITCODE)" }
-          $msi = Get-ChildItem $layout -Recurse -Filter *.msi | Select-Object -First 1
-          if (-not $msi) { throw "redist layout produced no MSI: " + ((Get-ChildItem $layout -Recurse | Select-Object -ExpandProperty Name) -join ', ') }
+          $r = Invoke-Native -Bin $exe -Argv @("/layout", $layout, "/quiet", "/norestart")
+          if ($null -eq $r.Code) { throw "vc_redist.arm64.exe did not start at all (no exit code). Output: " + (($r.Out -join ' | ') -replace '\s+', ' ') }
+          if ($r.Code -ne 0) { throw "vc_redist.arm64.exe /layout failed (exit $($r.Code)): " + (($r.Out -join ' | ') -replace '\s+', ' ') }
+          $msi = Get-ChildItem $layout -Recurse -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $msi) { throw "redist layout produced no MSI. Layout contents: " + ((Get-ChildItem $layout -Recurse | Select-Object -ExpandProperty Name) -join ', ') }
+          Write-Host "layout MSI: $($msi.FullName) ($($msi.Length) bytes)"
           $extract = Join-Path $dl "crt"
           New-Item -ItemType Directory -Path $extract -Force | Out-Null
-          msiexec /a "$($msi.FullName)" /qn TARGETDIR="$extract"
-          if ($LASTEXITCODE -ne 0) { throw "msiexec /a failed (exit $LASTEXITCODE)" }
-          $one = Get-ChildItem $extract -Recurse -Filter vcruntime140_1.dll | Select-Object -First 1
-          if (-not $one) { throw "extraction produced no vcruntime140_1.dll" }
+          $r = Invoke-Native -Bin "msiexec" -Argv @("/a", "$($msi.FullName)", "/qn", "TARGETDIR=$extract")
+          if ($null -eq $r.Code -or $r.Code -ne 0) { throw "msiexec /a failed (exit $($r.Code)): " + (($r.Out -join ' | ') -replace '\s+', ' ') }
+          $one = Get-ChildItem $extract -Recurse -Filter vcruntime140_1.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $one) { throw "extraction produced no vcruntime140_1.dll. Extracted: " + ((Get-ChildItem $extract -Recurse | Select-Object -First 40 | ForEach-Object { $_.FullName }) -join ', ') }
           $m = Get-PeMachine $one.FullName
           if ($m -ne 0xAA64) { throw "staged vcruntime140_1.dll machine is 0x$("{0:X4}" -f $m), expected 0xAA64 (arm64)" }
           $dllDir = $one.Directory.FullName
