@@ -76,10 +76,51 @@ jobs:
         with:
           key: aarch64-pc-windows-msvc-msi-arm64
 
-      - name: T-D tiny pwsh probe
+      - name: Ensure MSVC ARM64 cross toolchain + SDK arm64 libs
+        id: arm64_toolchain
         shell: pwsh
         run: |
-          Write-Host "hello from pwsh"
+          $ErrorActionPreference = "Stop"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (!(Test-Path $vswhere)) { throw "vswhere not found at $vswhere (expected on windows-2022)" }
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) { throw "no Visual Studio installation found via vswhere" }
+          Write-Host "VS install: $installPath"
+          $msvcRoot = Join-Path $installPath "VC\Tools\MSVC"
+          function Get-LatestMsVC { Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1 }
+          function Test-Arm64Toolchain([string]$msvcDir) {
+            (Test-Path (Join-Path $msvcDir "bin\Hostx64\arm64\cl.exe")) -and (Test-Path (Join-Path $msvcDir "lib\arm64"))
+          }
+          $msvc = Get-LatestMsVC
+          if (-not (Test-Arm64Toolchain $msvc.FullName)) {
+            Write-Host "ARM64 cross toolchain missing in $($msvc.FullName); installing Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+            $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            if (!(Test-Path $vsInstaller)) { throw "vs_installer.exe not found" }
+            & $vsInstaller modify --installPath $installPath --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --passive --norestart
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { throw "vs_installer modify failed (exit $LASTEXITCODE)" }
+            $msvc = Get-LatestMsVC
+            if (-not (Test-Arm64Toolchain $msvc.FullName)) { throw "ARM64 cross toolchain (bin\Hostx64\arm64, lib\arm64) still missing after component install" }
+          }
+          Write-Host "ARM64 cross toolchain: $($msvc.FullName)"
+          $sdkLibRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Lib"
+          function Get-FirstArm64Sdk([string]$root) {
+            Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+              Where-Object { (Test-Path (Join-Path $_.FullName "um\arm64")) -and (Test-Path (Join-Path $_.FullName "ucrt\arm64")) } |
+              Sort-Object Name -Descending | Select-Object -First 1
+          }
+          $sdk = Get-FirstArm64Sdk $sdkLibRoot
+          if (-not $sdk) {
+            $allSdks = @(Get-ChildItem $sdkLibRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+            if ($allSdks.Count -eq 0) { throw "no Windows SDK under $sdkLibRoot" }
+            $sdkBuild = $allSdks[0].Name -replace '^10\.0\.(\d+).*', '$1'
+            Write-Host "no SDK with ARM64 um/ucrt libs; installing Microsoft.VisualStudio.Component.Windows11SDK.$sdkBuild"
+            & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath $installPath --add "Microsoft.VisualStudio.Component.Windows11SDK.$sdkBuild" --passive --norestart
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { throw "SDK component install failed (exit $LASTEXITCODE)" }
+            $sdk = Get-FirstArm64Sdk $sdkLibRoot
+            if (-not $sdk) { throw "no Windows SDK with ARM64 um/ucrt libs after component install" }
+          }
+          Write-Host "SDK (arm64 um/ucrt libs): $($sdk.Name)"
+          "sdk_version=$($sdk.Name)" | Out-File -Append $env:GITHUB_OUTPUT
 
       - name: Build binary
         run: cargo build --release --target aarch64-pc-windows-msvc --no-default-features --features desktop
