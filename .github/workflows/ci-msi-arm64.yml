@@ -132,41 +132,8 @@ jobs:
             throw "no arm64-native python in C:\hostedtoolcache\windows\Python (found: $armPy) - cannot read the native System32 view"
           }
           Write-Host "arm64-native interpreter: $armPy"
-          # Python helpers (run arm64-native). check <dir>: report the machine
-          # of <dir>\vcruntime140_1.dll. stage <stagedir>: verify BOTH redist
-          # DLLs are 0xAA64 in the native System32 view, copy them into
-          # <stagedir>, re-verify the copies.
-          $pyHelper = @'
-import shutil, struct, sys
-def machine(p):
-    with open(p, "rb") as f:
-        h = f.read(4096)
-    if len(h) < 4096 or h[:2] != b"MZ":
-        print("NOMZ " + p); sys.exit(1)
-    off = struct.unpack_from("<I", h, 0x3C)[0]
-    if h[off:off + 2] != b"PE":
-        print("NOPE " + p); sys.exit(1)
-    return struct.unpack_from("<H", h, off + 4)[0]
-mode, arg = sys.argv[1], sys.argv[2]
-if mode == "check":
-    m = machine(arg + "\\vcruntime140_1.dll")
-    print("MACHINE 0x%X" % m)
-    sys.exit(0 if m == 0xAA64 else 1)
-if mode == "stage":
-    for n in ("vcruntime140.dll", "vcruntime140_1.dll"):
-        src = "C:\\Windows\\System32\\" + n
-        m = machine(src)
-        if m != 0xAA64:
-            print("NATIVE_VIEW_FAIL %s 0x%X" % (n, m)); sys.exit(1)
-        dst = arg + "\\" + n
-        shutil.copyfile(src, dst)
-        m2 = machine(dst)
-        if m2 != 0xAA64:
-            print("COPY_CHECK_FAIL %s 0x%X" % (n, m2)); sys.exit(1)
-        print("STAGED %s 0xAA64" % n)
-    print("NATIVE_VIEW_OK")
-    sys.exit(0)
-'@
+          # PE reader is a repo script, run with the arm64-native interpreter.
+          $crtCheck = Join-Path (Get-Location).Path "scripts\crt_native_check.py"
           $stage = Join-Path $env:TEMP "crt-stage"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           # 1) VS tree, any version (15/16/17/18), both PF roots - PE-verified
@@ -176,7 +143,7 @@ if mode == "stage":
                    Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
                    Select-Object -First 1
           if ($vsCrt) {
-            $r = Invoke-Native -Bin $armPy -Argv @("check", $vsCrt.FullName)
+            $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "check", $vsCrt.FullName)
             Write-Host ("VS tree dir " + $vsCrt.FullName + " -> " + (($r.Out | ForEach-Object { "$_" }) -join ' '))
             if ($r.Code -eq 0) {
               Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$($vsCrt.FullName)"
@@ -186,7 +153,7 @@ if mode == "stage":
           }
           Write-Host "no usable arm64 CRT in the VS tree - staging from the native System32 view" -ForegroundColor Yellow
           # 2) stage both DLLs from the native System32 view (arm64 python)
-          $r = Invoke-Native -Bin $armPy -Argv @("stage", $stage)
+          $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "stage", $stage)
           Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
           if ($r.Code -eq 0) {
             Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
@@ -212,7 +179,7 @@ if mode == "stage":
           $ErrorActionPreference = $prev
           if ($launchErr -or $null -eq $proc) { throw "redist bundle could not start: $launchErr" }
           if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "redist bundle /install failed (exit $($proc.ExitCode))" }
-          $r = Invoke-Native -Bin $armPy -Argv @("stage", $stage)
+          $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "stage", $stage)
           Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
           if ($r.Code -ne 0) { throw "arm64 CRT still missing from the native System32 view after bundle install" }
           Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
