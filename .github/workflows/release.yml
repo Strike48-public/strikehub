@@ -664,9 +664,26 @@ jobs:
                    Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
                    Select-Object -First 1
           }
-          # 1) already there?
+          # 1) already there? Export it as SHVCREDIST_DIR - do NOT just print it:
+          # this image also carries the x64 VC redist, and the x64-hosted pwsh
+          # process sees a FUSION-REDIRECTED System32 (vcruntime140_1.dll resolves
+          # to the x64 copy, machine 0x8664 - observed live), so build-msi.ps1's
+          # System32 root is untrustworthy here. The operator-override root must
+          # point at the verified arm64 dir.
+          function Use-CrtDir {
+            param($Dir)
+            $one = Join-Path $Dir.FullName "vcruntime140_1.dll"
+            $m = Get-PeMachine $one
+            if ($m -ne 0xAA64) {
+              Write-Host "CRT dir $($Dir.FullName) is machine 0x$("{0:X4}" -f $m), not 0xAA64 - not usable" -ForegroundColor Yellow
+              return
+            }
+            Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$($Dir.FullName)"
+            Write-Host "arm64 CRT redist: $($Dir.FullName) (vcruntime140_1.dll machine 0xAA64) - exported SHVCREDIST_DIR"
+            exit 0
+          }
           $crt = Find-Arm64CrtDir
-          if ($crt) { Write-Host "arm64 CRT redist in VS tree: $($crt.FullName)"; exit 0 }
+          if ($crt) { Use-CrtDir $crt }
           Write-Host "arm64 CRT redist not in the VS tree yet" -ForegroundColor Yellow
           # 2) add the ARM64 C++ tools component to the found VS install
           $vsRoot = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio", "C:\Program Files\Microsoft Visual Studio" -Directory -ErrorAction SilentlyContinue |
@@ -682,7 +699,7 @@ jobs:
             Write-Host ("vs_installer modify exit: " + $r.Code)
             if ($r.Code -ne 0) { throw "vs_installer modify failed (exit $($r.Code)): " + (($r.Out | Select-Object -Last 20) -join ' | ') }
             $crt = Find-Arm64CrtDir
-            if ($crt) { Write-Host "arm64 CRT redist after component install: $($crt.FullName)"; exit 0 }
+            if ($crt) { Use-CrtDir $crt }
             throw "VS component install succeeded but no arm64 VC14x CRT dir appeared under $($vsRoot.FullName)\VC\Redist"
           }
           # 3) last resort: the aka.ms redist bundle (x86 launcher)
