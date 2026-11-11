@@ -192,7 +192,7 @@ jobs:
             exit 0
           }
           $z = Join-Path $env:TEMP "wix314-binaries.zip"
-          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix314.1.128/wix314-binaries.zip" -OutFile $z
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile $z
           $ex = Join-Path $env:TEMP "wix314"
           Expand-Archive -Path $z -DestinationPath $ex -Force
           $candle = Get-ChildItem $ex -Recurse -Filter candle.exe | Select-Object -First 1
