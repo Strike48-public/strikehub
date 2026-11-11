@@ -616,14 +616,17 @@ jobs:
           Write-Host "PATH for later steps: $wixBin"
 
       # The arm64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) must come
-      # from Microsoft. Fast path: the VS tree, when the image ships the ARM64
-      # C++ tools component. Otherwise download the official VC++ Redistributable
-      # (ARM64) bundle from Microsoft's own CDN (aka.ms), layout + admin-extract
-      # the payload MSI, PE machine-check the DLLs (0xAA64), and hand the dir to
-      # build-msi.ps1 through its SHVCREDIST_DIR operator-override root.
-      # Every external interaction runs under an EAP guard that captures stderr
-      # AND the exit code — a failure must say WHY (the /layout first attempt
-      # died with an empty $LASTEXITCODE and no captured output).
+      # from Microsoft. Probe order:
+      #   1. Any VS tree (version dirs are 15/16/17/18 — NOT "20*"; the original
+      #      glob could never match) for an arm64 VC14x CRT redist dir.
+      #   2. Add the ARM64 C++ tools component to the found VS install via
+      #      vs_installer (the image ships VS 18 + the Installer).
+      #   3. Last resort: the aka.ms VC++ ARM64 redist BUNDLE — an x86 Burn
+      #      launcher (PE 0x014C) that silently never starts on an ARM64 box
+      #      without x86 emulation, so launch via Start-Process -PassThru and
+      #      fail loudly when it cannot.
+      # Every native call is EAP-guarded with captured output + exit code, and
+      # staged DLLs pass a PE machine check (0xAA64) before staging.
       - name: Ensure arm64 VC++ CRT redist (windows-11-arm)
         if: runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.installer == 'msi'
         shell: pwsh
@@ -642,9 +645,6 @@ jobs:
             } finally { $fs.Close() }
           }
           function Invoke-Native {
-            # Run a native exe WITHOUT EAP=Stop mangling it: capture all output
-            # and the real exit code; a missing exit code means the process
-            # never ran — report that explicitly instead of a bare -ne 0.
             param([string]$Bin, [string[]]$Argv)
             $prev = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
@@ -653,16 +653,35 @@ jobs:
             $ErrorActionPreference = $prev
             return @{ Code = $code; Out = ($out | ForEach-Object { "$_" }) }
           }
-          $vsCrt = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT",
-                                 "C:\Program Files\Microsoft Visual Studio\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT" -ErrorAction SilentlyContinue |
+          function Find-Arm64CrtDir {
+            return Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT",
+                                 "C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC14*.CRT" -ErrorAction SilentlyContinue |
                    Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
                    Select-Object -First 1
-          if ($vsCrt) { Write-Host "arm64 CRT redist in VS tree: $($vsCrt.FullName)"; exit 0 }
-          Write-Host "arm64 CRT redist not in the VS tree" -ForegroundColor Yellow
-          $vsRoots = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio", "C:\Program Files\Microsoft Visual Studio" -Directory -ErrorAction SilentlyContinue |
-                     ForEach-Object { $_.FullName }
-          Write-Host ("VS roots present: " + ($(if ($vsRoots) { $vsRoots -join '; ' } else { '<none>' })))
-          Write-Host "extracting the official VC++ ARM64 redist bundle (aka.ms)..." -ForegroundColor Yellow
+          }
+          # 1) already there?
+          $crt = Find-Arm64CrtDir
+          if ($crt) { Write-Host "arm64 CRT redist in VS tree: $($crt.FullName)"; exit 0 }
+          Write-Host "arm64 CRT redist not in the VS tree yet" -ForegroundColor Yellow
+          # 2) add the ARM64 C++ tools component to the found VS install
+          $vsRoot = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio", "C:\Program Files\Microsoft Visual Studio" -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { Test-Path (Join-Path $_.FullName "VC") } |
+                    Select-Object -First 1
+          $installer = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
+          if (-not $vsRoot -or -not (Test-Path $installer)) {
+            Write-Host ("no VS install with a VC tree (vsRoot=$($vsRoot.FullName)) / vs_installer at $installer (present: $(Test-Path $installer))") -ForegroundColor Yellow
+          } else {
+            Write-Host "adding Microsoft.VisualStudio.Component.VC.Tools.ARM64 to $($vsRoot.FullName) ..."
+            $r = Invoke-Native -Bin $installer -Argv @("modify", "--installPath", $vsRoot.FullName, "--add", "Microsoft.VisualStudio.Component.VC.Tools.ARM64", "--quiet", "--norestart")
+            if ($null -eq $r.Code) { throw "vs_installer modify did not start (no exit code). Output: " + (($r.Out | Select-Object -Last 20) -join ' | ') }
+            Write-Host ("vs_installer modify exit: " + $r.Code)
+            if ($r.Code -ne 0) { throw "vs_installer modify failed (exit $($r.Code)): " + (($r.Out | Select-Object -Last 20) -join ' | ') }
+            $crt = Find-Arm64CrtDir
+            if ($crt) { Write-Host "arm64 CRT redist after component install: $($crt.FullName)"; exit 0 }
+            throw "VS component install succeeded but no arm64 VC14x CRT dir appeared under $($vsRoot.FullName)\VC\Redist"
+          }
+          # 3) last resort: the aka.ms redist bundle (x86 launcher)
+          Write-Host "falling back to the aka.ms VC++ ARM64 redist bundle (x86 launcher — needs x86 emulation)" -ForegroundColor Yellow
           $dl = Join-Path $env:TEMP "vc_redist.arm64"
           New-Item -ItemType Directory -Path $dl -Force | Out-Null
           $exe = Join-Path $dl "vc_redist.arm64.exe"
@@ -670,16 +689,22 @@ jobs:
           $exeInfo = Get-Item $exe
           Write-Host ("vc_redist.arm64.exe: " + $exeInfo.Length + " bytes, product " + $exeInfo.VersionInfo.ProductVersion + ", PE machine 0x" + ("{0:X4}" -f (Get-PeMachine $exe)))
           $layout = Join-Path $dl "layout"
-          $r = Invoke-Native -Bin $exe -Argv @("/layout", $layout, "/quiet", "/norestart")
-          if ($null -eq $r.Code) { throw "vc_redist.arm64.exe did not start at all (no exit code). Output: " + (($r.Out -join ' | ') -replace '\s+', ' ') }
-          if ($r.Code -ne 0) { throw "vc_redist.arm64.exe /layout failed (exit $($r.Code)): " + (($r.Out -join ' | ') -replace '\s+', ' ') }
+          $proc = $null
+          $prev = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          $launchErr = $null
+          try { $proc = Start-Process -FilePath $exe -ArgumentList @("/layout", $layout, "/quiet", "/norestart") -Wait -PassThru }
+          catch { $launchErr = "$_" }
+          $ErrorActionPreference = $prev
+          if ($launchErr -or $null -eq $proc) { throw "redist bundle could not start (x86 launcher on ARM64 without x86 emulation?): $launchErr" }
+          if ($proc.ExitCode -ne 0) { throw "redist bundle /layout failed (exit $($proc.ExitCode))" }
           $msi = Get-ChildItem $layout -Recurse -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $msi) { throw "redist layout produced no MSI. Layout contents: " + ((Get-ChildItem $layout -Recurse | Select-Object -ExpandProperty Name) -join ', ') }
+          if (-not $msi) { throw "redist layout produced no MSI. Layout: " + ((Get-ChildItem $layout -Recurse | Select-Object -ExpandProperty Name) -join ', ') }
           Write-Host "layout MSI: $($msi.FullName) ($($msi.Length) bytes)"
           $extract = Join-Path $dl "crt"
           New-Item -ItemType Directory -Path $extract -Force | Out-Null
           $r = Invoke-Native -Bin "msiexec" -Argv @("/a", "$($msi.FullName)", "/qn", "TARGETDIR=$extract")
-          if ($null -eq $r.Code -or $r.Code -ne 0) { throw "msiexec /a failed (exit $($r.Code)): " + (($r.Out -join ' | ') -replace '\s+', ' ') }
+          if ($null -eq $r.Code -or $r.Code -ne 0) { throw "msiexec /a failed (exit $($r.Code)): " + (($r.Out | Select-Object -Last 20) -join ' | ') }
           $one = Get-ChildItem $extract -Recurse -Filter vcruntime140_1.dll -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $one) { throw "extraction produced no vcruntime140_1.dll. Extracted: " + ((Get-ChildItem $extract -Recurse | Select-Object -First 40 | ForEach-Object { $_.FullName }) -join ', ') }
           $m = Get-PeMachine $one.FullName
