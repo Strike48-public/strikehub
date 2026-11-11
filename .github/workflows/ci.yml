@@ -487,6 +487,105 @@ jobs:
           name: ${{ matrix.artifact }}
           path: StrikeHub-*.msi
 
+  # The arm64 MSI packaging path (CRT staging, connector layout, WiX) is
+  # otherwise only exercised by the Release workflow (tag/dispatch). The
+  # arm64 CRT fallback was exactly the failure this gates: a dead download
+  # URL that survived every PR and died on the first real release run
+  # (build-msi.ps1:168, dry run 42905776882). Build the UNSIGNED arm64 MSI
+  # on PRs and main pushes so packaging regressions gate the PR, not the
+  # next release. (The x64 leg's main-only build-installers job is unchanged.)
+  build-msi-arm64:
+    name: Build MSI arm64 (unsigned, PR gate)
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load connector refs
+        shell: bash
+        run: cat connector-versions.env >> "$GITHUB_ENV"
+
+      - name: Resolve bundled connector timestamps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          resolve_ts () {
+            local repo="$1" ref="$2" ts=""
+            # Branch first (handles slashed branch names), then tag/SHA via commits.
+            # A 404 body is non-empty, so a naive `-z` check would skip the fallback
+            # and bake the error JSON as the timestamp. Gate on the ISO-8601 date
+            # shape: fall through to commits/ if branches/ didn't return a date, and
+            # empty out anything that still isn't a date (-> epoch-0, seed no-ops).
+            ts="$(gh api "repos/$repo/branches/$ref" --jq '.commit.commit.committer.date' 2>/dev/null)" || ts=""
+            case "$ts" in ????-??-??T??:??:??Z) ;; *)
+              ts="$(gh api "repos/$repo/commits/$ref" --jq '.commit.committer.date' 2>/dev/null)" || ts="" ;;
+            esac
+            case "$ts" in ????-??-??T??:??:??Z) ;; *) ts="" ;; esac
+            printf '%s' "$ts"
+          }
+          PICK_TS="$(resolve_ts Strike48-public/pick "$PICK_REF")"
+          KS_TS="$(resolve_ts Strike48-public/kubestudio "$KUBESTUDIO_REF")"
+          echo "STRIKEHUB_BUNDLED_PICK_REF=$PICK_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_PICK_TS=$PICK_TS" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_REF=$KUBESTUDIO_REF" >> "$GITHUB_ENV"
+          echo "STRIKEHUB_BUNDLED_KUBESTUDIO_TS=$KS_TS" >> "$GITHUB_ENV"
+          echo "Bundled: pick=$PICK_REF@$PICK_TS  kubestudio=$KUBESTUDIO_REF@$KS_TS"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-pc-windows-msvc-msi-arm64
+
+      - name: Build binary
+        run: cargo build --release --target aarch64-pc-windows-msvc --no-default-features --features desktop
+
+      # The ARM64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) lives in
+      # the VS tree only when the ARM64 C++ tools component is installed
+      # (VC\Redist\MSVC\<ver>\arm64\Microsoft.VC143.CRT). The windows-11-arm
+      # image ships the x64-hosted C++ workload, so install the component when
+      # the folder is missing. These DLLs ship inside a SIGNED MSI, so the
+      # source must be the Microsoft component channel — never a third-party
+      # package (there is no official Microsoft.VCRedist nuget package).
+      - name: Ensure VS ARM64 C++ CRT redist (windows-11-arm)
+        shell: pwsh
+        run: |
+          function Get-Arm64CrtDir {
+            foreach ($base in "C:\Program Files (x86)\Microsoft Visual Studio", "C:\Program Files\Microsoft Visual Studio") {
+              Get-ChildItem "$base\20*\*\VC\Redist\MSVC\*\arm64\Microsoft.VC143.CRT" -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "vcruntime140_1.dll") } |
+                Select-Object -First 1 | ForEach-Object { return $_.FullName }
+            }
+            $null
+          }
+          $crt = Get-Arm64CrtDir
+          if ($crt) { Write-Host "arm64 CRT redist present: $crt"; exit 0 }
+          $vs = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\20*", "C:\Program Files\Microsoft Visual Studio\20*" -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "VC") } | Select-Object -First 1
+          if (-not $vs) { throw "No Visual Studio installation found to add Microsoft.VisualStudio.Component.VC.Tools.ARM64" }
+          Write-Host "arm64 CRT redist missing — installing Microsoft.VisualStudio.Component.VC.Tools.ARM64 on $vs"
+          & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify `
+              --installPath $vs.FullName `
+              --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 `
+              --norestart --passive --wait
+          $crt = Get-Arm64CrtDir
+          if (-not $crt) { throw "VC.Tools.ARM64 installed but the arm64 CRT redist is still missing" }
+          Write-Host "arm64 CRT redist: $crt"
+
+      - name: Install WiX Toolset v3
+        run: choco install wixtoolset --version 3.14.1 -y
+
+      - name: Build MSI
+        shell: pwsh
+        run: .\scripts\build-msi.ps1 -Version 0.0.0 -Arch aarch64
+
+      # Same CRT-coverage guard as the x64 leg and the Release workflow.
+      - name: Verify app-local CRT coverage
+        shell: pwsh
+        run: .\scripts\verify-crt-coverage.ps1
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
