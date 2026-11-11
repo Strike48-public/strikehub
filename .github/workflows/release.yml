@@ -529,7 +529,7 @@ jobs:
       # builds below. amd64_arm64 = x64 host, arm64 target. arm64 leg only.
       - name: Setup MSVC cross environment (amd64 -> arm64)
         if: matrix.target == 'aarch64-pc-windows-msvc'
-        uses: ilammy/msvc-dev-cmd@v1.9.0
+        uses: ilammy/msvc-dev-cmd@7defe9254715b088f12dddd9942945a3d75cdad5 # v1.9.0 (pinned; same commit as formula's arm64 smoke)
         with:
           arch: amd64_arm64
           sdk: ${{ steps.arm64_toolchain.outputs.sdk_version }}
