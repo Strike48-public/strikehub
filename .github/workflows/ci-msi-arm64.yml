@@ -76,8 +76,8 @@ jobs:
         with:
           key: aarch64-pc-windows-msvc-msi-arm64
 
-      - name: T3b msvc-dev-cmd probe (tag ref)
-        uses: ilammy/msvc-dev-cmd@v1.9.0
+      - name: T3c msvc-dev-cmd probe (v1.13.0, node20)
+        uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
           arch: amd64_arm64
 
