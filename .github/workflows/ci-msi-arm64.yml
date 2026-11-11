@@ -179,8 +179,29 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$dllDir"
           Write-Host "arm64 CRT staged (SHVCREDIST_DIR=$dllDir)"
 
-      - name: Install WiX Toolset v3
-        run: choco install wixtoolset --version 3.14.1 -y
+      # The windows-11-arm image ships no WiX (the x64 image preinstalls 3.14).
+      # Install from the official wixtoolset binary zip (single HTTPS download,
+      # pinned release) instead of choco: the choco route sat 20+ minutes on a
+      # windows-11-arm runner (source checks under throttling) and had never
+      # completed on this image class before.
+      - name: Install WiX Toolset v3 (windows-11-arm)
+        shell: pwsh
+        run: |
+          if (Get-Command candle.exe -ErrorAction SilentlyContinue) {
+            Write-Host "WiX already on PATH"
+            exit 0
+          }
+          $z = Join-Path $env:TEMP "wix314-binaries.zip"
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix314.1.128/wix314-binaries.zip" -OutFile $z
+          $ex = Join-Path $env:TEMP "wix314"
+          Expand-Archive -Path $z -DestinationPath $ex -Force
+          $candle = Get-ChildItem $ex -Recurse -Filter candle.exe | Select-Object -First 1
+          if (-not $candle -or -not (Test-Path (Join-Path $candle.Directory.FullName "light.exe"))) {
+            throw "candle.exe/light.exe not found in the WiX binaries zip"
+          }
+          $wixBin = $candle.Directory.FullName
+          "PATH=$wixBin;$env:Path" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          Write-Host "WiX Toolset v3.14.1 at $wixBin"
 
       - name: Build MSI
         shell: pwsh

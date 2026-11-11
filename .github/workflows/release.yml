@@ -595,25 +595,30 @@ jobs:
       # MSI, which installs to Program Files but does NOT add the bin dir to
       # the runner PATH - locate it and export it via GITHUB_ENV so later
       # steps (and build-msi.ps1's PATH fallback) find candle/light.
+      # The windows-11-arm image ships no WiX (the x64 image preinstalls 3.14).
+      # Install from the official wixtoolset binary zip (single HTTPS download,
+      # pinned release) instead of choco: the choco route sat 20+ minutes on a
+      # windows-11-arm runner (source checks under throttling) and had never
+      # completed on this image class before.
       - name: Install WiX Toolset v3 (windows-11-arm)
         if: runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.installer == 'msi'
         shell: pwsh
         run: |
-          if (-not (Test-Path "C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe") -and
-              -not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
-            choco install wixtoolset --version 3.14.1 -y
+          if (Get-Command candle.exe -ErrorAction SilentlyContinue) {
+            Write-Host "WiX already on PATH"
+            exit 0
           }
-          $wixBin = Get-ChildItem "C:\Program Files (x86)" -Directory -Filter "WiX Toolset*" |
-            ForEach-Object { Join-Path $_.FullName "bin" } |
-            Where-Object { Test-Path (Join-Path $_ "candle.exe") } |
-            Select-Object -First 1
-          if (-not $wixBin) {
-            throw "WiX Toolset v3 not found after install"
+          $z = Join-Path $env:TEMP "wix314-binaries.zip"
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix314.1.128/wix314-binaries.zip" -OutFile $z
+          $ex = Join-Path $env:TEMP "wix314"
+          Expand-Archive -Path $z -DestinationPath $ex -Force
+          $candle = Get-ChildItem $ex -Recurse -Filter candle.exe | Select-Object -First 1
+          if (-not $candle -or -not (Test-Path (Join-Path $candle.Directory.FullName "light.exe"))) {
+            throw "candle.exe/light.exe not found in the WiX binaries zip"
           }
+          $wixBin = $candle.Directory.FullName
           "PATH=$wixBin;$env:Path" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-          if (-not (Test-Path (Join-Path $wixBin "light.exe"))) { throw "WiX light.exe not found in $wixBin" }
-          Write-Host "WiX Toolset v3 at $wixBin (candle v3 has no -version flag; both tools verified present)"
-          Write-Host "PATH for later steps: $wixBin"
+          Write-Host "WiX Toolset v3.14.1 at $wixBin"
 
       # The arm64 VC++ redist (vcruntime140.dll + vcruntime140_1.dll) must come
       # from Microsoft. Probe order:
