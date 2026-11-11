@@ -39,14 +39,43 @@ def pe_machine(path):
 
 
 def main(argv):
-    if len(argv) != 3:
-        print("usage: crt_native_check.py <check|stage> <dir>")
+    if len(argv) < 3 or len(argv) > 4:
+        print("usage: crt_native_check.py <check|stage|stagefrom> <dir> [stagedir]")
         return 2
+    global STAGE_DIR
     mode, arg = argv[1], argv[2]
+    STAGE_DIR = argv[3] if len(argv) > 3 else ""
     if mode == "check":
         m = pe_machine(arg + r"\vcruntime140_1.dll")
         print("MACHINE 0x%X" % m if m is not None else "MACHINE not-a-PE")
         return 0 if m == ARM64 else 1
+    if mode == "stagefrom":
+        # srcdir may be a msiexec /a extraction tree (nested dirs): locate
+        # vcruntime140_1.dll, verify both DLLs next to it, copy to the target.
+        import os
+        found = None
+        for root, _dirs, files in os.walk(arg):
+            if "vcruntime140_1.dll" in files:
+                found = os.path.join(root, "vcruntime140_1.dll")
+                break
+        if not found:
+            print("NO_DLL_IN_EXTRACT")
+            return 1
+        for name in REDIST_DLLS:
+            src = os.path.join(os.path.dirname(found), name)
+            m = pe_machine(src)
+            if m != ARM64:
+                print("EXTRACT_FAIL %s 0x%X" % (name, m or 0))
+                return 1
+            dst = STAGE_DIR + "\\" + name
+            shutil.copyfile(src, dst)
+            m2 = pe_machine(dst)
+            if m2 != ARM64:
+                print("COPY_CHECK_FAIL %s 0x%X" % (name, m2 or 0))
+                return 1
+            print("STAGED %s 0xAA64 (from extract)" % name)
+        print("EXTRACT_OK")
+        return 0
     if mode == "stage":
         for name in REDIST_DLLS:
             src = SYSTEM32 + "\\" + name

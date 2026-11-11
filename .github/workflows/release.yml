@@ -702,30 +702,67 @@ jobs:
             Write-Host "arm64 CRT staged from native System32: $stage"
             exit 0
           }
-          # 3) the ARM64 redist is not fully installed: install the official MS
-          #    bundle (x86 launcher - Start-Process, it does run on this image)
-          #    and re-stage.
-          Write-Host "installing the official VC++ ARM64 redist bundle (aka.ms) and re-staging" -ForegroundColor Yellow
+          # 3) the ARM64 redist is missing/corrupt on this image (observed:
+          #    System32 has the arm64 vcruntime140.dll but the X64
+          #    vcruntime140_1.dll; the VS tree's "arm64" dir holds x64).
+          #    Install the official MS bundle WITH a Burn log, re-stage, and
+          #    if the install did not land in System32, salvage the payload
+          #    MSI it downloaded and extract it (msiexec /a + PE-verified).
+          Write-Host "installing the official VC++ ARM64 redist bundle (aka.ms) with /log, re-staging" -ForegroundColor Yellow
           $dl = Join-Path $env:TEMP "vc_redist.arm64"
           New-Item -ItemType Directory -Path $dl -Force | Out-Null
           $exe = Join-Path $dl "vc_redist.arm64.exe"
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.arm64.exe" -OutFile $exe
           $exeInfo = Get-Item $exe
           Write-Host ("vc_redist.arm64.exe: " + $exeInfo.Length + " bytes, product " + $exeInfo.VersionInfo.ProductVersion + ", PE machine 0x" + ("{0:X4}" -f (Get-PeMachine $exe)))
+          $log = Join-Path $dl "install.log"
           $launchErr = $null
           $proc = $null
           $prev = $ErrorActionPreference
           $ErrorActionPreference = "Continue"
-          try { $proc = Start-Process -FilePath $exe -ArgumentList @("/install", "/quiet", "/norestart") -Wait -PassThru }
+          try { $proc = Start-Process -FilePath $exe -ArgumentList @("/install", "/quiet", "/norestart", "/log", $log) -Wait -PassThru }
           catch { $launchErr = "$_" }
           $ErrorActionPreference = $prev
           if ($launchErr -or $null -eq $proc) { throw "redist bundle could not start: $launchErr" }
-          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "redist bundle /install failed (exit $($proc.ExitCode))" }
+          Write-Host ("redist bundle /install exit: " + $proc.ExitCode + " (0=success, 3010=restart needed)")
+          if (Test-Path $log) {
+            Write-Host "--- burn log (last 15 lines) ---"
+            Get-Content $log -Tail 15 | ForEach-Object { Write-Host $_ }
+          } else {
+            Write-Host "no burn log produced at $log" -ForegroundColor Yellow
+          }
           $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "stage", $stage)
           Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
-          if ($r.Code -ne 0) { throw "arm64 CRT still missing from the native System32 view after bundle install" }
-          Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
-          Write-Host "arm64 CRT staged after bundle install: $stage"
+          if ($r.Code -eq 0) {
+            Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
+            Write-Host "arm64 CRT staged after bundle install: $stage"
+            exit 0
+          }
+          # 4) salvage: Burn downloads the payload MSI to a temp dir before
+          #    installing; if it did not land in System32, extract the recent
+          #    MSI and stage from the verified extract.
+          Write-Host "salvaging the payload MSI from temp (msiexec /a + PE-verified stage)" -ForegroundColor Yellow
+          $recent = Get-ChildItem $env:TEMP, "C:\Users\runneradmin\AppData\Local\Temp" -Recurse -Filter *.msi -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-20) } |
+                    Sort-Object Length -Descending | Select-Object -First 5
+          Write-Host ("recent MSIs: " + ($(if ($recent) { ($recent | ForEach-Object { "$($_.FullName) ($($_.Length)B)" }) -join ' | ' } else { '<none>' })))
+          $extractRoot = Join-Path $dl "msi-extract"
+          $staged = $false
+          foreach ($msi in $recent) {
+            New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+            $r = Invoke-Native -Bin "msiexec" -Argv @("/a", "$($msi.FullName)", "/qn", "TARGETDIR=$extractRoot")
+            if ($null -eq $r.Code -or $r.Code -ne 0) { Write-Host ("msiexec /a failed on " + $msi.FullName + " (exit $($r.Code)): " + (($r.Out | Select-Object -Last 5) -join ' ')); continue }
+            $r = Invoke-Native -Bin $armPy -Argv @($crtCheck, "stagefrom", $extractRoot, $stage)
+            Write-Host (($r.Out | ForEach-Object { "$_" }) -join "`n")
+            if ($r.Code -eq 0) { $staged = $true; break }
+            Remove-Item $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if ($staged) {
+            Add-Content -Path $env:GITHUB_ENV "SHVCREDIST_DIR=$stage"
+            Write-Host "arm64 CRT staged from salvaged MSI extract: $stage"
+            exit 0
+          }
+          throw "arm64 vcruntime140_1.dll (0xAA64) not obtainable on this image: native System32 view, VS tree, bundle install (burn log above) and MSI salvage all failed"
 
       - name: Build Windows MSI
         if: matrix.installer == 'msi'
