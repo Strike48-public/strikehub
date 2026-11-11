@@ -550,11 +550,11 @@ jobs:
           $beforeText, $vcvarsOut, $afterText = $parts[0], $parts[1], $parts[2]
           if ($vcvarsOut -match '\[ERROR') { throw "vcvarsall rejected its arguments:`n$vcvarsOut" }
           $before = @{}
-          foreach ($line in $beforeText) {
+          foreach ($line in @($beforeText -split "`r?`n")) {
             if ($line -match '^(.+?)=(.*)$') { $before[$matches[1]] = $matches[2] }
           }
           $changed = 0
-          foreach ($line in $afterText) {
+          foreach ($line in @($afterText -split "`r?`n")) {
             if ($line -match '^(.+?)=(.*)$') {
               $name, $value = $matches[1], $matches[2]
               $old = if ($before.ContainsKey($name)) { $before[$name] } else { $null }
