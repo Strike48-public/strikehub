@@ -1915,40 +1915,53 @@ pub fn App() -> Element {
                     // platform only: no user data rides along (the PLG privacy
                     // model). Best-effort and guarded: a failed attempt is
                     // logged, the record is NOT persisted, and the next launch
-                    // retries. Never a sign-in blocker.
+                    // retries. The report runs on a spawned task — it is never
+                    // awaited here — so a slow or down report host can never
+                    // delay sign-in or connector startup (jtomek review:
+                    // the inline .await cost the full client timeout on every
+                    // launch until a report succeeded).
                     let attribution_slug = sh_core::url_slug(&api_url);
                     let attribution_record = sh_core::attribution::current_record();
-                    let attribution_stale = hub_config.read().attribution.get(&attribution_slug)
-                        != Some(&attribution_record);
-                    if attribution_stale {
-                        match sh_core::attribution::report(
-                            &auth,
-                            ws_client.as_deref(),
-                            &attribution_record,
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "PLG download attribution recorded ({} {} {})",
-                                    attribution_record.product,
-                                    attribution_record.version,
-                                    attribution_record.platform
-                                );
-                                let mut cfg = hub_config.write();
-                                cfg.attribution.insert(attribution_slug, attribution_record);
-                                if let Err(e) = cfg.save() {
+                    let attribution_stored =
+                        hub_config.read().attribution.get(&attribution_slug).cloned();
+
+                    if sh_core::attribution::needs_report(
+                        attribution_stored.as_ref(),
+                        &attribution_record,
+                    ) {
+                        let report_auth = auth.clone();
+                        let report_ws = ws_client.clone();
+                        let report_config = hub_config.clone();
+                        tokio::spawn(async move {
+                            match sh_core::attribution::report(
+                                &report_auth,
+                                report_ws.as_deref(),
+                                &attribution_record,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        "PLG download attribution recorded ({} {} {})",
+                                        attribution_record.product,
+                                        attribution_record.version,
+                                        attribution_record.platform
+                                    );
+                                    let mut cfg = report_config.write();
+                                    cfg.attribution.insert(attribution_slug, attribution_record);
+                                    if let Err(e) = cfg.save() {
+                                        tracing::warn!(
+                                            "failed to persist attribution record, will re-report next launch: {e}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
                                     tracing::warn!(
-                                        "failed to persist attribution record, will re-report next launch: {e}"
+                                        "PLG download attribution report failed, will retry next launch: {e}"
                                     );
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "PLG download attribution report failed, will retry next launch: {e}"
-                                );
-                            }
-                        }
+                        });
                     }
                 }
 
