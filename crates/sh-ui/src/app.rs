@@ -947,7 +947,11 @@ pub fn App() -> Element {
                 tokio::sync::OnceCell::const_new();
             #[cfg(feature = "desktop")]
             {
-                let fetch_results = FETCH_RESULTS
+                // Awaited for its side effect: the first caller runs the
+                // download and concurrent re-fires wait for it to finish
+                // rather than racing ahead to spawn. The results themselves
+                // are read from the static where the spawn fails.
+                let _ = FETCH_RESULTS
                     .get_or_init(|| async {
                         tracing::info!(
                             "[connector-start] fetching connector binaries before start"
@@ -987,8 +991,7 @@ pub fn App() -> Element {
                         }
                         results
                     })
-                    .await
-                    .clone();
+                    .await;
 
                 // Binary fetch failures are surfaced on the connectors where
                 // they matter — a failed spawn (see `spawn_failure_mark`
