@@ -462,7 +462,7 @@ pub fn App() -> Element {
     // so it can never block sign-in; the hub-config signal handle is not
     // Send, so persistence happens in a Dioxus task spawned from this
     // top-level effect — see the effect below and the sign-in flow).
-    let attribution_report_pending = use_signal(|| {
+    let mut attribution_report_pending = use_signal(|| {
         None::<(
             tokio::sync::oneshot::Receiver<Result<(), String>>,
             String,
@@ -1985,19 +1985,20 @@ pub fn App() -> Element {
                         let report_auth = auth.clone();
                         let report_ws = ws_client.clone();
                         let (report_tx, report_rx) = tokio::sync::oneshot::channel();
+                        let report_record = attribution_record.clone();
                         tokio::spawn(async move {
                             let result = sh_core::attribution::report(
                                 &report_auth,
                                 report_ws.as_deref(),
-                                &attribution_record,
+                                &report_record,
                             )
                             .await;
                             let _ = report_tx.send(result);
                         });
                         attribution_report_pending.set(Some((
                             report_rx,
-                            attribution_slug.clone(),
-                            attribution_record.clone(),
+                            attribution_slug,
+                            attribution_record,
                         )));
                     }
                 }

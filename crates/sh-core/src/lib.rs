@@ -37,9 +37,9 @@ pub use allowlist::{RepoAllowlist, get_allowlist, init_allowlist, load_allowlist
 pub use auth::{AuthManager, ConnectorAppInfo, fetch_connector_apps, fetch_tenant_id};
 pub use bridge::{BridgeState, SharedBridgeState, new_bridge_state};
 pub use config::{
-    AllowlistConfig, ConnectorConfig, ConnectorEntry, ConnectorStatus, ConnectorTransport,
-    DynamicConnectorDef, HubConfig, StartFailure, default_easy_mode, generate_instance_id, log_dir,
-    resolve_easy_mode, slug_from_path, url_slug,
+    AllowlistConfig, AttributionRecord, ConnectorConfig, ConnectorEntry, ConnectorStatus,
+    ConnectorTransport, DynamicConnectorDef, HubConfig, StartFailure, default_easy_mode,
+    generate_instance_id, log_dir, resolve_easy_mode, slug_from_path, url_slug,
 };
 pub use connector_fetch::{EnsureResult, bin_cache_dir, ensure_all_connector_binaries};
 pub use connector_seed::seed_bundled_connectors;
