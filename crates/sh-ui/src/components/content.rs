@@ -144,9 +144,12 @@ pub fn ContentArea(
                                     // It was running and is no longer: if an
                                     // activity (e.g. a download) was in flight it
                                     // was interrupted. Point at the durable
-                                    // record — the per-connector log file.
+                                    // record — the per-connector log file (the
+                                    // interrupted run's output; if the connector
+                                    // has already been restarted, it sits in the
+                                    // rotated .prev.log).
                                     p { class: "content-offline-detail",
-                                        "It {notice}. If an activity was running, it was interrupted — the connector's output is saved in its log file (Account → Open logs folder)."
+                                        "It {notice}. If an activity was running, it was interrupted — the connector's output is saved in its per-connector log (Account → Open logs folder)."
                                     }
                                 }
                                 if let Some(fail) = &active_start_failure {
