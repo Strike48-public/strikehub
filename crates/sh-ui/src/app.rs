@@ -457,6 +457,50 @@ pub fn App() -> Element {
         // (in the sign-in effect). Don't call ensure_instance_ids here.
         cfg
     });
+    // Completed PLG attribution reports waiting to be persisted, handed off
+    // from the sign-in flow (the network report itself runs on a tokio task
+    // so it can never block sign-in; the hub-config signal handle is not
+    // Send, so persistence happens in a Dioxus task spawned from this
+    // top-level effect — see the effect below and the sign-in flow).
+    let attribution_report_pending = use_signal(|| {
+        None::<(
+            tokio::sync::oneshot::Receiver<Result<(), String>>,
+            String,
+            sh_core::AttributionRecord,
+        )>
+    });
+    use_effect(move || {
+        let Some((report_rx, slug, record)) = attribution_report_pending.take() else {
+            return;
+        };
+        spawn(async move {
+            match report_rx.await {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        "PLG download attribution recorded ({} {} {})",
+                        record.product,
+                        record.version,
+                        record.platform
+                    );
+                    let mut cfg = hub_config.write();
+                    cfg.attribution.insert(slug, record);
+                    if let Err(e) = cfg.save() {
+                        tracing::warn!(
+                            "failed to persist attribution record, will re-report next launch: {e}"
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "PLG download attribution report failed, will retry next launch: {e}"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!("PLG download attribution report task was cancelled");
+                }
+            }
+        });
+    });
     let mut connectors = use_signal(move || {
         let cfg = hub_config.read();
         let studio = cfg.studio_url.clone().unwrap_or_default();
@@ -1915,15 +1959,17 @@ pub fn App() -> Element {
                     // platform only: no user data rides along (the PLG privacy
                     // model). Best-effort and guarded: a failed attempt is
                     // logged, the record is NOT persisted, and the next launch
-                    // retries. The report runs on a spawned Dioxus task — it
-                    // is never awaited here — so a slow or down report host
-                    // can never delay sign-in or connector startup (jtomek
-                    // review: the inline .await cost the full client timeout
-                    // on every launch until a report succeeded). Dioxus
-                    // `spawn` (not tokio::spawn): the task must persist the
-                    // record through the hub-config signal, whose handle is
-                    // not Send — same executor pattern as every other spawned
-                    // task in this component.
+                    // retries. The report runs on a tokio task — it is never
+                    // awaited here — so a slow or down report host can never
+                    // delay sign-in or connector startup (jtomek review: the
+                    // inline .await cost the full client timeout on every
+                    // launch until a report succeeded). Persistence cannot
+                    // happen inside that task: the hub-config signal handle
+                    // is not Send, and Dioxus `spawn` is only legal where the
+                    // runtime is current (component render / event dispatch),
+                    // not inside a spawned task. So the tokio task hands the
+                    // outcome back through a oneshot and the
+                    // attribution_report_pending effect above persists it.
                     let attribution_slug = sh_core::url_slug(&api_url);
                     let attribution_record = sh_core::attribution::current_record();
                     let attribution_stored = hub_config
@@ -1938,37 +1984,18 @@ pub fn App() -> Element {
                     ) {
                         let report_auth = auth.clone();
                         let report_ws = ws_client.clone();
-                        let mut report_config = hub_config.clone();
-                        spawn(async move {
-                            match sh_core::attribution::report(
+                        let (report_tx, report_rx) = tokio::sync::oneshot::channel();
+                        tokio::spawn(async move {
+                            let result = sh_core::attribution::report(
                                 &report_auth,
                                 report_ws.as_deref(),
                                 &attribution_record,
                             )
-                            .await
-                            {
-                                Ok(()) => {
-                                    tracing::info!(
-                                        "PLG download attribution recorded ({} {} {})",
-                                        attribution_record.product,
-                                        attribution_record.version,
-                                        attribution_record.platform
-                                    );
-                                    let mut cfg = report_config.write();
-                                    cfg.attribution.insert(attribution_slug, attribution_record);
-                                    if let Err(e) = cfg.save() {
-                                        tracing::warn!(
-                                            "failed to persist attribution record, will re-report next launch: {e}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "PLG download attribution report failed, will retry next launch: {e}"
-                                    );
-                                }
-                            }
+                            .await;
+                            let _ = report_tx.send(result);
                         });
+                        attribution_report_pending
+                            .set(Some((report_rx, attribution_slug.clone(), attribution_record.clone())));
                     }
                 }
 
