@@ -5,7 +5,15 @@ param(
     # dist/ (local/offline builds). CI builds pentest-agent from source instead,
     # so this only applies to manual builds. Empty means "read PICK_REF from
     # connector-versions.env" below, so this default can't drift from the pipeline.
-    [string]$PickVersion = ""
+    [string]$PickVersion = "",
+    # Static-CRT build (arm64 leg): the exes link the MSVC CRT statically
+    # (CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=
+    # +crt-static" in the workflow), so they import no vcruntime140*/msvcp140*
+    # DLL and the MSI must stage NONE — the arm64 VC++ redist is not
+    # obtainable from any hosted runner image (see the ci-msi-arm64.yml
+    # header). Pass this and the script skips the redist\ staging and tells
+    # the WiX source to omit the redist components (-dIncludeCrt=no).
+    [switch]$StaticCrt
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,12 +29,36 @@ if (-not $PickVersion) {
     }
 }
 
-# Map arch to Rust target triple and WiX arch identifier
+# The kubestudio pin lives in the same file (KUBESTUDIO_REF); the local-build
+# ks-connector fallback URL below must follow it, the way $PickVersion follows
+# PICK_REF (a hardcoded release tag here is exactly how the URL drifted to a
+# ref that predates the current connector).
+$KsVersion = "v0.2.1"
+$verFile = Join-Path $PSScriptRoot "..\connector-versions.env"
+if (Test-Path $verFile) {
+    $m = Select-String -Path $verFile -Pattern '^\s*KUBESTUDIO_REF\s*=\s*(.+?)\s*$'
+    if ($m) { $KsVersion = $m.Matches[0].Groups[1].Value }
+}
+
+# Map arch to Rust target triple and WiX arch identifiers.
+# $UpgradeCode is SHARED across architectures on purpose: Windows Installer
+# treats products with the same UpgradeCode as one product line, so an arm64
+# MSI on an ARM (Prism) box that already runs the x64 install is a major
+# upgrade - MajorUpgrade (wix/main.wxs, Schedule=afterInstallInitialize)
+# removes the x64 product first, and the arm64 install then owns the same
+# Program Files dir and the same stable component GUIDs. No coexistence, no
+# GUID conflict; with AllowSameVersionUpgrades='yes' (wix/main.wxs) even a
+# same-version install of the other arch upgrades in place, and the next
+# release bumps over it. The x64 code
+# is unchanged so existing x64 installs keep upgrading in place.
 switch ($Arch) {
     "x86_64"  { $Target = "x86_64-pc-windows-msvc";  $WixArch = "x64";   $WixPlatform = "x64" }
     "aarch64" { $Target = "aarch64-pc-windows-msvc";  $WixArch = "arm64"; $WixPlatform = "arm64" }
     default   { Write-Host "Unsupported arch: $Arch" -ForegroundColor Red; exit 1 }
 }
+$UpgradeCode = "A8E5B4C7-3D92-4E89-B1F3-926789ABCDEF"
+# Release asset arch token: pick/kubestudio publish ...-windows-x86_64 / -arm64
+$AssetArch = if ($Arch -eq "aarch64") { "arm64" } else { "x86_64" }
 
 Write-Host "Building StrikeHub MSI installer v$Version ($Arch)" -ForegroundColor Cyan
 Write-Host "==========================================="
@@ -69,6 +101,11 @@ if (-not (Test-Path "dist\strikehub.exe")) {
 }
 
 # -- Stage the VC++ 2015-2022 runtime DLLs (app-local deployment) ----------
+# (Dynamic-CRT builds only. The arm64 leg passes -StaticCrt: its exes link
+# the CRT statically, import no vcruntime140*/msvcp140* DLL, and the MSI
+# ships no redist — see the -StaticCrt param doc and the ci-msi-arm64.yml
+# header for why the arm64 redist cannot be sourced from a hosted runner.)
+if (-not $StaticCrt) {
 # strikehub.exe and the bundled connectors are built with the default MSVC
 # dynamic CRT, so they import VCRUNTIME140.dll (all) and VCRUNTIME140_1.dll
 # (strikehub) - verified with `dumpbin /dependents` on the release MSI
@@ -81,7 +118,9 @@ if (-not (Test-Path "dist\strikehub.exe")) {
 #      the VC++ redistributable folder (newest MSVC <ver> wins). Canonical on
 #      the GitHub-hosted Windows runners, where VS is installed under
 #      "C:\Program Files (x86)\Microsoft Visual Studio\<year>\<flavor>\"
-#      (the year dir moves with runner re-bakes: 2022, 2025, ...).
+#      (the year dir moves with runner re-bakes: 2022, 2025, ...). This root
+#      only matters for x64: the arm64 leg is a static-CRT build (-StaticCrt)
+#      that stages no DLLs at all.
 #   3. <VS year>\<flavor>\VC\Tools\MSVC\<ver>\bin\Hostx64\<arch>  (toolset bin)
 #   4. C:\Program Files (x86)\Windows Kits\10\bin\<sdkver>\<arch>  (SDK bin)
 #   5. C:\Windows\System32 - the VC++ redist MSI's install location; its
@@ -194,13 +233,16 @@ foreach ($dll in $requiredCrt) {
     Write-Host ("  staged {0,-20} <- {1}  (machine 0x{2:X4}, sha256 {3}...)" -f $dll, $found, $machine, $hash.Substring(0, 16))
 }
 Write-Host "VC++ runtime staged in $crtStage\ (shipped app-locally by the MSI)" -ForegroundColor Green
+} else {
+    Write-Host "Static CRT build (-StaticCrt): no app-local VC++ redist DLLs staged; the MSI ships none." -ForegroundColor Cyan
+}
 
 # Download connectors if needed
 if (-not (Test-Path "dist\ks-connector.exe")) {
     Write-Host "Downloading ks-connector..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Path dist -Force | Out-Null
     try {
-        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/v0.1.1/ks-connector-windows-x86_64.zip"
+        $ksUrl = "https://github.com/Strike48-public/kubestudio/releases/download/$KsVersion/ks-connector-windows-$AssetArch.zip"
         Invoke-WebRequest -Uri $ksUrl -OutFile "dist\ks-connector.zip"
         Expand-Archive -Path "dist\ks-connector.zip" -DestinationPath "dist" -Force
         Remove-Item "dist\ks-connector.zip"
@@ -216,7 +258,7 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
     try {
         # Pick v0.1.9 renamed the release archive pentest-agent-* -> pick-agent-*.
         # The binary inside is still pentest-agent.exe, so downstream stays the same.
-        $paUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/pick-agent-windows-x86_64.zip"
+        $paUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/pick-agent-windows-$AssetArch.zip"
         Invoke-WebRequest -Uri $paUrl -OutFile "dist\pentest-agent.zip"
 
         # Verify against the release's SHA256SUMS.txt before trusting the archive:
@@ -225,15 +267,15 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
         $sumsUrl = "https://github.com/Strike48-public/pick/releases/download/$PickVersion/SHA256SUMS.txt"
         Invoke-WebRequest -Uri $sumsUrl -OutFile "dist\SHA256SUMS.txt"
         $expected = Get-Content "dist\SHA256SUMS.txt" |
-            Where-Object { $_ -match '\s+pick-agent-windows-x86_64\.zip\s*$' } |
+            Where-Object { $_ -match "\s+pick-agent-windows-$AssetArch\.zip\s*$" } |
             ForEach-Object { ($_ -split '\s+')[0] } |
             Select-Object -First 1
         if (-not $expected) {
-            throw "no SHA256 entry for pick-agent-windows-x86_64.zip in pick $PickVersion"
+            throw "no SHA256 entry for pick-agent-windows-$AssetArch.zip in pick $PickVersion"
         }
         $actual = (Get-FileHash "dist\pentest-agent.zip" -Algorithm SHA256).Hash
         if ($actual -ne $expected.Trim().ToUpper()) {
-            throw "SHA256 checksum mismatch for pick-agent-windows-x86_64.zip"
+            throw "SHA256 checksum mismatch for pick-agent-windows-$AssetArch.zip"
         }
         Remove-Item "dist\SHA256SUMS.txt"
 
@@ -249,7 +291,7 @@ if (-not (Test-Path "dist\pentest-agent.exe")) {
 # a failed download must not silently produce an MSI without pentest-agent.
 if (-not (Test-Path "dist\pentest-agent.exe")) {
     Write-Host "ERROR: dist\pentest-agent.exe is missing - cannot build a working MSI." -ForegroundColor Red
-    Write-Host "Pre-stage it in dist\ or ensure pick $PickVersion publishes pick-agent-windows-x86_64.zip." -ForegroundColor Yellow
+    Write-Host "Pre-stage it in dist\ or ensure pick $PickVersion publishes pick-agent-windows-$AssetArch.zip." -ForegroundColor Yellow
     exit 1
 }
 
@@ -270,9 +312,15 @@ if ($WixVersion -ne $Version) {
 
 # Compile WiX source
 Write-Host "Compiling..." -ForegroundColor Yellow
+# WiX preprocessor switch: include the app-local redist components only for
+# dynamic-CRT builds (see the <?if ?> blocks in wix\main.wxs). Always passed,
+# so an unset $(var.IncludeCrt) can never silently compile an empty wix.
+$includeCrt = if ($StaticCrt) { "no" } else { "yes" }
 & "$wixDir\candle.exe" -nologo `
     -dVersion="$WixVersion" `
     -dPlatform="$WixPlatform" `
+    -dUpgradeCode="$UpgradeCode" `
+    -dIncludeCrt="$includeCrt" `
     -arch $WixArch `
     -out wix\main.wixobj `
     wix\main.wxs

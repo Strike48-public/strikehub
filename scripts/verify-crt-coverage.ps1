@@ -18,7 +18,15 @@ param(
     # Directory holding the executables to check (CI: dist\).
     [string]$ExeDir = "dist",
     # Directory holding the staged app-local redist DLLs (CI: redist\).
-    [string]$RedistDir = "redist"
+    [string]$RedistDir = "redist",
+    # Static-CRT builds (the arm64 leg: -C target-feature=+crt-static):
+    # build-msi.ps1 -StaticCrt stages NO redist DLLs and the WiX source omits
+    # the redist components. In this mode an empty redist\ is the EXPECTED
+    # state, and coverage must come entirely from the OS allow-list — so any
+    # exe that still imports vcruntime140*/msvcp140*/concrt140* (static CRT
+    # regressed, or a prebuilt native dep re-introduced the dynamic CRT)
+    # fails the build instead of shipping an installer that cannot load.
+    [switch]$NoCrtExpected
 )
 
 $ErrorActionPreference = "Stop"
@@ -169,8 +177,12 @@ $staged = @(Get-ChildItem (Join-Path $RedistDir "*.dll") -ErrorAction SilentlyCo
     ForEach-Object { $_.Name.ToLowerInvariant() })
 Write-Host ("Staged app-local redist DLLs: {0}" -f ($staged -join ", "))
 if ($staged.Count -eq 0) {
-    Write-Host "ERROR: no staged redist DLLs found in $RedistDir\" -ForegroundColor Red
-    exit 1
+    if ($NoCrtExpected) {
+        Write-Host "(static-CRT build: no staged redist DLLs, as expected — coverage must be 100% OS-provided)" -ForegroundColor Yellow
+    } else {
+        Write-Host "ERROR: no staged redist DLLs found in $RedistDir\" -ForegroundColor Red
+        exit 1
+    }
 }
 
 $missing = @()
