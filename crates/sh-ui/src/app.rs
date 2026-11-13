@@ -415,6 +415,70 @@ fn sync_config(
     connectors.set(new_connectors);
 }
 
+/// `(oneshot receiver, studio-url slug, record)` handed from the sign-in
+/// flow to the persistence effect.
+pub(crate) type PendingAttributionReport = (
+    tokio::sync::oneshot::Receiver<Result<(), String>>,
+    String,
+    sh_core::AttributionRecord,
+);
+
+/// Persists completed PLG download-attribution reports.
+///
+/// Owns the `use_effect` that drains the pending-report handoff signal and
+/// writes the record into the hub config. Extracted from `App` so the signal
+/// wiring is drivable by a `VirtualDom` test: in dioxus-signals 0.6.3 a
+/// write-only effect (`take()` with no read) never re-fires, which silently
+/// dropped the record and made `needs_report` re-report on every launch
+/// (jtomek's review on #133, verified with a VirtualDom harness).
+#[component]
+fn AttributionPersistence(
+    pending: Signal<Option<PendingAttributionReport>>,
+    hub_config: Signal<HubConfig>,
+) -> Element {
+    use_effect(move || {
+        // Read before taking: in dioxus-signals 0.6.3 `take()` is
+        // `with_mut(std::mem::take)` — a write, and writes do not subscribe
+        // an effect. Only reads do. Without this read the effect has no
+        // dependencies: it runs once at mount, sees `None`, and never fires
+        // again when the sign-in flow sets the tuple.
+        if pending.read().is_none() {
+            return;
+        }
+        let Some((report_rx, slug, record)) = pending.take() else {
+            return;
+        };
+        spawn(async move {
+            match report_rx.await {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        "PLG download attribution recorded ({} {} {})",
+                        record.product,
+                        record.version,
+                        record.platform
+                    );
+                    let mut cfg = hub_config.write();
+                    cfg.attribution.insert(slug, record);
+                    if let Err(e) = cfg.save() {
+                        tracing::warn!(
+                            "failed to persist attribution record, will re-report next launch: {e}"
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "PLG download attribution report failed, will retry next launch: {e}"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!("PLG download attribution report task was cancelled");
+                }
+            }
+        });
+    });
+    rsx! {}
+}
+
 #[component]
 pub fn App() -> Element {
     // First-run stability: clamp the initial window to the monitor's
@@ -462,45 +526,7 @@ pub fn App() -> Element {
     // so it can never block sign-in; the hub-config signal handle is not
     // Send, so persistence happens in a Dioxus task spawned from this
     // top-level effect — see the effect below and the sign-in flow).
-    let mut attribution_report_pending = use_signal(|| {
-        None::<(
-            tokio::sync::oneshot::Receiver<Result<(), String>>,
-            String,
-            sh_core::AttributionRecord,
-        )>
-    });
-    use_effect(move || {
-        let Some((report_rx, slug, record)) = attribution_report_pending.take() else {
-            return;
-        };
-        spawn(async move {
-            match report_rx.await {
-                Ok(Ok(())) => {
-                    tracing::info!(
-                        "PLG download attribution recorded ({} {} {})",
-                        record.product,
-                        record.version,
-                        record.platform
-                    );
-                    let mut cfg = hub_config.write();
-                    cfg.attribution.insert(slug, record);
-                    if let Err(e) = cfg.save() {
-                        tracing::warn!(
-                            "failed to persist attribution record, will re-report next launch: {e}"
-                        );
-                    }
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        "PLG download attribution report failed, will retry next launch: {e}"
-                    );
-                }
-                Err(_) => {
-                    tracing::warn!("PLG download attribution report task was cancelled");
-                }
-            }
-        });
-    });
+    let mut attribution_report_pending = use_signal(|| None::<PendingAttributionReport>);
     let mut connectors = use_signal(move || {
         let cfg = hub_config.read();
         let studio = cfg.studio_url.clone().unwrap_or_default();
@@ -2540,6 +2566,13 @@ pub fn App() -> Element {
         style { "{theme::theme_css()}" }
         style { "{theme::app_css()}" }
 
+        // Persists completed PLG attribution reports handed off by the
+        // sign-in flow (own component so the signal wiring is testable).
+        AttributionPersistence {
+            pending: attribution_report_pending,
+            hub_config,
+        }
+
         div { class: "app-shell",
             div {
                 class: "app-container",
@@ -2941,5 +2974,113 @@ mod tests {
             t1,
             OTT_MINT_COOLDOWN
         ));
+    }
+
+    // Handles stashed by the root component below so the test can drive the
+    // signals from outside the VirtualDom (Signal is Copy; set/read from
+    // outside a scope is legal in dioxus 0.6). Signal is not Sync, so these
+    // live in thread-locals — the test is single-threaded.
+    thread_local! {
+        static TEST_PENDING:
+            std::cell::Cell<Option<Signal<Option<PendingAttributionReport>>>> =
+            const { std::cell::Cell::new(None) };
+        static TEST_HUB: std::cell::Cell<Option<Signal<HubConfig>>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    fn attribution_test_app() -> Element {
+        let pending = use_signal(|| None::<PendingAttributionReport>);
+        let hub = use_signal(|| HubConfig {
+            setup_complete: false,
+            pick_tos_accepted: false,
+            connectors: Default::default(),
+            instance_ids: Default::default(),
+            studio_url: None,
+            easy_mode: None,
+            allowlist: Default::default(),
+            dynamic_connectors: Default::default(),
+            attribution: Default::default(),
+        });
+        TEST_PENDING.with(|p| p.set(Some(pending)));
+        TEST_HUB.with(|h| h.set(Some(hub)));
+        rsx! {
+            AttributionPersistence { pending, hub_config: hub }
+        }
+    }
+
+    // Regression for jtomek's review on #133: the persistence effect must
+    // re-run when the sign-in flow sets the pending-report signal. In
+    // dioxus-signals 0.6.3 `take()` alone is a write and does not subscribe
+    // an effect — only the read-before-take in `AttributionPersistence`
+    // does. This drives a VirtualDom through set-then-persist and fails if
+    // the record never lands (the take-only wiring dropped it, so
+    // `needs_report` re-reported on every launch).
+    #[test]
+    fn attribution_persistence_persists_after_signin_sets_pending() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            // Keep save() off the real config dir.
+            let tmp = std::env::temp_dir().join(format!("shui-attribution-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+            // SAFETY: single-threaded test (current-thread runtime); no other
+            // thread reads the process env concurrently.
+            unsafe { std::env::set_var("XDG_CONFIG_HOME", &tmp) };
+
+            let mut vdom = dioxus::dioxus_core::VirtualDom::new(attribution_test_app);
+            vdom.rebuild_in_place();
+            vdom.render_immediate_to_vec();
+
+            // Mount: the effect ran once with pending = None — nothing persisted.
+            let hub = TEST_HUB.with(|h| h.get()).unwrap();
+            assert!(
+                hub.read().attribution.is_empty(),
+                "persistence effect must not write at mount"
+            );
+
+            // The sign-in flow's handoff: set the pending tuple, and the
+            // report task completes its oneshot (oneshot buffers the send
+            // until the receiver is awaited).
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let record = sh_core::AttributionRecord {
+                product: "strikehub".into(),
+                version: "0.1.21".into(),
+                platform: "linux-x86_64-test".into(),
+            };
+            let mut pending = TEST_PENDING.with(|p| p.get()).unwrap();
+            pending.set(Some((rx, "studio.test".to_string(), record)));
+            tx.send(Ok(())).unwrap();
+
+            // Drive the VirtualDom until the persistence effect has drained
+            // the tuple and the spawned task wrote the record.
+            let mut persisted = false;
+            for _ in 0..500 {
+                vdom.render_immediate_to_vec();
+                tokio::task::yield_now().await;
+                if !hub.read().attribution.is_empty() {
+                    persisted = true;
+                    break;
+                }
+            }
+            assert!(
+                persisted,
+                "persistence effect never ran after the pending report was set                  (write-only wiring regression)"
+            );
+            let stored = hub.read().attribution.get("studio.test").cloned().unwrap();
+            assert_eq!(stored.product, "strikehub");
+            assert_eq!(stored.version, "0.1.21");
+
+            // SAFETY: as above — single-threaded test.
+            unsafe {
+                match previous_xdg {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+        });
     }
 }
