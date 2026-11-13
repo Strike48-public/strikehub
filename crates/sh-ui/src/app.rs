@@ -521,10 +521,28 @@ pub(crate) type PendingAttributionReport = (
 /// write-only effect (`take()` with no read) never re-fires, which silently
 /// dropped the record and made `needs_report` re-report on every launch
 /// (jtomek's review on #133, verified with a VirtualDom harness).
+/// Which persist step `AttributionPersistence` runs after a successful
+/// report: `Real` saves the hub config to disk, `NoOp` lets the VirtualDom
+/// test drive the wiring without touching the config path. (A fn-pointer
+/// prop was the first shape, but the generated props PartialEq compares
+/// function addresses, which clippy rejects.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributionPersistSink {
+    Real,
+    /// Only constructed by the VirtualDom test (cfg(test)); the lib build
+    /// legitimately never runs the no-op sink.
+    #[allow(
+        dead_code,
+        reason = "test-only sink; see the VirtualDom set-then-persist test"
+    )]
+    NoOp,
+}
+
 #[component]
 fn AttributionPersistence(
     pending: Signal<Option<PendingAttributionReport>>,
     hub_config: Signal<HubConfig>,
+    persist: AttributionPersistSink,
 ) -> Element {
     use_effect(move || {
         // Read before taking: in dioxus-signals 0.6.3 `take()` is
@@ -549,7 +567,11 @@ fn AttributionPersistence(
                     );
                     let mut cfg = hub_config.write();
                     cfg.attribution.insert(slug, record);
-                    if let Err(e) = cfg.save() {
+                    let persist_result = match persist {
+                        AttributionPersistSink::Real => persist_hub_config(&mut cfg),
+                        AttributionPersistSink::NoOp => Ok(()),
+                    };
+                    if let Err(e) = persist_result {
                         tracing::warn!(
                             "failed to persist attribution record, will re-report next launch: {e}"
                         );
@@ -567,6 +589,11 @@ fn AttributionPersistence(
         });
     });
     rsx! {}
+}
+
+/// `AttributionPersistence`'s production persist step.
+fn persist_hub_config(cfg: &mut HubConfig) -> Result<(), sh_core::HubError> {
+    cfg.save()
 }
 
 #[component]
@@ -2714,6 +2741,7 @@ pub fn App() -> Element {
         AttributionPersistence {
             pending: attribution_report_pending,
             hub_config,
+            persist: AttributionPersistSink::Real,
         }
 
         div { class: "app-shell",
@@ -3176,7 +3204,7 @@ mod tests {
         TEST_PENDING.with(|p| p.set(Some(pending)));
         TEST_HUB.with(|h| h.set(Some(hub)));
         rsx! {
-            AttributionPersistence { pending, hub_config: hub }
+            AttributionPersistence { pending, hub_config: hub, persist: AttributionPersistSink::NoOp }
         }
     }
 
@@ -3194,14 +3222,9 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async move {
-            // Keep save() off the real config dir.
-            let tmp = std::env::temp_dir().join(format!("shui-attribution-{}", std::process::id()));
-            std::fs::create_dir_all(&tmp).unwrap();
-            let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-            // SAFETY: single-threaded test (current-thread runtime); no other
-            // thread reads the process env concurrently.
-            unsafe { std::env::set_var("XDG_CONFIG_HOME", &tmp) };
-
+            // No disk, no env: the persist step is a no-op prop, so the test
+            // cannot touch the config path on any platform (dirs::config_dir()
+            // ignores XDG_CONFIG_HOME on macOS/Windows).
             let mut vdom = dioxus::dioxus_core::VirtualDom::new(attribution_test_app);
             vdom.rebuild_in_place();
             vdom.render_immediate_to_vec();
@@ -3239,20 +3262,13 @@ mod tests {
             }
             assert!(
                 persisted,
-                "persistence effect never ran after the pending report was set                  (write-only wiring regression)"
+                "persistence effect never ran after the pending report was set (write-only wiring regression)"
             );
             let stored = hub.read().attribution.get("studio.test").cloned().unwrap();
             assert_eq!(stored.product, "strikehub");
             assert_eq!(stored.version, "0.1.21");
 
-            // SAFETY: as above — single-threaded test.
-            unsafe {
-                match previous_xdg {
-                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                    None => std::env::remove_var("XDG_CONFIG_HOME"),
-                }
-            }
-            let _ = std::fs::remove_dir_all(&tmp);
+            // no env or tempdir to restore: the persist step never touched either
         });
     }
 
