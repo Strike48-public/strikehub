@@ -333,7 +333,20 @@ mod server {
     }
 
     fn nsstring(s: &str) -> *const AnyObject {
-        unsafe { msg_send![class!(NSString), stringWithUTF8String: s.as_ptr()] }
+        // `stringWithUTF8String:` requires a NUL-terminated C string, but a
+        // Rust `str` has no guaranteed NUL terminator — the ObjC runtime
+        // scans past the buffer (heap over-read / segfault). Use the
+        // bytes+length initializer, which needs no terminator. (jtomek, PR
+        // review: "I'd switch to initWithBytes:length:", 2026-11-13)
+        unsafe {
+            let ns: *const AnyObject = msg_send![
+                class!(NSString),
+                initWithBytes: s.as_ptr(),
+                length: s.len(),
+                encoding: 0x08000100usize // NSUTF8StringEncoding (kCFStringEncodingUTF8)
+            ];
+            ns
+        }
     }
 
     fn nsstring_to_string(obj: *const AnyObject) -> String {
