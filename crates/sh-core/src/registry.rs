@@ -165,6 +165,7 @@ mod tests {
             easy_mode: None,
             allowlist: AllowlistConfig::default(),
             dynamic_connectors: dynamic,
+            attribution: BTreeMap::new(),
         }
     }
 
