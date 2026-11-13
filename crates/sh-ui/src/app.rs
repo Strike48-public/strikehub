@@ -75,6 +75,95 @@ fn status_will_change(connectors: &[ConnectorConfig], id: &str, next: ConnectorS
         .is_some_and(|c| c.status != next)
 }
 
+/// Apply one health-check tick to `conn` (issue #62): flip the status from
+/// the probe and maintain the mid-activity failure notice.
+///
+/// The notice is set exactly once, on the Online -> Offline transition —
+/// the moment a running connector died (kill, crash, host-app close),
+/// possibly mid-activity — and cleared when the connector comes back
+/// Online. Steady offline ticks must NOT re-stamp it: the connector is the
+/// same dead process, so re-stamping every 3 s would churn the UI and
+/// re-log the same death. A `tracing::warn!` marks the transition in
+/// strikehub.log so the UI notice has a log-side counterpart (review of
+/// this PR).
+///
+/// The notice text is built by `notice` (the caller passes
+/// [`offline_timestamp`]) so tests can substitute a counting clock.
+fn apply_health_tick(conn: &mut ConnectorConfig, healthy: bool, notice: impl FnOnce() -> String) {
+    let was_online = conn.status == ConnectorStatus::Online;
+    conn.status = if healthy {
+        ConnectorStatus::Online
+    } else {
+        ConnectorStatus::Offline
+    };
+    if was_online && !healthy {
+        tracing::warn!(
+            "[health-check] connector '{}' went Offline — if an activity was running it was interrupted; its stdout/stderr is preserved in its per-connector log",
+            conn.id
+        );
+        conn.offline_notice = Some(format!("went offline at {} UTC", notice()));
+    } else if healthy {
+        // Back online: a stale "went offline" notice no longer
+        // describes this connector.
+        conn.offline_notice = None;
+    }
+}
+
+/// True if a failed binary fetch should record `StartFailure::BinaryUnavailable`
+/// on connector `id` (issue #62): only when the connector has no recorded
+/// start cause yet AND no live runner. A live runner means a working binary
+/// (e.g. the bundled sibling) is actually driving the connector even though
+/// the download failed, so marking it unavailable would show the wrong cause
+/// the next time it goes offline (review of this PR: effect re-fires
+/// re-marked running connectors).
+fn binary_unavailable_mark_due(current: &[ConnectorConfig], id: &str, has_runner: bool) -> bool {
+    !has_runner
+        && current
+            .iter()
+            .find(|c| c.id == id)
+            .is_some_and(|c| c.start_failure.is_none())
+}
+
+/// True if a failed spawn may record `StartFailure::SpawnFailed` on top of
+/// the connector's current mark. A `BinaryUnavailable` mark survives: the
+/// failed binary fetch is the root cause of the failed spawn, so the more
+/// specific mark wins (review of this PR: SpawnFailed clobbered it).
+fn spawn_failure_replaces(existing: Option<&StartFailure>) -> bool {
+    !matches!(existing, Some(StartFailure::BinaryUnavailable(_)))
+}
+
+/// UTC `HH:MM:SS` for `epoch_secs`. Pure (takes the epoch) so it is unit-
+/// testable; std-only on purpose — this workspace has no time crate, and a
+/// UTC label avoids local-timezone arithmetic (the caller says "UTC").
+fn utc_hhmmss(epoch_secs: u64) -> String {
+    let s = epoch_secs % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// Current time as a UTC `HH:MM:SS` string for connector offline notices
+/// (issue #62).
+fn offline_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    utc_hhmmss(secs)
+}
+
+/// Human-readable reason for a connector start failure (issue #62), shown on
+/// the connector's offline screen. Preflight renders its own richer wording;
+/// this is the short form for the main UI.
+fn start_failure_message(f: &StartFailure) -> String {
+    match f {
+        StartFailure::NoCredentials => {
+            "no credentials available and no registration token could be created — sign out and sign back in"
+                .to_string()
+        }
+        StartFailure::BinaryUnavailable(reason) => format!("binary unavailable: {reason}"),
+        StartFailure::SpawnFailed(err) => format!("launch failed: {err}"),
+    }
+}
+
 /// Connector IDs for which the "cannot authenticate" warning has already been
 /// emitted in the current failure episode. Process-level static: a component
 /// remount (e.g. browser refresh in server mode) must not re-warn about the
@@ -406,6 +495,7 @@ fn sync_config(
         if let Some(prev) = existing.get(&conn.id) {
             conn.status = prev.status;
             conn.start_failure = prev.start_failure.clone();
+            conn.offline_notice = prev.offline_notice.clone();
             conn.display_name = prev.display_name.clone();
             conn.icon = prev.icon.clone();
         }
@@ -851,8 +941,9 @@ pub fn App() -> Element {
             // to finish rather than racing ahead to spawn.
             #[cfg(feature = "desktop")]
             {
-                static FETCH_DONE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-                FETCH_DONE
+                static FETCH_RESULTS: tokio::sync::OnceCell<Vec<(String, sh_core::EnsureResult)>> =
+                    tokio::sync::OnceCell::const_new();
+                let fetch_results = FETCH_RESULTS
                     .get_or_init(|| async {
                         tracing::info!(
                             "[connector-start] fetching connector binaries before start"
@@ -890,8 +981,43 @@ pub fn App() -> Element {
                                 }
                             }
                         }
+                        results
                     })
-                    .await;
+                    .await
+                    .clone();
+
+                // Surface binary fetch failures on the connectors themselves
+                // (issue #62): an unavailable binary means the connector can
+                // never start this session — previously this was log-only. The
+                // write is guarded so an effect re-fire never re-marks (a later
+                // successful start clears the flag), and it never marks a
+                // connector that has a live runner — the bundled binary can be
+                // working fine even when the download failed (review of this
+                // PR: re-fired effects re-marked running connectors, so the
+                // next offline showed "binary unavailable" wrongly).
+                for (id, result) in &fetch_results {
+                    let Some(reason) = (match result {
+                        sh_core::EnsureResult::Unavailable(reason) => Some(reason.clone()),
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    let has_runner = runners.read().contains_key(id);
+                    let mark_due = {
+                        let current = connectors.read();
+                        binary_unavailable_mark_due(&current, id, has_runner)
+                    };
+                    if !mark_due {
+                        continue;
+                    }
+                    let mut updated = connectors.read().clone();
+                    if let Some(c) = updated.iter_mut().find(|c| c.id == *id)
+                        && c.start_failure.is_none()
+                    {
+                        c.start_failure = Some(StartFailure::BinaryUnavailable(reason));
+                        connectors.set(updated);
+                    }
+                }
             }
 
             let mut env_vars = matrix_env_vars();
@@ -1264,7 +1390,14 @@ pub fn App() -> Element {
                         let mut updated = connectors.read().clone();
                         if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
                             c.status = ConnectorStatus::Offline;
-                            c.start_failure = Some(StartFailure::SpawnFailed(e.to_string()));
+                            // The failed spawn is downstream of the failed
+                            // binary fetch — keep the more specific
+                            // BinaryUnavailable mark instead of clobbering it
+                            // with the generic spawn error (review of this
+                            // PR: SpawnFailed overwrote it immediately).
+                            if spawn_failure_replaces(c.start_failure.as_ref()) {
+                                c.start_failure = Some(StartFailure::SpawnFailed(e.to_string()));
+                            }
                         }
                         connectors.set(updated);
                         // Keep the connector in the starting set so subsequent
@@ -1344,11 +1477,13 @@ pub fn App() -> Element {
                         }
                     };
 
-                    conn.status = if healthy {
-                        ConnectorStatus::Online
-                    } else {
-                        ConnectorStatus::Offline
-                    };
+                    // One health tick: status + the mid-activity failure
+                    // notice (issue #62). `conn.status` here is still the
+                    // PREVIOUS tick's status (`updated` is a clone of
+                    // `current`) — exactly the "was online" signal
+                    // apply_health_tick uses for the Online -> Offline
+                    // transition.
+                    apply_health_tick(conn, healthy, offline_timestamp);
 
                     // ── Eviction check for managed runners ──────────────
                     // Skip custom IPC connectors — they are externally managed.
@@ -2389,6 +2524,14 @@ pub fn App() -> Element {
     let active_transport = active.as_ref().map(|c| c.transport);
     let active_conn_id = active.as_ref().map(|c| c.id.clone());
     let active_matrix_addr = active.as_ref().and_then(|c| c.matrix_app_address.clone());
+    // Issue #62 surfacing: a mid-activity offline transition and the last
+    // start failure (spawn/fetch) are rendered on the connector's offline
+    // screen instead of only living in logs.
+    let active_offline_notice = active.as_ref().and_then(|c| c.offline_notice.clone());
+    let active_start_failure = active
+        .as_ref()
+        .and_then(|c| c.start_failure.as_ref())
+        .map(start_failure_message);
     let current_proxy_port = *proxy_port.read();
 
     // In easy mode, drop KubeStudio from the connector cards (Settings + landing
@@ -2546,6 +2689,8 @@ pub fn App() -> Element {
                         active_name: active_name,
                         active_url: active_url,
                         active_status: active_status,
+                        active_offline_notice: active_offline_notice,
+                        active_start_failure: active_start_failure,
                         proxy_port: current_proxy_port,
                         active_port: active_port,
                         active_transport: active_transport,
@@ -2622,6 +2767,32 @@ async fn check_health_ipc(addr: &sh_core::IpcAddr) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn utc_hhmmss_formats_epoch_seconds() {
+        // 2020-01-01 00:00:00 UTC.
+        const EPOCH_2020: u64 = 1_577_836_800;
+        assert_eq!(utc_hhmmss(EPOCH_2020), "00:00:00");
+        assert_eq!(utc_hhmmss(EPOCH_2020 + 3_661), "01:01:01");
+        assert_eq!(utc_hhmmss(EPOCH_2020 + 86_399), "23:59:59");
+        // The day boundary wraps the clock (no date is shown).
+        assert_eq!(utc_hhmmss(EPOCH_2020 + 86_400), "00:00:00");
+    }
+
+    #[test]
+    fn start_failure_messages_are_operator_actionable() {
+        let no_creds = start_failure_message(&StartFailure::NoCredentials);
+        assert!(no_creds.contains("sign out and sign back in"));
+
+        let no_binary =
+            start_failure_message(&StartFailure::BinaryUnavailable("download failed".into()));
+        assert!(no_binary.contains("binary unavailable"));
+        assert!(no_binary.contains("download failed"));
+
+        let spawn = start_failure_message(&StartFailure::SpawnFailed("No such file".into()));
+        assert!(spawn.contains("launch failed"));
+        assert!(spawn.contains("No such file"));
+    }
+
     fn test_connector(id: &str, status: ConnectorStatus) -> ConnectorConfig {
         ConnectorConfig {
             id: id.to_string(),
@@ -2636,6 +2807,7 @@ mod tests {
             matrix_app_address: None,
             instance_id: String::new(),
             start_failure: None,
+            offline_notice: None,
         }
     }
 
@@ -2846,5 +3018,98 @@ mod tests {
             t1,
             OTT_MINT_COOLDOWN
         ));
+    }
+
+    #[test]
+    #[allow(
+        clippy::needless_borrows_for_generic_args,
+        reason = "`clock` is reused across five ticks; clippy's by-value suggestion would move it on the first call"
+    )]
+    fn offline_notice_fires_once_on_the_transition_not_every_tick() {
+        // The mid-activity failure notice (issue #62) is stamped exactly
+        // once — on the Online -> Offline transition. A counting clock
+        // proves steady offline ticks do not re-stamp it (firing on every
+        // tick would bump the clock and rewrite the notice text).
+        let mut c = test_connector("pick", ConnectorStatus::Online);
+        // `Cell`, not a plain `mut`: the assertions read the count while the
+        // clock closure is still alive (it is reused by the later ticks), and
+        // a mutable capture would make those reads a borrow error (E0502).
+        let stamps = std::cell::Cell::new(0u32);
+        let mut clock = || {
+            stamps.set(stamps.get() + 1);
+            format!("T{}", stamps.get())
+        };
+
+        apply_health_tick(&mut c, false, &mut clock);
+        assert_eq!(c.status, ConnectorStatus::Offline);
+        let first = c
+            .offline_notice
+            .clone()
+            .expect("the Online -> Offline transition stamps the notice");
+        assert_eq!(first, "went offline at T1 UTC");
+
+        // Steady offline ticks: same dead process — no re-stamping.
+        for _ in 0..3 {
+            apply_health_tick(&mut c, false, &mut clock);
+        }
+        assert_eq!(
+            stamps.get(),
+            1,
+            "steady offline ticks must not re-stamp the notice"
+        );
+        assert_eq!(c.offline_notice.as_deref(), Some(first.as_str()));
+
+        // Recovery clears the notice; the next failure episode fires again.
+        apply_health_tick(&mut c, true, &mut clock);
+        assert_eq!(c.status, ConnectorStatus::Online);
+        assert!(
+            c.offline_notice.is_none(),
+            "back online clears the stale notice"
+        );
+        apply_health_tick(&mut c, false, &mut clock);
+        assert_eq!(
+            stamps.get(),
+            2,
+            "a new failure episode fires the notice again"
+        );
+        assert_eq!(c.offline_notice.as_deref(), Some("went offline at T2 UTC"));
+    }
+
+    #[test]
+    fn binary_unavailable_mark_never_marks_a_running_connector() {
+        // A live runner means a working binary (e.g. the bundled sibling)
+        // is driving the connector even though the download failed —
+        // re-marking it would show "binary unavailable" on the next
+        // offline (review of this PR).
+        let connectors = vec![test_connector("pick", ConnectorStatus::Online)];
+        assert!(!binary_unavailable_mark_due(&connectors, "pick", true));
+        // Same connector with no runner (never started): the mark is due.
+        assert!(binary_unavailable_mark_due(&connectors, "pick", false));
+    }
+
+    #[test]
+    fn binary_unavailable_mark_never_overwrites_an_existing_cause() {
+        let mut c = test_connector("pick", ConnectorStatus::Offline);
+        c.start_failure = Some(StartFailure::SpawnFailed("no such file".into()));
+        let connectors = vec![c];
+        assert!(!binary_unavailable_mark_due(&connectors, "pick", false));
+    }
+
+    #[test]
+    fn spawn_failure_does_not_clobber_binary_unavailable() {
+        // The failed spawn is downstream of the failed fetch — the more
+        // specific BinaryUnavailable mark must survive it (review of this
+        // PR: SpawnFailed clobbered it, so the UI showed the wrong cause).
+        let mark = StartFailure::BinaryUnavailable("download failed".into());
+        assert!(
+            !spawn_failure_replaces(Some(&mark)),
+            "BinaryUnavailable must survive a spawn failure"
+        );
+        // Any other (or absent) cause is replaced by the fresh spawn error.
+        assert!(spawn_failure_replaces(None));
+        let no_creds = StartFailure::NoCredentials;
+        assert!(spawn_failure_replaces(Some(&no_creds)));
+        let prior = StartFailure::SpawnFailed("an older error".into());
+        assert!(spawn_failure_replaces(Some(&prior)));
     }
 }

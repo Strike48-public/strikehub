@@ -16,6 +16,16 @@ pub fn ContentArea(
     /// Matrix app address for routing through `/app-content/{address}/`.
     #[props(default)]
     matrix_app_address: Option<String>,
+    /// Set when the health loop saw this connector go from Online to Offline
+    /// (killed/crashed, possibly mid-activity) — surfaced on the offline
+    /// screen so a mid-activity death is visible, not just a status dot
+    /// (issue #62).
+    #[props(default)]
+    active_offline_notice: Option<String>,
+    /// Pre-formatted start-failure reason for the active connector (issue
+    /// #62): spawn/fetch failures used to be log-only.
+    #[props(default)]
+    active_start_failure: Option<String>,
     show_setup: bool,
     setup_connectors: Vec<SetupConnector>,
     custom_connectors: Vec<CustomConnector>,
@@ -124,10 +134,30 @@ pub fn ContentArea(
                             p { "Checking if the connector is running." }
                         }
                     },
-                    (Some(name), _, Some(ConnectorStatus::Offline)) => rsx! {
-                        div { class: "content-offline",
-                            h3 { "{name} is offline" }
-                            p { "The connector will appear here once it's online." }
+                    (Some(name), _, Some(ConnectorStatus::Offline)) => {
+                        let has_notice = active_offline_notice.is_some();
+                        let has_failure = active_start_failure.is_some();
+                        rsx! {
+                            div { class: "content-offline",
+                                h3 { "{name} is offline" }
+                                if let Some(notice) = &active_offline_notice {
+                                    // It was running and is no longer: if an
+                                    // activity (e.g. a download) was in flight it
+                                    // was interrupted. Point at the durable
+                                    // record — the per-connector log file.
+                                    p { class: "content-offline-detail",
+                                        "It {notice}. If an activity was running, it was interrupted — the connector's output is saved in its log file (Account → Open logs folder)."
+                                    }
+                                }
+                                if let Some(fail) = &active_start_failure {
+                                    p { class: "content-offline-detail",
+                                        "Last start failure: {fail}"
+                                    }
+                                }
+                                if !has_notice && !has_failure {
+                                    p { "The connector will appear here once it's online." }
+                                }
+                            }
                         }
                     },
                     _ => {
