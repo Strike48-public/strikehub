@@ -292,14 +292,14 @@ pub(crate) fn connector_log_file_in(
     // rename fails, the open below appends instead — the previous run's
     // output is never overwritten either way.
     let prev = log_dir.join(format!("connector-{safe_id}.prev.log"));
-    if path.exists() {
-        if let Err(e) = std::fs::rename(&path, &prev) {
-            tracing::warn!(
-                "could not rotate previous connector log {} → {} ({e}); appending to the existing file",
-                path.display(),
-                prev.display()
-            );
-        }
+    if path.exists()
+        && let Err(e) = std::fs::rename(&path, &prev)
+    {
+        tracing::warn!(
+            "could not rotate previous connector log {} → {} ({e}); appending to the existing file",
+            path.display(),
+            prev.display()
+        );
     }
     let file = match std::fs::OpenOptions::new()
         .create(true)

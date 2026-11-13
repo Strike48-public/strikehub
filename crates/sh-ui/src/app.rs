@@ -118,10 +118,7 @@ fn apply_health_tick(conn: &mut ConnectorConfig, healthy: bool, notice: impl FnO
 /// marked unavailable when the effect re-fires: the health loop evicts the
 /// runner before the re-fire, so a fetch-time "no live runner" guard cannot
 /// tell "never started" from "just crashed".
-fn spawn_failure_mark(
-    fetch: Option<&sh_core::EnsureResult>,
-    spawn_error: String,
-) -> StartFailure {
+fn spawn_failure_mark(fetch: Option<&sh_core::EnsureResult>, spawn_error: String) -> StartFailure {
     match fetch {
         Some(sh_core::EnsureResult::Unavailable(reason)) => {
             StartFailure::BinaryUnavailable(reason.clone())
@@ -1372,14 +1369,12 @@ pub fn App() -> Element {
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
                         #[cfg(feature = "desktop")]
-                        let fetch_outcome = FETCH_RESULTS
-                            .get()
-                            .and_then(|results| {
-                                results
-                                    .iter()
-                                    .find(|(id, _)| *id == conn.id)
-                                    .map(|(_, r)| r)
-                            });
+                        let fetch_outcome = FETCH_RESULTS.get().and_then(|results| {
+                            results
+                                .iter()
+                                .find(|(id, _)| *id == conn.id)
+                                .map(|(_, r)| r)
+                        });
                         #[cfg(not(feature = "desktop"))]
                         let fetch_outcome: Option<&sh_core::EnsureResult> = None;
                         let mut updated = connectors.read().clone();
