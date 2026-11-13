@@ -47,8 +47,9 @@ if (Test-Path $verFile) {
 # upgrade - MajorUpgrade (wix/main.wxs, Schedule=afterInstallInitialize)
 # removes the x64 product first, and the arm64 install then owns the same
 # Program Files dir and the same stable component GUIDs. No coexistence, no
-# GUID conflict; same-version installs of the other arch are the only no-op
-# ("already installed"), and the next release bumps over them. The x64 code
+# GUID conflict; with AllowSameVersionUpgrades='yes' (wix/main.wxs) even a
+# same-version install of the other arch upgrades in place, and the next
+# release bumps over it. The x64 code
 # is unchanged so existing x64 installs keep upgrading in place.
 switch ($Arch) {
     "x86_64"  { $Target = "x86_64-pc-windows-msvc";  $WixArch = "x64";   $WixPlatform = "x64" }

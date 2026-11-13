@@ -525,54 +525,6 @@ jobs:
           Write-Host "SDK (arm64 um/ucrt libs): $($sdk.Name)"
           "sdk_version=$($sdk.Name)" | Out-File -Append $env:GITHUB_OUTPUT
 
-      # Puts the Hostx64\arm64 linker (target link.exe) on PATH for the cargo
-      # builds below. amd64_arm64 = x64 host, arm64 target. arm64 leg only.
-      - name: Setup MSVC cross environment (x64 host, arm64 target)
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $install = & $vswhere -latest -products * -property installationPath
-          if (-not $install) { throw "vswhere found no Visual Studio installation" }
-          $vcvarsall = Join-Path $install 'VC\Auxiliary\Build\vcvarsall.bat'
-          $sdk = '${{ steps.arm64_toolchain.outputs.sdk_version }}'
-          $archArgs = 'amd64_arm64'
-          if ($sdk) { $archArgs += " $sdk" }
-          # Vendored port of ilammy/msvc-dev-cmd's technique (this org's
-          # Actions policy blocks 'uses:' of that action at run admission —
-          # deterministic startup_failure, probed 2026-11-12). `set`,
-          # vcvarsall, `set` in ONE cmd process; export every changed
-          # variable; marker lines delimit the sections.
-          $raw = (& cmd /c "set & echo __VCVARS_PRE__ & `"$vcvarsall`" $archArgs & echo __VCVARS_POST__ & set") -join "`n"
-          $parts = $raw -split '(?:__VCVARS_PRE__|__VCVARS_POST__)'
-          if ($parts.Count -lt 3) { throw "vcvarsall output not delimited in cmd output" }
-          $beforeText, $vcvarsOut, $afterText = $parts[0], $parts[1], $parts[2]
-          if ($vcvarsOut -match '\[ERROR') { throw "vcvarsall rejected its arguments:`n$vcvarsOut" }
-          $before = @{}
-          foreach ($line in @($beforeText -split "`r?`n")) {
-            if ($line -match '^(.+?)=(.*)$') { $before[$matches[1]] = $matches[2] }
-          }
-          $changed = 0
-          foreach ($line in @($afterText -split "`r?`n")) {
-            if ($line -match '^(.+?)=(.*)$') {
-              $name, $value = $matches[1], $matches[2]
-              $old = if ($before.ContainsKey($name)) { $before[$name] } else { $null }
-              if ($value -ne $old) {
-                [Environment]::SetEnvironmentVariable($name, $value, 'Process')
-                Set-Item -Path "env:$name" -Value $value
-                $changed++
-              }
-            }
-          }
-          if ($changed -eq 0) { throw "vcvarsall changed no environment variables" }
-          Write-Host "Exported $changed variables from vcvarsall ($archArgs)"
-          foreach ($tool in 'cl.exe', 'link.exe') {
-            $found = Get-Command $tool -ErrorAction SilentlyContinue
-            if (-not $found) { throw "$tool not found after vcvarsall" }
-            Write-Host "  $tool -> $($found.Source)"
-          }
-
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features desktop
 
@@ -711,7 +663,7 @@ jobs:
       # zip and source the arm64 VC++ redist on windows-11-arm. Both are gone:
       # the windows-2022 image preinstalls WiX 3.14, and the arm64 exes now
       # link the MSVC CRT statically (job env CARGO_TARGET_AARCH64_PC_WINDOWS_
-      # MSCV_RUSTFLAGS), so there are no redist DLLs to source — the
+      # MSVC_RUSTFLAGS), so there are no redist DLLs to source — the
       # windows-11-arm image turned out to be unable to supply them (see the
       # ci-msi-arm64.yml header for the evidence).
 
@@ -795,10 +747,11 @@ jobs:
             target: x86_64-apple-darwin
             connector_suffix: darwin-x86_64
           # macos-26: the current GA ARM Mac image (macos-latest since 2026-06).
-          # The previous label, macos-15, had its ARM pool config retired by
-          # GitHub ("configuration 'macos-14-arm64-us-default' is not supported")
-          # and cancelled the Mac ARM DMG on the 2026-11-07 main build.
-          # macOS 26 is arm64-only, so the Intel build stays on macos-15-intel.
+          # The 2026-11-07 main-build cancellation was ci.yml's macos-14
+          # Build DMG (aarch64) job — "configuration 'macos-14-arm64-us-default'
+          # is not supported" (run 42408219920); macos-15 itself built the ARM
+          # DMG fine (run 42839114780). macOS 26 is arm64-only, so the Intel
+          # build stays on macos-15-intel.
           - os: macos-26
             arch: aarch64
             target: aarch64-apple-darwin

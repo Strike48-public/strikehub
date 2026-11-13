@@ -36,6 +36,8 @@ on:
       - "scripts/verify-crt-coverage.ps1"
       - "wix/**"
       - "connector-versions.env"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
   push:
     branches: [main]
     paths:
@@ -45,6 +47,8 @@ on:
       - "scripts/verify-crt-coverage.ps1"
       - "wix/**"
       - "connector-versions.env"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
 
 permissions:
   contents: read
@@ -160,63 +164,6 @@ jobs:
           }
           Write-Host "SDK (arm64 um/ucrt libs): $($sdk.Name)"
           "sdk_version=$($sdk.Name)" | Out-File -Append $env:GITHUB_OUTPUT
-
-      # Puts the Hostx64\arm64 MSVC environment (target cl/link + the SDK with
-      # arm64 um/ucrt libs) on PATH for the cargo builds below. Vendored from
-      # ilammy/msvc-dev-cmd's exact technique (run vcvarsall for the cross
-      # arch, capture the changed environment, export it) because `uses:` of
-      # that action deterministically fails THIS org's run admission with
-      # startup_failure (probed 2026-11-12: v1.9.0 tag, v1.9.0 commit, and
-      # v1.13.0 all startup_failure; the same action/SHA works in other orgs,
-      # so the block is org-policy-side). Only runner-image components are
-      # used: vswhere + the VS tree's own vcvarsall.bat.
-      - name: Setup MSVC cross environment (x64 host, arm64 target)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $install = & $vswhere -latest -products * -property installationPath
-          if (-not $install) { throw "vswhere found no Visual Studio installation" }
-          $vcvarsall = Join-Path $install 'VC\Auxiliary\Build\vcvarsall.bat'
-          $sdk = '${{ steps.arm64_toolchain.outputs.sdk_version }}'
-          $archArgs = 'amd64_arm64'
-          if ($sdk) { $archArgs += " $sdk" }
-          # Technique (same as ilammy/msvc-dev-cmd, which this org's Actions
-          # policy blocks at admission): run `set`, vcvarsall, `set` in ONE
-          # cmd process — vcvarsall's environment changes only exist inside
-          # that process — and export every variable that changed. Unique
-          # marker lines delimit the three sections (more robust under pwsh's
-          # line-based capture than the action's `cls` form-feed trick).
-          $raw = (& cmd /c "set & echo __VCVARS_PRE__ & `"$vcvarsall`" $archArgs & echo __VCVARS_POST__ & set") -join "`n"
-          $parts = $raw -split '(?:__VCVARS_PRE__|__VCVARS_POST__)'
-          if ($parts.Count -lt 3) { throw "vcvarsall output not delimited in cmd output" }
-          $beforeText, $vcvarsOut, $afterText = $parts[0], $parts[1], $parts[2]
-          if ($vcvarsOut -match '\[ERROR') { throw "vcvarsall rejected its arguments:`n$vcvarsOut" }
-          $before = @{}
-          foreach ($line in @($beforeText -split "`r?`n")) {
-            if ($line -match '^(.+?)=(.*)$') { $before[$matches[1]] = $matches[2] }
-          }
-          $changed = 0
-          foreach ($line in @($afterText -split "`r?`n")) {
-            if ($line -match '^(.+?)=(.*)$') {
-              $name, $value = $matches[1], $matches[2]
-              $old = if ($before.ContainsKey($name)) { $before[$name] } else { $null }
-              if ($value -ne $old) {
-                [Environment]::SetEnvironmentVariable($name, $value, 'Process')
-                Set-Item -Path "env:$name" -Value $value
-                $changed++
-              }
-            }
-          }
-          if ($changed -eq 0) { throw "vcvarsall changed no environment variables" }
-          Write-Host "Exported $changed variables from vcvarsall ($archArgs)"
-          # Hard gate: the cross-target compiler/linker must resolve before
-          # the cargo builds that follow.
-          foreach ($tool in 'cl.exe', 'link.exe') {
-            $found = Get-Command $tool -ErrorAction SilentlyContinue
-            if (-not $found) { throw "$tool not found after vcvarsall" }
-            Write-Host "  $tool -> $($found.Source)"
-          }
 
       # Static CRT (job env CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS):
       # the arm64 exe has no vcruntime140* imports, so the MSI needs no
