@@ -1384,10 +1384,8 @@ pub fn App() -> Element {
                             // failed binary fetch is the root cause of the
                             // failed spawn, otherwise record the spawn error
                             // (issue #62).
-                            c.start_failure = Some(spawn_failure_mark(
-                                fetch_outcome,
-                                e.to_string(),
-                            ));
+                            c.start_failure =
+                                Some(spawn_failure_mark(fetch_outcome, e.to_string()));
                         }
                         connectors.set(updated);
                         // Keep the connector in the starting set so subsequent
