@@ -1994,8 +1994,11 @@ pub fn App() -> Element {
                             .await;
                             let _ = report_tx.send(result);
                         });
-                        attribution_report_pending
-                            .set(Some((report_rx, attribution_slug.clone(), attribution_record.clone())));
+                        attribution_report_pending.set(Some((
+                            report_rx,
+                            attribution_slug.clone(),
+                            attribution_record.clone(),
+                        )));
                     }
                 }
 
