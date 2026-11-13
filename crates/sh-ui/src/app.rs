@@ -1915,15 +1915,22 @@ pub fn App() -> Element {
                     // platform only: no user data rides along (the PLG privacy
                     // model). Best-effort and guarded: a failed attempt is
                     // logged, the record is NOT persisted, and the next launch
-                    // retries. The report runs on a spawned task — it is never
-                    // awaited here — so a slow or down report host can never
-                    // delay sign-in or connector startup (jtomek review:
-                    // the inline .await cost the full client timeout on every
-                    // launch until a report succeeded).
+                    // retries. The report runs on a spawned Dioxus task — it
+                    // is never awaited here — so a slow or down report host
+                    // can never delay sign-in or connector startup (jtomek
+                    // review: the inline .await cost the full client timeout
+                    // on every launch until a report succeeded). Dioxus
+                    // `spawn` (not tokio::spawn): the task must persist the
+                    // record through the hub-config signal, whose handle is
+                    // not Send — same executor pattern as every other spawned
+                    // task in this component.
                     let attribution_slug = sh_core::url_slug(&api_url);
                     let attribution_record = sh_core::attribution::current_record();
-                    let attribution_stored =
-                        hub_config.read().attribution.get(&attribution_slug).cloned();
+                    let attribution_stored = hub_config
+                        .read()
+                        .attribution
+                        .get(&attribution_slug)
+                        .cloned();
 
                     if sh_core::attribution::needs_report(
                         attribution_stored.as_ref(),
@@ -1931,8 +1938,8 @@ pub fn App() -> Element {
                     ) {
                         let report_auth = auth.clone();
                         let report_ws = ws_client.clone();
-                        let report_config = hub_config.clone();
-                        tokio::spawn(async move {
+                        let mut report_config = hub_config.clone();
+                        spawn(async move {
                             match sh_core::attribution::report(
                                 &report_auth,
                                 report_ws.as_deref(),
