@@ -54,5 +54,14 @@ sentry-tracing = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# PLG #376 inspector (STRIKEHUB_INSPECTOR=1): locate the app’s WKWebView and
+# drive its public API (takeSnapshot, evaluateJavaScript) from a unix socket.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+block2 = "0.6"
+dispatch = "0.2"
+base64 = "0.22"
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

@@ -164,6 +164,11 @@ fn main() {
         config = config.with_menu(None::<dioxus::desktop::muda::Menu>);
     }
 
+    // PLG #376: opt-in local inspector (STRIKEHUB_INSPECTOR=1, macOS only,
+    // default OFF, zero behavior change otherwise). Binds a unix socket in
+    // $TMPDIR and prints the path; see src/inspector.rs.
+    sh_ui::inspector::maybe_start();
+
     dioxus::LaunchBuilder::desktop()
         .with_cfg(config.with_asynchronous_custom_protocol(
             "connector",
