@@ -9,6 +9,14 @@ default = ["desktop"]
 desktop = ["dioxus/desktop", "sentry"]
 server = ["dep:dioxus-liveview", "dep:axum", "sentry"]
 sentry = ["dep:sentry", "dep:sentry-tracing", "sh-core/sentry"]
+# Release-gate for the PLG #376 debug inspector (issue #138). DEFAULT OFF:
+# release builds (DMG/AppImage/MSI/server) are compiled WITHOUT this feature,
+# so the inspector code is not shipped in product binaries. Dev and CI builds
+# opt in via `--features inspector`; the runtime `STRIKEHUB_INSPECTOR=1` check
+# only runs on top of the feature (feature off => the module does not exist).
+# No dependency edges: the macOS-only deps the module uses (objc2 & co.) are
+# already unconditional under cfg(target_os = "macos").
+inspector = []
 
 [lib]
 name = "sh_ui"

@@ -1,8 +1,13 @@
 //! Opt-in local inspector for headless screenshot / JS access to the app's
 //! WKWebView (project-management#376).
 //!
-//! Gate: `STRIKEHUB_INSPECTOR=1` (or `true`). Default OFF — when the variable
-//! is unset this module does nothing and adds zero behavior.
+//! Gates (defense in depth, issue #138):
+//!
+//! 1. Compile-time: the `inspector` cargo feature (DEFAULT OFF). Release
+//!    builds are compiled without the feature, so this module is not in
+//!    product binaries at all.
+//! 2. Runtime: `STRIKEHUB_INSPECTOR=1` (or `true`). Default OFF — when the
+//!    variable is unset this module does nothing and adds zero behavior.
 //!
 //! Design (macOS only):
 //!
