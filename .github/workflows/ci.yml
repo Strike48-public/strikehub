@@ -43,6 +43,42 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --no-default-features --features desktop -p sh-ui -p sh-core -- -D warnings
 
+  # Issue #141: the cfg(macos) code (sh-ui's WKWebView inspector) is compiled
+  # — and clippy-checked — only on a macOS host; the Linux and Windows jobs
+  # never see it. Runs on every main push and on PRs that touch crates/sh-ui
+  # (path-filtered below).
+  sh-ui-paths:
+    name: Paths (crates/sh-ui)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      sh-ui: ${{ steps.filter.outputs.sh-ui }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            sh-ui:
+              - 'crates/sh-ui/**'
+
+  clippy-macos:
+    name: Clippy (macOS)
+    needs: sh-ui-paths
+    # Main pushes always; PRs only when the path filter above matched.
+    if: always() && (github.event_name == 'push' || needs.sh-ui-paths.outputs.sh-ui == 'true')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ runner.arch }}-clippy
+      # Clippy only (no test run): this is compile/lint coverage for the
+      # macOS-only code, not a functional check.
+      - run: cargo clippy --all-targets --no-default-features --features desktop -p sh-ui -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest
