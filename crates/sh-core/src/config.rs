@@ -163,12 +163,15 @@ pub enum StartFailure {
     /// No saved credentials and no registration token could be created, so
     /// the connector was deliberately not launched.
     NoCredentials,
+    /// The connector binary could not be fetched (no cached copy, download
+    /// failed), so the connector cannot start this session.
+    BinaryUnavailable(String),
     /// Launching the connector process failed with this error.
     SpawnFailed(String),
 }
 
-/// Directory holding StrikeHub's own logs and, on Windows, each managed
-/// connector's `connector-<id>.log`.
+/// Directory holding StrikeHub's own logs and each managed connector's
+/// `connector-<id>.log` (all platforms).
 pub fn log_dir() -> Option<std::path::PathBuf> {
     dirs::data_local_dir().map(|d| d.join("StrikeHub").join("logs"))
 }
@@ -194,6 +197,11 @@ pub struct ConnectorConfig {
     /// Set when StrikeHub could not start this connector; cleared on a
     /// successful start.
     pub start_failure: Option<StartFailure>,
+    /// Set (with a human-readable timestamp) when the health loop observes
+    /// this connector go from Online to Offline — e.g. it was killed or
+    /// crashed mid-activity, possibly leaving a run interrupted. Cleared when
+    /// the connector comes back Online. Runtime-only (not persisted).
+    pub offline_notice: Option<String>,
 }
 
 impl ConnectorConfig {
@@ -215,6 +223,7 @@ impl ConnectorConfig {
             matrix_app_address: None,
             instance_id,
             start_failure: None,
+            offline_notice: None,
         }
     }
 
@@ -404,6 +413,7 @@ impl HubConfig {
                     matrix_app_address: None,
                     instance_id,
                     start_failure: None,
+                    offline_notice: None,
                 }
             })
             .collect()
