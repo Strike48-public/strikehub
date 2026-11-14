@@ -245,7 +245,8 @@ impl Drop for IpcConnectorRunner {
 /// `~/Library/Application Support/StrikeHub/logs/connector-<id>.log` on
 /// macOS) and is rotated to `connector-<id>.prev.log` on each spawn, so a
 /// respawn never truncates away the previous run's output — the crash
-/// evidence — while still bounding growth to the last two runs.
+/// evidence — while keeping exactly one log per connector for the current
+/// and the previous run.
 fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::process::Stdio)> {
     let log_dir = crate::config::log_dir()?;
     connector_log_file_in(&log_dir, id)
@@ -255,11 +256,23 @@ fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::pr
 /// explicit directory so they are unit-testable (mirrors the `resolve_binary_in`
 /// pattern). Ids are normally simple slugs, but be defensive: characters that
 /// could escape the directory or produce an invalid filename are replaced.
+///
+/// Failures (directory creation, open, handle duplication) return `None` —
+/// the caller falls back to the platform default (inherited terminal on
+/// unix, a null stream on windows) — but each failure is logged with its
+/// error, so a silently-losing connector log is a visible `warn!` in
+/// StrikeHub's own log.
 pub(crate) fn connector_log_file_in(
     log_dir: &Path,
     id: &str,
 ) -> Option<(PathBuf, std::process::Stdio, std::process::Stdio)> {
-    std::fs::create_dir_all(log_dir).ok()?;
+    if let Err(e) = std::fs::create_dir_all(log_dir) {
+        tracing::warn!(
+            "could not create connector log dir {}: {e} — connector output will not be captured in the per-connector log file",
+            log_dir.display()
+        );
+        return None;
+    }
 
     let safe_id: String = id
         .chars()
@@ -280,20 +293,40 @@ pub(crate) fn connector_log_file_in(
     // rename fails, the open below appends instead — the previous run's
     // output is never overwritten either way.
     let prev = log_dir.join(format!("connector-{safe_id}.prev.log"));
-    if path.exists() && std::fs::rename(&path, &prev).is_err() {
+    if path.exists()
+        && let Err(e) = std::fs::rename(&path, &prev)
+    {
         tracing::warn!(
-            "could not rotate previous connector log {} → {}; appending to the existing file",
+            "could not rotate previous connector log {} → {} ({e}); appending to the existing file",
             path.display(),
             prev.display()
         );
     }
-    let file = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .ok()?;
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                "could not open connector log file {}: {e} — connector output will not be captured in the per-connector log file",
+                path.display()
+            );
+            return None;
+        }
+    };
     // stdout and stderr need separate owned handles to the same file.
-    let err = file.try_clone().ok()?;
+    let err = match file.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                "could not duplicate the connector log file handle {}: {e} — connector output will not be captured in the per-connector log file",
+                path.display()
+            );
+            return None;
+        }
+    };
     Some((
         path,
         std::process::Stdio::from(file),
@@ -699,23 +732,31 @@ mod tests {
     }
 
     /// Spawn a child wired to the captured stdio handles, print one line to
-    /// stdout, and exit with `code` (a non-zero code stands in for a
-    /// connector crash, e.g. a panic mid-download). Blocks until reaped.
+    /// stdout and one to stderr, and exit with `code` (a non-zero code stands
+    /// in for a connector crash, e.g. a panic mid-download). Both streams go
+    /// to the same file via the two handles — so the stderr line landing in
+    /// the file pins the stderr routing, not just stdout. Blocks until reaped.
     fn run_captured_child(
         out: std::process::Stdio,
         err: std::process::Stdio,
-        line: &str,
+        stdout_line: &str,
+        stderr_line: &str,
         code: i32,
     ) {
         #[cfg(unix)]
         let (prog, args) = {
-            let script = format!("printf '%s\\n' '{line}'; exit {code}");
+            let script = format!(
+                "printf '%s\\n' '{stdout_line}'; printf '%s\\n' '{stderr_line}' >&2; exit {code}"
+            );
             ("/bin/sh".to_string(), vec!["-c".to_string(), script])
         };
         #[cfg(not(unix))]
         let (prog, args) = (
             "cmd".to_string(),
-            vec!["/c".to_string(), format!("echo {line} & exit /b {code}")],
+            vec![
+                "/c".to_string(),
+                format!("echo {stdout_line} & echo {stderr_line} 1>&2 & exit /b {code}"),
+            ],
         );
         std::process::Command::new(&prog)
             .args(&args)
@@ -728,21 +769,28 @@ mod tests {
     }
 
     /// The child's output must land in the per-connector log file at the
-    /// expected path — the file-routing half of issue #62. Without the Unix
-    /// file routing (Stdio::inherit), a child spawned with these handles
-    /// writes to the test's terminal, not to the file, and this fails.
+    /// expected path — the file-handle half of issue #62: the path
+    /// construction is right and the returned stdio handles really point at
+    /// that file (both streams — the stderr line pins the second handle).
+    /// This does NOT pin the `start()` routing itself — that the spawn in
+    /// `start()` actually uses these handles — which the integration test in
+    /// `tests/connector_log_route.rs` drives through the real path.
     #[test]
     fn connector_log_file_captures_child_output_at_expected_path() {
         let dir = unique_tmp("connector-log-route");
         let (path, out, err) = connector_log_file_in(&dir, "pick").expect("log file handle");
         assert_eq!(path, dir.join("connector-pick.log"));
 
-        run_captured_child(out, err, "downloading 42%", 0);
+        run_captured_child(out, err, "downloading 42%", "fatal: exploded", 0);
 
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
             body.contains("downloading 42%"),
             "child stdout must land in the per-connector log file, got: {body:?}"
+        );
+        assert!(
+            body.contains("fatal: exploded"),
+            "child stderr must land in the same per-connector log file, got: {body:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -759,12 +807,12 @@ mod tests {
 
         // Run 1: the child writes progress, then crashes (non-zero exit).
         let (path1, out, err) = connector_log_file_in(&dir, "pick").expect("run 1 handle");
-        run_captured_child(out, err, "downloading 42%", 3);
+        run_captured_child(out, err, "downloading 42%", "fatal: exploded", 3);
 
         // Respawn: run 2 opens a fresh log for the same connector.
         let (path2, out, err) = connector_log_file_in(&dir, "pick").expect("run 2 handle");
         assert_eq!(path1, path2);
-        run_captured_child(out, err, "run two progress", 0);
+        run_captured_child(out, err, "run two progress", "run two warning", 0);
 
         // The crash evidence from run 1 survived the respawn, in the rotated
         // file — not truncated away.

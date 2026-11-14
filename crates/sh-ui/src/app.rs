@@ -109,27 +109,22 @@ fn apply_health_tick(conn: &mut ConnectorConfig, healthy: bool, notice: impl FnO
     }
 }
 
-/// True if a failed binary fetch should record `StartFailure::BinaryUnavailable`
-/// on connector `id` (issue #62): only when the connector has no recorded
-/// start cause yet AND no live runner. A live runner means a working binary
-/// (e.g. the bundled sibling) is actually driving the connector even though
-/// the download failed, so marking it unavailable would show the wrong cause
-/// the next time it goes offline (review of this PR: effect re-fires
-/// re-marked running connectors).
-fn binary_unavailable_mark_due(current: &[ConnectorConfig], id: &str, has_runner: bool) -> bool {
-    !has_runner
-        && current
-            .iter()
-            .find(|c| c.id == id)
-            .is_some_and(|c| c.start_failure.is_none())
-}
-
-/// True if a failed spawn may record `StartFailure::SpawnFailed` on top of
-/// the connector's current mark. A `BinaryUnavailable` mark survives: the
-/// failed binary fetch is the root cause of the failed spawn, so the more
-/// specific mark wins (review of this PR: SpawnFailed clobbered it).
-fn spawn_failure_replaces(existing: Option<&StartFailure>) -> bool {
-    !matches!(existing, Some(StartFailure::BinaryUnavailable(_)))
+/// The start-failure mark for a failed spawn (issue #62, decided where the
+/// spawn fails): when the binary fetch was `Unavailable`, that fetch failure
+/// is the root cause of the failed spawn, so the more specific
+/// `BinaryUnavailable` mark is recorded; otherwise the generic `SpawnFailed`
+/// error. Deciding at spawn — rather than at fetch time — keeps a connector
+/// that crashed while running on a working (bundled) binary from being
+/// marked unavailable when the effect re-fires: the health loop evicts the
+/// runner before the re-fire, so a fetch-time "no live runner" guard cannot
+/// tell "never started" from "just crashed".
+fn spawn_failure_mark(fetch: Option<&sh_core::EnsureResult>, spawn_error: String) -> StartFailure {
+    match fetch {
+        Some(sh_core::EnsureResult::Unavailable(reason)) => {
+            StartFailure::BinaryUnavailable(reason.clone())
+        }
+        _ => StartFailure::SpawnFailed(spawn_error),
+    }
 }
 
 /// UTC `HH:MM:SS` for `epoch_secs`. Pure (takes the epoch) so it is unit-
@@ -1037,11 +1032,21 @@ pub fn App() -> Element {
             // only).  Uses a static OnceCell so the first caller runs the
             // download and concurrent re-fires of this effect *wait* for it
             // to finish rather than racing ahead to spawn.
+            //
+            // Module-static (lives past the block below) so the spawn
+            // failure handler further down can see which fetch outcome
+            // applies to a connector — the mark decision happens where the
+            // spawn fails (issue #62).
+            #[cfg(feature = "desktop")]
+            static FETCH_RESULTS: tokio::sync::OnceCell<Vec<(String, sh_core::EnsureResult)>> =
+                tokio::sync::OnceCell::const_new();
             #[cfg(feature = "desktop")]
             {
-                static FETCH_RESULTS: tokio::sync::OnceCell<Vec<(String, sh_core::EnsureResult)>> =
-                    tokio::sync::OnceCell::const_new();
-                let fetch_results = FETCH_RESULTS
+                // Awaited for its side effect: the first caller runs the
+                // download and concurrent re-fires wait for it to finish
+                // rather than racing ahead to spawn. The results themselves
+                // are read from the static where the spawn fails.
+                let _ = FETCH_RESULTS
                     .get_or_init(|| async {
                         tracing::info!(
                             "[connector-start] fetching connector binaries before start"
@@ -1081,41 +1086,17 @@ pub fn App() -> Element {
                         }
                         results
                     })
-                    .await
-                    .clone();
+                    .await;
 
-                // Surface binary fetch failures on the connectors themselves
-                // (issue #62): an unavailable binary means the connector can
-                // never start this session — previously this was log-only. The
-                // write is guarded so an effect re-fire never re-marks (a later
-                // successful start clears the flag), and it never marks a
-                // connector that has a live runner — the bundled binary can be
-                // working fine even when the download failed (review of this
-                // PR: re-fired effects re-marked running connectors, so the
-                // next offline showed "binary unavailable" wrongly).
-                for (id, result) in &fetch_results {
-                    let Some(reason) = (match result {
-                        sh_core::EnsureResult::Unavailable(reason) => Some(reason.clone()),
-                        _ => None,
-                    }) else {
-                        continue;
-                    };
-                    let has_runner = runners.read().contains_key(id);
-                    let mark_due = {
-                        let current = connectors.read();
-                        binary_unavailable_mark_due(&current, id, has_runner)
-                    };
-                    if !mark_due {
-                        continue;
-                    }
-                    let mut updated = connectors.read().clone();
-                    if let Some(c) = updated.iter_mut().find(|c| c.id == *id)
-                        && c.start_failure.is_none()
-                    {
-                        c.start_failure = Some(StartFailure::BinaryUnavailable(reason));
-                        connectors.set(updated);
-                    }
-                }
+                // Binary fetch failures are surfaced on the connectors where
+                // they matter — a failed spawn (see `spawn_failure_mark`
+                // below): an unavailable binary is the root cause of that
+                // failed spawn (issue #62). Deliberately NOT marked at fetch
+                // time: after a crash the health loop evicts the runner
+                // before the effect re-fires, so a fetch-time mark would land
+                // on a connector that was just running on a working (bundled)
+                // binary and show "binary unavailable" wrongly on its next
+                // offline.
             }
 
             let mut env_vars = matrix_env_vars();
@@ -1485,17 +1466,24 @@ pub fn App() -> Element {
                     }
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
+                        #[cfg(feature = "desktop")]
+                        let fetch_outcome = FETCH_RESULTS.get().and_then(|results| {
+                            results
+                                .iter()
+                                .find(|(id, _)| *id == conn.id)
+                                .map(|(_, r)| r)
+                        });
+                        #[cfg(not(feature = "desktop"))]
+                        let fetch_outcome: Option<&sh_core::EnsureResult> = None;
                         let mut updated = connectors.read().clone();
                         if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
                             c.status = ConnectorStatus::Offline;
-                            // The failed spawn is downstream of the failed
-                            // binary fetch — keep the more specific
-                            // BinaryUnavailable mark instead of clobbering it
-                            // with the generic spawn error (review of this
-                            // PR: SpawnFailed overwrote it immediately).
-                            if spawn_failure_replaces(c.start_failure.as_ref()) {
-                                c.start_failure = Some(StartFailure::SpawnFailed(e.to_string()));
-                            }
+                            // The mark is decided where the spawn fails: a
+                            // failed binary fetch is the root cause of the
+                            // failed spawn, otherwise record the spawn error
+                            // (issue #62).
+                            c.start_failure =
+                                Some(spawn_failure_mark(fetch_outcome, e.to_string()));
                         }
                         connectors.set(updated);
                         // Keep the connector in the starting set so subsequent
@@ -3328,40 +3316,42 @@ mod tests {
     }
 
     #[test]
-    fn binary_unavailable_mark_never_marks_a_running_connector() {
-        // A live runner means a working binary (e.g. the bundled sibling)
-        // is driving the connector even though the download failed —
-        // re-marking it would show "binary unavailable" on the next
-        // offline (review of this PR).
-        let connectors = vec![test_connector("pick", ConnectorStatus::Online)];
-        assert!(!binary_unavailable_mark_due(&connectors, "pick", true));
-        // Same connector with no runner (never started): the mark is due.
-        assert!(binary_unavailable_mark_due(&connectors, "pick", false));
-    }
-
-    #[test]
-    fn binary_unavailable_mark_never_overwrites_an_existing_cause() {
-        let mut c = test_connector("pick", ConnectorStatus::Offline);
-        c.start_failure = Some(StartFailure::SpawnFailed("no such file".into()));
-        let connectors = vec![c];
-        assert!(!binary_unavailable_mark_due(&connectors, "pick", false));
-    }
-
-    #[test]
-    fn spawn_failure_does_not_clobber_binary_unavailable() {
+    fn spawn_failure_mark_uses_the_failed_fetch_as_root_cause() {
         // The failed spawn is downstream of the failed fetch — the more
-        // specific BinaryUnavailable mark must survive it (review of this
-        // PR: SpawnFailed clobbered it, so the UI showed the wrong cause).
-        let mark = StartFailure::BinaryUnavailable("download failed".into());
-        assert!(
-            !spawn_failure_replaces(Some(&mark)),
-            "BinaryUnavailable must survive a spawn failure"
+        // specific BinaryUnavailable mark records the root cause, not the
+        // generic spawn error.
+        let unavailable = sh_core::EnsureResult::Unavailable("download failed".into());
+        assert_eq!(
+            spawn_failure_mark(Some(&unavailable), "spawn error".into()),
+            StartFailure::BinaryUnavailable("download failed".into())
         );
-        // Any other (or absent) cause is replaced by the fresh spawn error.
-        assert!(spawn_failure_replaces(None));
-        let no_creds = StartFailure::NoCredentials;
-        assert!(spawn_failure_replaces(Some(&no_creds)));
-        let prior = StartFailure::SpawnFailed("an older error".into());
-        assert!(spawn_failure_replaces(Some(&prior)));
+    }
+
+    #[test]
+    fn spawn_failure_mark_records_the_spawn_error_when_the_binary_was_available() {
+        use std::path::PathBuf;
+        let downloaded = sh_core::EnsureResult::Downloaded(PathBuf::from("/bin/connector"));
+        assert_eq!(
+            spawn_failure_mark(Some(&downloaded), "no such file".into()),
+            StartFailure::SpawnFailed("no such file".into())
+        );
+        // A stale fallback binary still means the fetch produced a binary —
+        // the spawn error is the cause to show.
+        let stale = sh_core::EnsureResult::FallbackStale(PathBuf::from("/bin/old"), "old".into());
+        assert_eq!(
+            spawn_failure_mark(Some(&stale), "permission denied".into()),
+            StartFailure::SpawnFailed("permission denied".into())
+        );
+        let current = sh_core::EnsureResult::AlreadyCurrent(PathBuf::from("/bin/cached"));
+        assert_eq!(
+            spawn_failure_mark(Some(&current), "exec format error".into()),
+            StartFailure::SpawnFailed("exec format error".into())
+        );
+        // No fetch result at all (the fetch never ran for this connector):
+        // still record the spawn error.
+        assert_eq!(
+            spawn_failure_mark(None, "boom".into()),
+            StartFailure::SpawnFailed("boom".into())
+        );
     }
 }
