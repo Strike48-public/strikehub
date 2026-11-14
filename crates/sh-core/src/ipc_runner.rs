@@ -258,16 +258,17 @@ fn connector_log_file(id: &str) -> Option<(PathBuf, std::process::Stdio, std::pr
 /// could escape the directory or produce an invalid filename are replaced.
 ///
 /// Failures (directory creation, open, handle duplication) return `None` —
-/// the caller falls back to an inherited terminal — but each failure is
-/// logged with its error, so a silently-losing connector log is a visible
-/// `warn!` in StrikeHub's own log.
+/// the caller falls back to the platform default (inherited terminal on
+/// unix, a null stream on windows) — but each failure is logged with its
+/// error, so a silently-losing connector log is a visible `warn!` in
+/// StrikeHub's own log.
 pub(crate) fn connector_log_file_in(
     log_dir: &Path,
     id: &str,
 ) -> Option<(PathBuf, std::process::Stdio, std::process::Stdio)> {
     if let Err(e) = std::fs::create_dir_all(log_dir) {
         tracing::warn!(
-            "could not create connector log dir {}: {e} — connector output will go to the inherited terminal",
+            "could not create connector log dir {}: {e} — connector output will not be captured in the per-connector log file",
             log_dir.display()
         );
         return None;
@@ -309,7 +310,7 @@ pub(crate) fn connector_log_file_in(
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(
-                "could not open connector log file {}: {e} — connector output will go to the inherited terminal",
+                "could not open connector log file {}: {e} — connector output will not be captured in the per-connector log file",
                 path.display()
             );
             return None;
@@ -320,7 +321,7 @@ pub(crate) fn connector_log_file_in(
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(
-                "could not duplicate the connector log file handle {}: {e} — connector output will go to the inherited terminal",
+                "could not duplicate the connector log file handle {}: {e} — connector output will not be captured in the per-connector log file",
                 path.display()
             );
             return None;
