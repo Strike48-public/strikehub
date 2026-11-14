@@ -23,6 +23,22 @@
 //! queue (GCD) and results come back over an mpsc channel.
 //!
 //! Companion CLI: `tools/strikehub-inspect.py`.
+//!
+//! Mac verification (objc/`msg_send!` correctness only surfaces at runtime,
+//! and the cfg(macos) code below is the one part of the app no
+//! Linux/Windows CI job compiles — run on macOS after any change to this
+//! module):
+//!
+//! ```text
+//! STRIKEHUB_INSPECTOR=1 cargo run              # prints STRIKEHUB_INSPECTOR_SOCKET=...
+//! python3 tools/strikehub-inspect.py eval ''   # {"cmd":"eval","js":""}
+//! python3 tools/strikehub-inspect.py eval "'é'" # {"cmd":"eval","js":"'é'"}
+//! ```
+//!
+//! Expected: the empty-`js` eval returns `{"ok":true,"result":"null"}` (JS
+//! `undefined`) and the single-quoted `é` eval returns `{"ok":true,"result":"é"}`
+//! — together they prove zero-length and non-ASCII (UTF-8) JS round-trip
+//! through `NSString` (the edges jtomek's macOS probe found, #132 review).
 
 #[cfg(target_os = "macos")]
 pub fn maybe_start() {
@@ -90,10 +106,8 @@ mod server {
         std::thread::Builder::new()
             .name("strikehub-inspect".into())
             .spawn(move || {
-                for stream in listener.incoming() {
-                    if let Ok(stream) = stream {
-                        handle_conn(stream);
-                    }
+                for stream in listener.incoming().flatten() {
+                    handle_conn(stream);
                 }
             })?;
 
