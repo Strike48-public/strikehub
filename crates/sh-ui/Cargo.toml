@@ -58,7 +58,7 @@ libc = "0.2"
 # PLG #376 inspector (STRIKEHUB_INSPECTOR=1): locate the app’s WKWebView and
 # drive its public API (takeSnapshot, evaluateJavaScript) from a unix socket.
 objc2 = "0.6"
-objc2-foundation = { version = "0.2", features = ["NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSString"] }
 block2 = "0.6"
 dispatch = "0.2"
 base64 = "0.22"
