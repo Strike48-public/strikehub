@@ -221,10 +221,13 @@ mod server {
             let js_ns = nsstring(&js);
             unsafe {
                 let _: () = msg_send![wv,
-                    evaluateJavaScript: js_ns,
+                    evaluateJavaScript: &*js_ns,
                     completionHandler: (&*block) as *const ObjCBlock2
                 ];
             }
+            // js_ns (a +1 Retained) drops here; WebKit retains what it needs
+            // for the async completion before the call returns.
+            drop(js_ns);
         });
         recv_or_timeout(rx)
     }
@@ -332,21 +335,18 @@ mod server {
         }
     }
 
-    fn nsstring(s: &str) -> *const AnyObject {
+    fn nsstring(s: &str) -> objc2::rc::Retained<objc2_foundation::NSString> {
         // `stringWithUTF8String:` requires a NUL-terminated C string, but a
         // Rust `str` has no guaranteed NUL terminator — the ObjC runtime
-        // scans past the buffer (heap over-read / segfault). Use the
-        // bytes+length initializer, which needs no terminator. (jtomek, PR
-        // review: "I'd switch to initWithBytes:length:", 2026-11-13)
-        unsafe {
-            let ns: *const AnyObject = msg_send![
-                class!(NSString),
-                initWithBytes: s.as_ptr(),
-                length: s.len(),
-                encoding: 0x08000100usize // NSUTF8StringEncoding (kCFStringEncodingUTF8)
-            ];
-            ns
-        }
+        // scans past the buffer (heap over-read / segfault). Hand the bytes
+        // to objc2-foundation's `NSString::from_str` instead of a hand-
+        // rolled msg_send!: it does alloc + initWithBytes:length:encoding:
+        // with the real NSUTF8StringEncoding (4), keeps the +1 retain in a
+        // Retained (dropped right after evaluateJavaScript, which copies
+        // what it needs), and avoids both bugs jtomek's macOS probe found
+        // in 93153dc (class-send without alloc; kCFStringEncodingUTF8
+        // mistaken for NSUTF8StringEncoding mangling non-ASCII).
+        objc2_foundation::NSString::from_str(s)
     }
 
     fn nsstring_to_string(obj: *const AnyObject) -> String {
