@@ -116,7 +116,7 @@ def main() -> None:
             sys.exit("error: screenshot needs an output path")
         resp = call(sock, {"cmd": "screenshot"})
     elif args.command == "eval":
-        if not args.arg1:
+        if args.arg1 is None:
             sys.exit("error: eval needs a JS expression")
         resp = call(sock, {"cmd": "eval", "js": args.arg1})
     elif args.command == "click":
