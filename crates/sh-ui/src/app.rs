@@ -110,21 +110,81 @@ fn apply_health_tick(conn: &mut ConnectorConfig, healthy: bool, notice: impl FnO
 }
 
 /// The start-failure mark for a failed spawn (issue #62, decided where the
-/// spawn fails): when the binary fetch was `Unavailable`, that fetch failure
-/// is the root cause of the failed spawn, so the more specific
-/// `BinaryUnavailable` mark is recorded; otherwise the generic `SpawnFailed`
-/// error. Deciding at spawn — rather than at fetch time — keeps a connector
-/// that crashed while running on a working (bundled) binary from being
-/// marked unavailable when the effect re-fires: the health loop evicts the
-/// runner before the re-fire, so a fetch-time "no live runner" guard cannot
-/// tell "never started" from "just crashed".
+/// spawn fails; decision table refined by issue #142, H-1):
+///
+/// | recorded fetch outcome | spawn error | mark                         |
+/// |------------------------|-------------|------------------------------|
+/// | `Unavailable(reason)`  | non-empty   | `SpawnFailed(spawn_error)`   |
+/// | `Unavailable(reason)`  | empty       | `BinaryUnavailable(reason)`  |
+/// | binary produced / none | (any)       | `SpawnFailed(spawn_error)`   |
+///
+/// A failed spawn with a distinguishable error message is the more
+/// informative mark: the recorded outcome is the one-shot fetch result, held
+/// for the process lifetime, so an `Unavailable` entry may be STALE — the
+/// fetch can fail transiently (e.g. the network at sign-in) while a working
+/// bundled sibling is later resolved and spawned, and the error of THAT
+/// spawn is what the operator needs, not the stale fetch reason. The fetch
+/// reason is surfaced only when the spawn error carries no signal at all —
+/// the fetch outcome is then the only cause we have.
+///
+/// Deciding at spawn — rather than at fetch time — keeps a connector that
+/// crashed while running on a working (bundled) binary from being marked
+/// unavailable when the effect re-fires: the health loop evicts the runner
+/// before the re-fire, so a fetch-time "no live runner" guard cannot tell
+/// "never started" from "just crashed".
 fn spawn_failure_mark(fetch: Option<&sh_core::EnsureResult>, spawn_error: String) -> StartFailure {
-    match fetch {
-        Some(sh_core::EnsureResult::Unavailable(reason)) => {
-            StartFailure::BinaryUnavailable(reason.clone())
-        }
-        _ => StartFailure::SpawnFailed(spawn_error),
+    if spawn_error.is_empty()
+        && let Some(sh_core::EnsureResult::Unavailable(reason)) = fetch
+    {
+        // The spawn failed without a distinguishable error: the
+        // recorded fetch outcome is the only signal we have.
+        return StartFailure::BinaryUnavailable(reason.clone());
     }
+    StartFailure::SpawnFailed(spawn_error)
+}
+
+/// Decide the start-failure mark for a FAILED SPAWN from the recorded
+/// one-shot fetch results (issue #142, H-2): look up this connector's fetch
+/// outcome and apply [`spawn_failure_mark`]. Free and pure over the results
+/// slice so the lookup wiring itself is unit-testable — if it degraded to
+/// "never found", an `Unavailable` entry for the connector would silently
+/// become `SpawnFailed` with every other test still green.
+fn start_failure_for_spawn(
+    fetch_results: &[(String, sh_core::EnsureResult)],
+    conn_id: &str,
+    spawn_error: String,
+) -> StartFailure {
+    let fetch_outcome = fetch_results
+        .iter()
+        .find(|(id, _)| id == conn_id)
+        .map(|(_, result)| result);
+    spawn_failure_mark(fetch_outcome, spawn_error)
+}
+
+/// Decide the start-failure mark for a connector that SKIPPED the spawn (no
+/// binary configured — issue #142, R-1): such a connector never reaches the
+/// spawn-failure arm, so without this the #131 surface for "binary
+/// unavailable" would be lost for e.g. a dynamic manifest with no
+/// `binary_hint` (fetch outcome `Unavailable("no binary_hint configured")`).
+/// Returns the mark only when the recorded fetch outcome is `Unavailable`;
+/// a connector with no fetch entry or one whose fetch produced a binary
+/// stays unmarked — skipping is by design for it. The just-crashed-on-
+/// working-binary protection from #137 cannot be shadowed here: a connector
+/// that skips the spawn has never spawned, so it can never be "just
+/// crashed".
+fn skip_failure_mark(
+    fetch_results: &[(String, sh_core::EnsureResult)],
+    conn_id: &str,
+) -> Option<StartFailure> {
+    fetch_results
+        .iter()
+        .find(|(id, _)| id == conn_id)
+        .and_then(|(_, result)| match result {
+            sh_core::EnsureResult::Unavailable(reason) => {
+                Some(StartFailure::BinaryUnavailable(reason.clone()))
+            }
+            _ => None,
+        })
 }
 
 /// UTC `HH:MM:SS` for `epoch_secs`. Pure (takes the epoch) so it is unit-
@@ -990,15 +1050,17 @@ pub fn App() -> Element {
                     })
                     .await;
 
-                // Binary fetch failures are surfaced on the connectors where
-                // they matter — a failed spawn (see `spawn_failure_mark`
-                // below): an unavailable binary is the root cause of that
-                // failed spawn (issue #62). Deliberately NOT marked at fetch
-                // time: after a crash the health loop evicts the runner
-                // before the effect re-fires, so a fetch-time mark would land
-                // on a connector that was just running on a working (bundled)
-                // binary and show "binary unavailable" wrongly on its next
-                // offline.
+                // The results are consumed at the two decision points below:
+                // a FAILED SPAWN (`start_failure_for_spawn` — the real spawn
+                // error wins over a possibly-stale fetch reason, issue
+                // #142 H-1) and a SKIPPED spawn (`skip_failure_mark` — the
+                // fetch reason is the only cause when the connector never
+                // spawns at all, issue #142 R-1). Deliberately NOT marked at
+                // fetch time: after a crash the health loop evicts the
+                // runner before the effect re-fires, so a fetch-time mark
+                // would land on a connector that was just running on a
+                // working (bundled) binary and show "binary unavailable"
+                // wrongly on its next offline.
             }
 
             let mut env_vars = matrix_env_vars();
@@ -1092,6 +1154,46 @@ pub fn App() -> Element {
                     // Remove from starting set
                     let mut starting = lock.lock().await;
                     starting.remove(&conn.id);
+
+                    // Restore the no-cause surface (#131) for connectors
+                    // that skip the spawn (issue #142, R-1): they never
+                    // reach the spawn-failure arm, so if the one-shot fetch
+                    // recorded them as unavailable, that fetch reason is the
+                    // only start-failure cause we have. The #137
+                    // just-crashed protection lives in the spawn-failure arm
+                    // and is untouched — a skipped connector never spawned.
+                    // `connectors.set()` only when the mark actually
+                    // changed: this path re-enters on every effect re-fire
+                    // (the health tick re-sets the connectors signal), so an
+                    // unconditional set would re-trigger this very effect —
+                    // the same feedback-loop concern as the no-credentials
+                    // path (issue #71).
+                    #[cfg(feature = "desktop")]
+                    let fetch_results: &[(String, sh_core::EnsureResult)] = FETCH_RESULTS
+                        .get()
+                        .map(|results| results.as_slice())
+                        .unwrap_or(&[]);
+                    #[cfg(not(feature = "desktop"))]
+                    let fetch_results: &[(String, sh_core::EnsureResult)] = &[];
+                    if let Some(mark) = skip_failure_mark(fetch_results, &conn.id) {
+                        let mut updated = connectors.read().clone();
+                        let changed =
+                            updated
+                                .iter_mut()
+                                .find(|c| c.id == conn.id)
+                                .is_some_and(|c| {
+                                    let status_changed = c.status != ConnectorStatus::Offline;
+                                    let failure_changed = c.start_failure.as_ref() != Some(&mark);
+                                    if status_changed || failure_changed {
+                                        c.status = ConnectorStatus::Offline;
+                                        c.start_failure = Some(mark.clone());
+                                    }
+                                    status_changed || failure_changed
+                                });
+                        if changed {
+                            connectors.set(updated);
+                        }
+                    }
                     continue;
                 };
                 let binary_path = std::path::PathBuf::from(binary);
@@ -1369,23 +1471,31 @@ pub fn App() -> Element {
                     Err(e) => {
                         tracing::error!("failed to start IPC connector '{}': {}", conn.id, e);
                         #[cfg(feature = "desktop")]
-                        let fetch_outcome = FETCH_RESULTS.get().and_then(|results| {
-                            results
-                                .iter()
-                                .find(|(id, _)| *id == conn.id)
-                                .map(|(_, r)| r)
-                        });
+                        let fetch_results: &[(
+                            String,
+                            sh_core::EnsureResult,
+                        )] = FETCH_RESULTS
+                            .get()
+                            .map(|results| results.as_slice())
+                            .unwrap_or(&[]);
                         #[cfg(not(feature = "desktop"))]
-                        let fetch_outcome: Option<&sh_core::EnsureResult> = None;
+                        let fetch_results: &[(
+                            String,
+                            sh_core::EnsureResult,
+                        )] = &[];
                         let mut updated = connectors.read().clone();
                         if let Some(c) = updated.iter_mut().find(|c| c.id == conn.id) {
                             c.status = ConnectorStatus::Offline;
-                            // The mark is decided where the spawn fails: a
-                            // failed binary fetch is the root cause of the
-                            // failed spawn, otherwise record the spawn error
-                            // (issue #62).
-                            c.start_failure =
-                                Some(spawn_failure_mark(fetch_outcome, e.to_string()));
+                            // The mark is decided where the spawn fails:
+                            // the real spawn error wins over a
+                            // possibly-stale fetch reason (issue #62,
+                            // decision table per `spawn_failure_mark`,
+                            // refined in issue #142 H-1).
+                            c.start_failure = Some(start_failure_for_spawn(
+                                fetch_results,
+                                &conn.id,
+                                e.to_string(),
+                            ));
                         }
                         connectors.set(updated);
                         // Keep the connector in the starting set so subsequent
@@ -3063,20 +3173,34 @@ mod tests {
         assert_eq!(c.offline_notice.as_deref(), Some("went offline at T2 UTC"));
     }
 
+    // ── spawn_failure_mark decision table (issue #142, H-1) ────────────────
+
     #[test]
-    fn spawn_failure_mark_uses_the_failed_fetch_as_root_cause() {
-        // The failed spawn is downstream of the failed fetch — the more
-        // specific BinaryUnavailable mark records the root cause, not the
-        // generic spawn error.
+    fn spawn_failure_mark_prefers_the_real_spawn_error_over_a_stale_fetch_failure() {
+        // The recorded outcome is the one-shot fetch result, held for the
+        // process lifetime: it can be stale (transient network at sign-in,
+        // a working bundled sibling resolved later) — the real error of the
+        // spawn that actually failed is the more informative mark.
         let unavailable = sh_core::EnsureResult::Unavailable("download failed".into());
         assert_eq!(
             spawn_failure_mark(Some(&unavailable), "spawn error".into()),
+            StartFailure::SpawnFailed("spawn error".into())
+        );
+    }
+
+    #[test]
+    fn spawn_failure_mark_records_the_fetch_reason_when_the_spawn_error_is_blank() {
+        // The spawn failed without a distinguishable error: the recorded
+        // fetch outcome is the only signal we have.
+        let unavailable = sh_core::EnsureResult::Unavailable("download failed".into());
+        assert_eq!(
+            spawn_failure_mark(Some(&unavailable), String::new()),
             StartFailure::BinaryUnavailable("download failed".into())
         );
     }
 
     #[test]
-    fn spawn_failure_mark_records_the_spawn_error_when_the_binary_was_available() {
+    fn spawn_failure_mark_records_the_spawn_error_when_a_binary_was_produced() {
         use std::path::PathBuf;
         let downloaded = sh_core::EnsureResult::Downloaded(PathBuf::from("/bin/connector"));
         assert_eq!(
@@ -3101,5 +3225,149 @@ mod tests {
             spawn_failure_mark(None, "boom".into()),
             StartFailure::SpawnFailed("boom".into())
         );
+    }
+
+    #[test]
+    fn spawn_failure_mark_never_synthesizes_binary_unavailable_without_the_entry() {
+        // BinaryUnavailable comes ONLY from a recorded Unavailable outcome —
+        // a blank spawn error must not be promoted to it for any other
+        // outcome.
+        use std::path::PathBuf;
+        let downloaded = sh_core::EnsureResult::Downloaded(PathBuf::from("/bin/connector"));
+        assert_eq!(
+            spawn_failure_mark(Some(&downloaded), String::new()),
+            StartFailure::SpawnFailed(String::new())
+        );
+        let stale = sh_core::EnsureResult::FallbackStale(PathBuf::from("/bin/old"), "old".into());
+        assert_eq!(
+            spawn_failure_mark(Some(&stale), String::new()),
+            StartFailure::SpawnFailed(String::new())
+        );
+        let current = sh_core::EnsureResult::AlreadyCurrent(PathBuf::from("/bin/cached"));
+        assert_eq!(
+            spawn_failure_mark(Some(&current), String::new()),
+            StartFailure::SpawnFailed(String::new())
+        );
+        assert_eq!(
+            spawn_failure_mark(None, String::new()),
+            StartFailure::SpawnFailed(String::new())
+        );
+    }
+
+    // ── start_failure_for_spawn: the FETCH_RESULTS lookup seam (issue #142,
+    //    H-2) ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn start_failure_for_spawn_marks_the_unavailable_entry_for_the_connector() {
+        // Pins the lookup wiring: an Unavailable entry for THIS conn.id
+        // yields BinaryUnavailable. If the lookup degraded to always-None
+        // the mark would silently degrade to SpawnFailed("") with every
+        // other test still green.
+        let results = vec![(
+            "connector-a".into(),
+            sh_core::EnsureResult::Unavailable("no binary_hint configured".into()),
+        )];
+        assert_eq!(
+            start_failure_for_spawn(&results, "connector-a", String::new()),
+            StartFailure::BinaryUnavailable("no binary_hint configured".into())
+        );
+    }
+
+    #[test]
+    fn start_failure_for_spawn_missing_conn_id_yields_spawn_failed() {
+        // No entry for the connector at all: the spawn error is the only
+        // signal.
+        assert_eq!(
+            start_failure_for_spawn(&[], "connector-a", "boom".into()),
+            StartFailure::SpawnFailed("boom".into())
+        );
+    }
+
+    #[test]
+    fn start_failure_for_spawn_unrelated_conn_id_yields_spawn_failed() {
+        // Entries exist but for OTHER connectors: the lookup must not pick
+        // one of their outcomes — the spawn error is the only signal for
+        // this connector.
+        let results = vec![
+            (
+                "connector-b".into(),
+                sh_core::EnsureResult::Unavailable("download failed".into()),
+            ),
+            (
+                "connector-c".into(),
+                sh_core::EnsureResult::Unavailable("no binary_hint configured".into()),
+            ),
+        ];
+        assert_eq!(
+            start_failure_for_spawn(&results, "connector-a", "boom".into()),
+            StartFailure::SpawnFailed("boom".into())
+        );
+    }
+
+    #[test]
+    fn start_failure_for_spawn_prefers_the_spawn_error_over_the_unavailable_entry() {
+        // The H-1 preference applies THROUGH the lookup too: an Unavailable
+        // entry for the connector does not hide a real spawn error.
+        let results = vec![(
+            "connector-a".into(),
+            sh_core::EnsureResult::Unavailable("download failed".into()),
+        )];
+        assert_eq!(
+            start_failure_for_spawn(&results, "connector-a", "exec format error".into()),
+            StartFailure::SpawnFailed("exec format error".into())
+        );
+    }
+
+    // ── skip_failure_mark: the spawn-skip path (issue #142, R-1) ────────────
+
+    #[test]
+    fn skip_failure_mark_restores_the_fetch_reason_for_a_skipped_unavailable_connector() {
+        // A dynamic manifest without binary_hint skips the spawn; the #131
+        // surface ("binary unavailable: no binary_hint configured") comes
+        // back via the recorded fetch outcome.
+        let results = vec![(
+            "connector-a".into(),
+            sh_core::EnsureResult::Unavailable("no binary_hint configured".into()),
+        )];
+        assert_eq!(
+            skip_failure_mark(&results, "connector-a"),
+            Some(StartFailure::BinaryUnavailable(
+                "no binary_hint configured".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn skip_failure_mark_is_none_when_the_connector_has_no_fetch_entry() {
+        // Custom socket-IPC connectors (and anything the fetch never saw)
+        // skip by design — no mark.
+        assert_eq!(skip_failure_mark(&[], "connector-a"), None);
+        let results = vec![(
+            "connector-b".into(),
+            sh_core::EnsureResult::Unavailable("download failed".into()),
+        )];
+        assert_eq!(skip_failure_mark(&results, "connector-a"), None);
+    }
+
+    #[test]
+    fn skip_failure_mark_is_none_when_the_fetch_produced_a_binary() {
+        use std::path::PathBuf;
+        let results = vec![
+            (
+                "connector-a".into(),
+                sh_core::EnsureResult::Downloaded(PathBuf::from("/bin/connector")),
+            ),
+            (
+                "connector-b".into(),
+                sh_core::EnsureResult::FallbackStale(PathBuf::from("/bin/old"), "old".into()),
+            ),
+            (
+                "connector-c".into(),
+                sh_core::EnsureResult::AlreadyCurrent(PathBuf::from("/bin/cached")),
+            ),
+        ];
+        assert_eq!(skip_failure_mark(&results, "connector-a"), None);
+        assert_eq!(skip_failure_mark(&results, "connector-b"), None);
+        assert_eq!(skip_failure_mark(&results, "connector-c"), None);
     }
 }
