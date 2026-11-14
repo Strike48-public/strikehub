@@ -15,6 +15,10 @@
 //!   `{"cmd":"wait","css":"...","timeout_ms":N}`, `{"cmd":"text","css":"..."}`,
 //!   `{"cmd":"targets"}`.
 //! - Responses are single-line JSON: `{"ok":true,...}` or `{"ok":false,"error":"..."}`.
+//! - takeSnapshot results are retained only in a bounded cache (one slot
+//!   per webview, at most 3 slots, least-recently-used evicted first; slots
+//!   of freed webviews are dropped — issue #139), so a long inspector
+//!   session cannot accumulate them.
 //!
 //! Only PUBLIC WKWebView APIs are used (`takeSnapshotWithConfiguration:`,
 //! `evaluateJavaScript:completionHandler:`, `title`, `URL`); the WKWebView is
@@ -68,6 +72,228 @@ pub fn maybe_start() {
     }
 }
 
+// ------------------------------------------------------------------
+// Bounded snapshot result cache (pure, platform-independent)
+// ------------------------------------------------------------------
+//
+// Issue #139: takeSnapshot results must not accumulate without bound over
+// a long inspector session. This module is the single retention point for
+// them: one slot per webview (a new snapshot replaces that webview's slot),
+// at most `MAX_ENTRIES` (3) slots across webviews, least-recently-used
+// evicted first, and slots of freed webviews dropped.
+//
+// It is deliberately pure (no AppKit, no threads) and lives OUTSIDE the
+// macOS-only `server` module below, so it compiles — and is unit-tested —
+// on every target. The CI gates run on Linux, where the macOS path never
+// compiles; the bound-keeping logic is what is testable there.
+#[allow(dead_code)] // The API surface is wider than the (macOS-only) usage;
+// the rest is exercised by the (every-target) unit tests below.
+mod snapshot_cache {
+    use std::collections::VecDeque;
+
+    /// Hard cap on the number of webview slots retained at once.
+    pub const MAX_ENTRIES: usize = 3;
+
+    /// One retained takeSnapshot result.
+    #[derive(Debug)]
+    struct Slot {
+        /// Opaque webview id (the WKWebView pointer on macOS).
+        key: u64,
+        /// The encoded result (PNG base64 on macOS).
+        data: String,
+    }
+
+    /// Bounded LRU store: one slot per webview, at most [`MAX_ENTRIES`].
+    #[derive(Debug)]
+    pub struct SnapshotCache {
+        /// Front = most recently used, back = evicted first.
+        slots: VecDeque<Slot>,
+    }
+
+    impl SnapshotCache {
+        pub const fn new() -> Self {
+            Self {
+                slots: VecDeque::new(),
+            }
+        }
+
+        /// Store a fresh result for `key`.
+        ///
+        /// Re-storing for a webview that already has a slot replaces that
+        /// slot in place (single slot per webview) and marks it most
+        /// recently used — no eviction. If inserting a *new* webview would
+        /// exceed [`MAX_ENTRIES`], the least-recently-used slot is evicted
+        /// and its data returned.
+        pub fn insert(&mut self, key: u64, data: String) -> Option<String> {
+            if let Some(pos) = self.slots.iter().position(|s| s.key == key) {
+                let mut slot = self.slots.remove(pos).unwrap();
+                slot.data = data;
+                self.slots.push_front(slot);
+                return None;
+            }
+            let evicted = if self.slots.len() >= MAX_ENTRIES {
+                self.slots.pop_back().map(|s| s.data)
+            } else {
+                None
+            };
+            self.slots.push_front(Slot { key, data });
+            evicted
+        }
+
+        /// The most recent stored result for `key`, if any. Reading a slot
+        /// refreshes its recency, so an in-use webview's snapshot is not
+        /// the first to be evicted.
+        pub fn get(&mut self, key: u64) -> Option<&String> {
+            let pos = self.slots.iter().position(|s| s.key == key)?;
+            let slot = self.slots.remove(pos).unwrap();
+            self.slots.push_front(slot);
+            self.slots.front().map(|s| &s.data)
+        }
+
+        /// Drop the slot for `key` (its webview was freed). Returns the
+        /// stored data if a slot existed.
+        pub fn remove(&mut self, key: u64) -> Option<String> {
+            let pos = self.slots.iter().position(|s| s.key == key)?;
+            Some(self.slots.remove(pos).unwrap().data)
+        }
+
+        /// Drop every slot whose webview is no longer live. Returns the
+        /// number of slots dropped.
+        pub fn retain_live(&mut self, is_live: impl Fn(u64) -> bool) -> usize {
+            let before = self.slots.len();
+            self.slots.retain(|s| is_live(s.key));
+            before - self.slots.len()
+        }
+
+        pub fn len(&self) -> usize {
+            self.slots.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.slots.is_empty()
+        }
+
+        /// Webview keys in MRU order (most recent first).
+        pub fn keys_mru(&self) -> impl Iterator<Item = u64> + '_ {
+            self.slots.iter().map(|s| s.key)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A cache holding `data-<key>` for each key, inserted in order
+        /// (so the last key is the MRU).
+        fn cache_with(keys: &[u64]) -> SnapshotCache {
+            let mut c = SnapshotCache::new();
+            for k in keys {
+                assert!(c.insert(*k, format!("data-{k}")).is_none());
+            }
+            c
+        }
+
+        #[test]
+        fn fresh_cache_is_empty() {
+            let c = SnapshotCache::new();
+            assert!(c.is_empty());
+            assert_eq!(c.len(), 0);
+        }
+
+        #[test]
+        fn cap_is_respected_and_lru_is_evicted_first() {
+            let mut c = SnapshotCache::new();
+            c.insert(1, "d1".into());
+            c.insert(2, "d2".into());
+            assert_eq!(c.len(), 2);
+            // Third entry still fits.
+            assert_eq!(c.insert(3, "d3".into()), None);
+            assert_eq!(c.len(), MAX_ENTRIES);
+            // Fourth entry overflows: the least-recently-used (1) goes.
+            assert_eq!(c.insert(4, "d4".into()), Some("d1".to_string()));
+            assert_eq!(c.len(), MAX_ENTRIES);
+            assert!(c.get(1).is_none());
+            assert_eq!(c.get(4), Some(&"d4".to_string()));
+            assert!(c.get(2).is_some());
+            assert!(c.get(3).is_some());
+            assert_eq!(c.keys_mru().count(), MAX_ENTRIES);
+        }
+
+        #[test]
+        fn reads_refresh_recency_and_change_eviction_order() {
+            let mut c = cache_with(&[1, 2, 3]); // MRU order: 3, 2, 1
+            // Reading 1 makes it the MRU, so 2 becomes the LRU.
+            assert_eq!(c.get(1), Some(&"data-1".to_string()));
+            let evicted = c.insert(4, "data-4".into());
+            assert_eq!(evicted, Some("data-2".to_string()));
+            assert!(c.get(1).is_some());
+            assert!(c.get(3).is_some());
+            assert!(c.get(4).is_some());
+            assert!(c.get(2).is_none());
+        }
+
+        #[test]
+        fn one_slot_per_webview_replaces_in_place() {
+            let mut c = SnapshotCache::new();
+            c.insert(7, "old".into());
+            c.insert(7, "new".into());
+            assert_eq!(c.len(), 1);
+            assert_eq!(c.get(7), Some(&"new".to_string()));
+            // Re-storing a known webview never evicts, even at the cap,
+            // and refreshes its recency.
+            let mut full = cache_with(&[1, 2, 3]);
+            assert_eq!(full.insert(2, "again".into()), None);
+            assert_eq!(full.len(), MAX_ENTRIES);
+            assert_eq!(full.get(2), Some(&"again".to_string()));
+            assert_eq!(
+                full.keys_mru().collect::<Vec<_>>(),
+                vec![2, 3, 1] // 2 re-stored => MRU
+            );
+        }
+
+        #[test]
+        fn remove_drops_a_freed_webview_slot() {
+            let mut c = cache_with(&[1, 2]);
+            assert_eq!(c.remove(1), Some("data-1".to_string()));
+            assert_eq!(c.len(), 1);
+            assert!(c.get(1).is_none());
+            // Removing an unknown key is a no-op.
+            assert_eq!(c.remove(99), None);
+            assert_eq!(c.len(), 1);
+        }
+
+        #[test]
+        fn retain_live_drops_only_freed_webviews() {
+            let mut c = cache_with(&[1, 2, 3]);
+            let dropped = c.retain_live(|k| k != 2);
+            assert_eq!(dropped, 1);
+            assert_eq!(c.len(), 2);
+            assert!(c.get(1).is_some());
+            assert!(c.get(2).is_none());
+            assert!(c.get(3).is_some());
+            // Nothing live to drop.
+            assert_eq!(c.retain_live(|_| true), 0);
+        }
+
+        #[test]
+        fn cap_holds_under_mixed_workload() {
+            let mut c = SnapshotCache::new();
+            // Interleave fresh inserts, re-stores, reads and frees; the
+            // cap must hold at every step.
+            for round in 0..50u64 {
+                c.insert(round % 7, format!("r{round}"));
+                if round % 3 == 0 {
+                    c.get(round % 7);
+                }
+                if round % 5 == 0 {
+                    c.remove((round + 1) % 7);
+                }
+                assert!(c.len() <= MAX_ENTRIES, "cap violated at round {round}");
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod server {
     use std::io::{BufRead, Write};
@@ -86,6 +312,12 @@ mod server {
     type Resp = Result<serde_json::Value, String>;
     type ObjCFn = dyn Fn(*mut AnyObject, *mut AnyObject);
     type ObjCBlock2 = Block<ObjCFn>;
+
+    /// Bounded retention for takeSnapshot results (issue #139): one slot
+    /// per webview, at most `MAX_ENTRIES` (3) slots, LRU; slots of freed
+    /// webviews are dropped on the next screenshot request.
+    static SNAPSHOT_CACHE: std::sync::Mutex<super::snapshot_cache::SnapshotCache> =
+        std::sync::Mutex::new(super::snapshot_cache::SnapshotCache::new());
 
     // ------------------------------------------------------------------
     // Socket server
@@ -178,11 +410,17 @@ mod server {
     fn cmd_screenshot() -> serde_json::Value {
         let (tx, rx) = mpsc::channel::<Resp>();
         Queue::main().exec_async(move || {
-            let Some(wv_ptr) = find_wkwebview() else {
+            // Issue #139: walk the hierarchy once; the same list reaps the
+            // cache entries of webviews that were freed since the last
+            // snapshot and yields this request's webview.
+            let live = live_wkwebviews();
+            reap_freed_webview_entries(&live);
+            let Some(wv_ptr) = live.into_iter().next() else {
                 let _ = tx.send(Err("no WKWebView found (window not up yet?)".into()));
                 return;
             };
             let wv: &AnyObject = unsafe { &*wv_ptr };
+            let wv_key = wv_ptr as usize as u64;
             let block: RcBlock<ObjCFn> =
                 RcBlock::new(move |image: *mut AnyObject, err: *mut AnyObject| {
                     if image.is_null() {
@@ -194,7 +432,32 @@ mod server {
                     }
                     match image_to_png_base64(image) {
                         Ok(b64) => {
-                            let _ = tx.send(Ok(serde_json::json!({ "ok": true, "png_b64": b64 })));
+                            // Issue #139: the result is retained in the
+                            // bounded per-webview cache and the requester is
+                            // served from that stored slot — a long session
+                            // holds at most MAX_ENTRIES snapshots.
+                            let png_b64 = {
+                                let mut cache =
+                                    SNAPSHOT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+                                let _evicted = cache.insert(wv_key, b64);
+                                cache.get(wv_key).map(String::clone)
+                            };
+                            match png_b64 {
+                                Some(png_b64) => {
+                                    let _ = tx.send(Ok(
+                                        serde_json::json!({ "ok": true, "png_b64": png_b64 }),
+                                    ));
+                                }
+                                // Practically unreachable (a concurrent
+                                // request would have to evict this slot
+                                // between insert and get); fail loudly
+                                // rather than drop the screenshot.
+                                None => {
+                                    let _ = tx.send(Err(
+                                        "internal: snapshot slot evicted before serve".into(),
+                                    ));
+                                }
+                            }
                         }
                         Err(e) => {
                             let _ = tx.send(Err(format!("png encode failed: {e}")));
@@ -452,28 +715,43 @@ mod server {
         }
     }
 
+    /// Drop snapshot-cache entries whose webview no longer exists (issue
+    /// #139). `live` is the current WKWebView list from the same hierarchy
+    /// walk that found this request's webview.
+    fn reap_freed_webview_entries(live: &[*const AnyObject]) {
+        let live_keys: std::collections::HashSet<u64> =
+            live.iter().map(|p| *p as usize as u64).collect();
+        let mut cache = SNAPSHOT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        cache.retain_live(|key| live_keys.contains(key));
+    }
+
     /// Depth-first search of the NSWindow/view hierarchy for a WKWebView.
     fn find_wkwebview() -> Option<*const AnyObject> {
+        live_wkwebviews().into_iter().next()
+    }
+
+    /// Every live WKWebView in the NSWindow/view hierarchy (DFS order); the
+    /// source of truth for reaping freed webviews' cache entries.
+    fn live_wkwebviews() -> Vec<*const AnyObject> {
         let nsapp: *const AnyObject =
             unsafe { msg_send![class!(NSApplication), sharedApplication] };
         if nsapp.is_null() {
-            return None;
+            return Vec::new();
         }
         let windows: *const AnyObject = unsafe { msg_send![nsapp, windows] };
         let count: usize = unsafe { msg_send![windows, count] };
+        let mut found = Vec::new();
         for i in 0..count {
             let window: *const AnyObject = unsafe { msg_send![windows, objectAtIndex: i] };
             let content: *const AnyObject = unsafe { msg_send![window, contentView] };
-            if let Some(w) = find_wkwebview_in_view(content) {
-                return Some(w);
-            }
+            collect_wkwebviews(content, &mut found);
         }
-        None
+        found
     }
 
-    fn find_wkwebview_in_view(view: *const AnyObject) -> Option<*const AnyObject> {
+    fn collect_wkwebviews(view: *const AnyObject, out: &mut Vec<*const AnyObject>) {
         if view.is_null() {
-            return None;
+            return;
         }
         unsafe {
             // Match WKWebView *or subclasses* (wry uses its own WryWebView subclass).
@@ -481,17 +759,14 @@ mod server {
                 class!(WKWebView) as *const objc2::runtime::AnyClass as *const AnyObject;
             let is_wk: bool = msg_send![view, isKindOfClass: wk_class];
             if is_wk {
-                return Some(view);
+                out.push(view);
             }
             let subviews: *const AnyObject = msg_send![view, subviews];
             let count: usize = msg_send![subviews, count];
             for i in 0..count {
                 let child: *const AnyObject = msg_send![subviews, objectAtIndex: i];
-                if let Some(w) = find_wkwebview_in_view(child) {
-                    return Some(w);
-                }
+                collect_wkwebviews(child, out);
             }
         }
-        None
     }
 }
