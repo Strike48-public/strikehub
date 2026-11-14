@@ -15,6 +15,13 @@
 //!   `{"cmd":"wait","css":"...","timeout_ms":N}`, `{"cmd":"text","css":"..."}`,
 //!   `{"cmd":"targets"}`.
 //! - Responses are single-line JSON: `{"ok":true,...}` or `{"ok":false,"error":"..."}`.
+//! - Each accepted connection is handled on its own thread, so one
+//!   in-flight (possibly slow) command cannot block the accept loop or any
+//!   other connection (issue #140).
+//! - Main-thread hops are bounded by `policy::MAIN_THREAD_HOP_TIMEOUT` (10s);
+//!   a command that misses the bound gets a
+//!   `{"ok":false,"error":"main-thread busy"}` response instead of a silent
+//!   stall.
 //!
 //! Only PUBLIC WKWebView APIs are used (`takeSnapshotWithConfiguration:`,
 //! `evaluateJavaScript:completionHandler:`, `title`, `URL`); the WKWebView is
@@ -52,6 +59,82 @@ pub fn maybe_start() {
     }
 }
 
+/// Platform-independent inspector decisions (issue #140).
+///
+/// The GCD-backed socket server below is macOS-only and cannot compile on
+/// Linux. These values decide how the server *behaves* — the main-thread hop
+/// bound and the shape of the busy response it emits when that bound is hit
+/// — so they live outside the `#[cfg(target_os = "macos")]` plumbing and are
+/// unit-testable on the Linux CI gate.
+pub mod policy {
+    use std::time::Duration;
+
+    /// How long a command waits for its hop onto the macOS main thread (GCD)
+    /// before giving up and reporting the main thread as busy.
+    ///
+    /// All inspector clients share the one serialized main-thread hop, so
+    /// with the old 60s bound a single slow `eval` could starve every other
+    /// client for a full minute (issue #140). 10s caps the worst case; the
+    /// timed-out command gets a structured "main-thread busy" response
+    /// instead of a silent stall.
+    pub const MAIN_THREAD_HOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long an accepted connection may sit idle before the server drops
+    /// it.
+    pub const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// Error string reported when a command's main-thread hop does not
+    /// complete within [`MAIN_THREAD_HOP_TIMEOUT`].
+    pub const MAIN_THREAD_BUSY_ERROR: &str = "main-thread busy";
+
+    /// The single-line JSON response returned when a main-thread hop times
+    /// out: `{"ok":false,"error":"main-thread busy"}`.
+    pub fn main_thread_busy_response() -> serde_json::Value {
+        serde_json::json!({ "ok": false, "error": MAIN_THREAD_BUSY_ERROR })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn hop_timeout_is_capped_at_10_seconds() {
+            // #140: the old 60s bound let one slow eval starve every other
+            // inspector client; the bound must be 10s (well under 60s).
+            assert_eq!(MAIN_THREAD_HOP_TIMEOUT, Duration::from_secs(10));
+            assert!(MAIN_THREAD_HOP_TIMEOUT < Duration::from_secs(60));
+        }
+
+        #[test]
+        fn conn_idle_timeout_is_5_minutes() {
+            assert_eq!(CONN_IDLE_TIMEOUT, Duration::from_secs(300));
+        }
+
+        #[test]
+        fn busy_response_is_ok_false_with_busy_error() {
+            let v = main_thread_busy_response();
+            assert_eq!(v.get("ok"), Some(&serde_json::json!(false)));
+            assert_eq!(
+                v.get("error"),
+                Some(&serde_json::json!(MAIN_THREAD_BUSY_ERROR))
+            );
+            // Exactly the two documented keys, nothing else.
+            assert_eq!(v.as_object().map(|o| o.len()), Some(2));
+        }
+
+        #[test]
+        fn busy_response_stays_single_line_json() {
+            // Inspector responses are newline-delimited; the busy response
+            // must fit on one line so framing stays intact.
+            let s = serde_json::to_string(&main_thread_busy_response()).unwrap();
+            assert!(!s.contains('\n'));
+            let reparsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+            assert_eq!(reparsed.get("ok"), Some(&serde_json::json!(false)));
+            assert_eq!(reparsed.get("error"), Some(&serde_json::json!("main-thread busy")));
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod server {
     use std::io::{BufRead, Write};
@@ -61,6 +144,7 @@ mod server {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use super::policy;
     use base64::Engine;
     use block2::{Block, RcBlock};
     use dispatch::Queue;
@@ -88,11 +172,19 @@ mod server {
         std::fs::set_permissions(&path_file, std::fs::Permissions::from_mode(0o600))?;
 
         std::thread::Builder::new()
-            .name("strikehub-inspect".into())
+            .name("insp-accept".into())
             .spawn(move || {
                 for stream in listener.incoming() {
                     if let Ok(stream) = stream {
-                        handle_conn(stream);
+                        // One thread per accepted connection (issue #140):
+                        // the acceptor must never block on an in-flight
+                        // command — a slow `eval` on one client used to hold
+                        // the sequential accept loop and starve every
+                        // subsequent client.
+                        std::thread::Builder::new()
+                            .name("insp-conn".into())
+                            .spawn(move || handle_conn(stream))
+                            .ok();
                     }
                 }
             })?;
@@ -101,7 +193,7 @@ mod server {
     }
 
     fn handle_conn(stream: UnixStream) {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
+        let _ = stream.set_read_timeout(Some(policy::CONN_IDLE_TIMEOUT));
         let reader = match stream.try_clone() {
             Ok(r) => r,
             Err(_) => return,
@@ -325,13 +417,12 @@ mod server {
     // ------------------------------------------------------------------
 
     fn recv_or_timeout(rx: mpsc::Receiver<Resp>) -> serde_json::Value {
-        match rx.recv_timeout(Duration::from_secs(60)) {
+        match rx.recv_timeout(policy::MAIN_THREAD_HOP_TIMEOUT) {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
-            Err(_) => serde_json::json!({
-                "ok": false,
-                "error": "internal: main-thread hop timed out (60s)"
-            }),
+            // #140: bounded hop. The main thread is busy with something else
+            // (or a previous slow command); report it instead of stalling.
+            Err(_) => policy::main_thread_busy_response(),
         }
     }
 
