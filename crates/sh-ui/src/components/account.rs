@@ -79,6 +79,26 @@ pub fn AccountView(
                     onclick: move |_| on_sign_out.call(()),
                     "Sign Out"
                 }
+
+                // One-click access to the log directory (issue #62): StrikeHub's
+                // own strikehub.log plus each managed connector's
+                // connector-<id>.log live here. Desktop-only — in server mode
+                // `open::that` would run on the server (same gate as the
+                // preflight screen's logs button).
+                if cfg!(feature = "desktop") {
+                    if let Some(dir) = sh_core::log_dir() {
+                        button {
+                            class: "account-sign-out-btn account-open-logs-btn",
+                            title: "{dir.display()}",
+                            onclick: move |_| {
+                                if let Err(e) = open::that(&dir) {
+                                    tracing::warn!("could not open logs folder {}: {e}", dir.display());
+                                }
+                            },
+                            "Open logs folder"
+                        }
+                    }
+                }
             }
         }
     }
