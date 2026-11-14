@@ -1,5 +1,9 @@
 pub mod app;
 pub mod components;
+// Release-gate (issue #138): the PLG #376 debug inspector is compiled only
+// with the `inspector` cargo feature, which is default OFF — release builds
+// ship without the inspector code entirely.
+#[cfg(feature = "inspector")]
 pub mod inspector;
 pub mod theme;
 

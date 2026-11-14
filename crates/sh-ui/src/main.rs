@@ -166,7 +166,11 @@ fn main() {
 
     // PLG #376: opt-in local inspector (STRIKEHUB_INSPECTOR=1, macOS only,
     // default OFF, zero behavior change otherwise). Binds a unix socket in
-    // $TMPDIR and prints the path; see src/inspector.rs.
+    // $TMPDIR and prints the path; see src/inspector.rs. Release-gated behind
+    // the `inspector` cargo feature (issue #138): release builds are compiled
+    // without it, so the code is not shipped at all; the runtime env-var check
+    // inside `maybe_start` still applies on top of the feature.
+    #[cfg(feature = "inspector")]
     sh_ui::inspector::maybe_start();
 
     dioxus::LaunchBuilder::desktop()
