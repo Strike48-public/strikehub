@@ -130,7 +130,10 @@ pub mod policy {
             assert!(!s.contains('\n'));
             let reparsed: serde_json::Value = serde_json::from_str(&s).unwrap();
             assert_eq!(reparsed.get("ok"), Some(&serde_json::json!(false)));
-            assert_eq!(reparsed.get("error"), Some(&serde_json::json!("main-thread busy")));
+            assert_eq!(
+                reparsed.get("error"),
+                Some(&serde_json::json!("main-thread busy"))
+            );
         }
     }
 }
