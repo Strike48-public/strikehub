@@ -15,8 +15,8 @@
 #
 # Sharing the list with the team (it must never be committed here):
 #   just pii-pull   fetch the shared list into .pii-names.local (developers).
-#                   Set PII_NAMES_REPO to the PRIVATE source repo first, e.g.
-#                   `PII_NAMES_REPO=Strike48/<repo> just pii-pull`.
+#                   It decrypts secrets/pii/names.sops.yaml from
+#                   Strike48/dev-secrets, so your age key must be a recipient.
 #   just pii-sync   push .pii-names.local to the $PII_NAMES CI secret
 #                   (maintainers) - see .github/workflows/pii-check.yml.
 # Secrets are write-only, so re-run pii-sync after every edit to the list.

@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run scanner regression tests
         run: bash scripts/test-check-pii.sh
+      - name: Run list-pull regression tests (stub gh and sops)
+        run: bash scripts/test-get-pii-names.sh
 
   check-pii:
     name: Scan for customer names
